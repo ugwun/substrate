@@ -1,0 +1,16 @@
+[package]
+name = "mind-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mind-core = { path = "../mind-core" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
