@@ -10,6 +10,7 @@ use mind_core::{
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{tcp::OwnedWriteHalf, TcpListener, TcpStream},
@@ -43,6 +44,7 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let engine_task = tokio::spawn(engine.clone().run(shutdown_rx.clone()));
+    let telemetry_task = tokio::spawn(sample_process_cpu(engine.clone(), shutdown_rx.clone()));
     let mcp_cancellation = CancellationToken::new();
     let (mcp_exit_tx, mut mcp_exit_rx) = mpsc::channel(1);
     let mcp_task = tokio::spawn({
@@ -108,18 +110,48 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     mcp_cancellation.cancel();
     while connections.join_next().await.is_some() {}
     let engine_result = engine_task.await.context("engine task failed");
+    let telemetry_result = telemetry_task.await.context("telemetry task failed");
     let mcp_result = match mcp_task.await {
         Ok(result) => result.context("MCP HTTP server failed during shutdown"),
         Err(error) => Err(anyhow::Error::new(error).context("MCP HTTP task failed")),
     };
     remove_own_metadata(&paths, metadata.pid);
     engine_result?;
+    telemetry_result?;
     mcp_result?;
     if let Some(detail) = unexpected_mcp_exit {
         anyhow::bail!("MCP HTTP server exited unexpectedly: {detail}");
     }
     info!("mind daemon stopped");
     Ok(())
+}
+
+async fn sample_process_cpu(engine: Arc<MindEngine>, mut shutdown: watch::Receiver<bool>) {
+    let pid = Pid::from_u32(std::process::id());
+    let refresh = ProcessRefreshKind::nothing().with_cpu();
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    refresh,
+                );
+                engine.set_cpu_usage_percent(system.process(pid).map(|process| process.cpu_usage()));
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) -> bool {

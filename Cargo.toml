@@ -5,6 +5,7 @@ members = [
     "crates/mind-mcp",
     "crates/mind-daemon",
     "crates/mind-cli",
+    "crates/mind-tui",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ rmcp = { version = "=3.1.0", features = ["server", "macros", "transport-io", "tr
 schemars = { version = "1", features = ["chrono04"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full", "test-util"] }

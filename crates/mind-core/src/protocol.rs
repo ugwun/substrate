@@ -36,6 +36,8 @@ pub struct StatusSnapshot {
     pub uptime_ms: u64,
     pub tick: u64,
     pub tick_rate_hz: u32,
+    #[serde(default)]
+    pub cpu_usage_percent: Option<f32>,
     pub connected_clients: u32,
     pub mcp_url: String,
     pub last_diagnostic: Option<DiagnosticPulseResult>,
@@ -208,6 +210,7 @@ mod tests {
                 uptime_ms: 5,
                 tick: 2,
                 tick_rate_hz: 20,
+                cpu_usage_percent: Some(1.5),
                 connected_clients: 1,
                 mcp_url: "http://127.0.0.1:7777/mcp".into(),
                 last_diagnostic: None,
@@ -217,5 +220,25 @@ mod tests {
         let wire = notification(method::STATUS_CHANGED, &params);
         let decoded: StatusNotification = serde_json::from_value(wire["params"].clone()).unwrap();
         assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn status_from_older_protocol_one_daemon_defaults_cpu_to_unavailable() {
+        let value = serde_json::json!({
+            "protocol_version": 1,
+            "daemon_version": "0.1.0",
+            "pid": 1,
+            "health": "ready",
+            "started_at": Utc::now(),
+            "uptime_ms": 5,
+            "tick": 2,
+            "tick_rate_hz": 20,
+            "connected_clients": 1,
+            "mcp_url": "http://127.0.0.1:7777/mcp",
+            "last_diagnostic": null,
+            "recent_events": []
+        });
+        let status: StatusSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(status.cpu_usage_percent, None);
     }
 }

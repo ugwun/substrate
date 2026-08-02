@@ -16,6 +16,7 @@ use tokio::{sync::watch, time::MissedTickBehavior};
 pub struct MindEngine {
     tick_rate_hz: u32,
     tick: AtomicU64,
+    cpu_usage_bits: AtomicU32,
     clients: AtomicU32,
     shutting_down: AtomicBool,
     started_at: DateTime<Utc>,
@@ -46,6 +47,7 @@ impl MindEngine {
         let engine = Arc::new(Self {
             tick_rate_hz,
             tick: AtomicU64::new(0),
+            cpu_usage_bits: AtomicU32::new(f32::NAN.to_bits()),
             clients: AtomicU32::new(0),
             shutting_down: AtomicBool::new(false),
             started_at: Utc::now(),
@@ -97,6 +99,7 @@ impl MindEngine {
             uptime_ms: self.started_instant.elapsed().as_millis() as u64,
             tick: self.tick.load(Ordering::Relaxed),
             tick_rate_hz: self.tick_rate_hz,
+            cpu_usage_percent: self.cpu_usage_percent(),
             connected_clients: self.clients.load(Ordering::Relaxed),
             mcp_url: format!("http://{}/mcp", self.mcp_address),
             last_diagnostic: history.last_diagnostic.clone(),
@@ -115,6 +118,17 @@ impl MindEngine {
 
     pub fn client_connected(&self) {
         self.clients.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_cpu_usage_percent(&self, value: Option<f32>) {
+        let value = value.filter(|value| value.is_finite() && *value >= 0.0);
+        self.cpu_usage_bits
+            .store(value.unwrap_or(f32::NAN).to_bits(), Ordering::Relaxed);
+    }
+
+    fn cpu_usage_percent(&self) -> Option<f32> {
+        let value = f32::from_bits(self.cpu_usage_bits.load(Ordering::Relaxed));
+        value.is_finite().then_some(value)
     }
 
     pub fn client_disconnected(&self) {
@@ -235,5 +249,15 @@ mod tests {
             .filter(|event| event.kind == EngineEventKind::ShutdownRequested)
             .count();
         assert_eq!(shutdown_events, 1);
+    }
+
+    #[test]
+    fn cpu_telemetry_starts_unavailable_and_rejects_invalid_samples() {
+        let engine = MindEngine::new(20);
+        assert_eq!(engine.status().cpu_usage_percent, None);
+        engine.set_cpu_usage_percent(Some(12.5));
+        assert_eq!(engine.status().cpu_usage_percent, Some(12.5));
+        engine.set_cpu_usage_percent(Some(f32::INFINITY));
+        assert_eq!(engine.status().cpu_usage_percent, None);
     }
 }

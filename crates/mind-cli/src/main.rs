@@ -208,12 +208,15 @@ fn print_status(status: &StatusSnapshot, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(status)?);
     } else {
         println!(
-            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz clients={} diagnostics={} mcp={}",
+            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz cpu={} clients={} diagnostics={} mcp={}",
             status.health,
             status.pid,
             status.uptime_ms,
             status.tick,
             status.tick_rate_hz,
+            status
+                .cpu_usage_percent
+                .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}%")),
             status.connected_clients,
             status
                 .last_diagnostic

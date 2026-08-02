@@ -53,6 +53,17 @@ async fn serves_status_subscription_and_shutdown() {
     let update = client.next_status().await.unwrap();
     assert_eq!(update.subscription_id, subscription_id);
     assert!(update.status.tick >= initial.tick);
+    let cpu_status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let update = client.next_status().await.unwrap();
+            if update.status.cpu_usage_percent.is_some() {
+                break update.status;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(cpu_status.cpu_usage_percent.unwrap() >= 0.0);
     assert!(client.shutdown().await.unwrap());
     drop(client);
 

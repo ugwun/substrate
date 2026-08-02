@@ -11,6 +11,7 @@ clap.workspace = true
 mind-core = { path = "../mind-core" }
 mind-mcp = { path = "../mind-mcp" }
 serde_json.workspace = true
+sysinfo.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

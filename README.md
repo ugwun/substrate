@@ -2,7 +2,7 @@
 
 Substrate is an ambient sci-fi terminal RPG about an awakening robotic intelligence. Its simulation runs in a headless daemon and exposes a local, versioned IPC interface to terminal and AI clients.
 
-This repository currently implements the Phase 1.2 foundation: the tick engine, daemon lifecycle, JSON-RPC IPC, command-line status client, and native MCP access. Game mechanics and the Ratatui interface follow in later phases.
+This repository currently implements the Phase 1.3 foundation: the tick engine, daemon lifecycle, JSON-RPC IPC, native MCP access, and an attachable Ratatui dashboard. Circuit game mechanics follow in Phase 1.4.
 
 ## Prerequisites
 
@@ -30,6 +30,7 @@ cargo build --workspace
 ./target/debug/mind-cli daemon start
 ./target/debug/mind-cli daemon status
 ./target/debug/mind-cli daemon status --watch
+./target/debug/mind-tui
 ./target/debug/mind-cli daemon stop
 ```
 
@@ -42,6 +43,22 @@ Use `--foreground` when debugging:
 The IPC listener defaults to `127.0.0.1:7776`. The MCP Streamable HTTP endpoint defaults to `http://127.0.0.1:7777/mcp`. Override them with `--addr` / `SUBSTRATE_ADDR` and `--mcp-addr` / `SUBSTRATE_MCP_ADDR`. Set `SUBSTRATE_CONFIG`, `SUBSTRATE_DATA_DIR`, and `SUBSTRATE_DAEMON_BIN` to override the platform configuration file, local data directory, and managed daemon executable.
 
 Both listeners only accept loopback addresses. Simulation state, diagnostic history, and engine events are intentionally ephemeral in this phase; configuration and daemon runtime metadata are the only persisted state.
+
+## Terminal dashboard
+
+`mind-tui` attaches to an already-running daemon and never starts or stops it. If the daemon is absent or disconnects, the dashboard retains the last snapshot as stale and retries every second. Quitting restores the original terminal and leaves the daemon running.
+
+Controls:
+
+- `q`, `Esc`, or Ctrl-C: detach
+- `d`: trigger a diagnostic pulse
+- `r`: reconnect immediately
+- arrow keys or `j`/`k`: scroll events
+- Page Up/Page Down and Home/End: navigate event history
+- `f`: toggle follow mode
+- `?`: show help
+
+Unicode and color are enabled by default. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color. The power panel intentionally remains offline until Phase 1.4 provides a real daemon-owned circuit power model.
 
 ## MCP access
 
@@ -76,5 +93,6 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-daemon`: authoritative simulation loop and local TCP JSON-RPC server
 - `mind-cli`: managed daemon lifecycle and status inspection
 - `mind-mcp`: shared MCP tools, embedded HTTP service, and stdio bridge
+- `mind-tui`: attachable Ratatui telemetry and diagnostic dashboard
 
 See `kickoff.md` for the product direction and `AGENTS.md` for repository conventions.
