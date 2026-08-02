@@ -13,9 +13,10 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    sync::{watch, Mutex},
+    sync::{mpsc, watch, Mutex},
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -27,17 +28,38 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     let address = listener
         .local_addr()
         .context("failed to inspect IPC listener")?;
-    let engine = MindEngine::new(config.tick_rate_hz);
+    let mcp_listener = TcpListener::bind(config.mcp_address)
+        .await
+        .with_context(|| format!("failed to bind MCP listener at {}", config.mcp_address))?;
+    let mcp_address = mcp_listener
+        .local_addr()
+        .context("failed to inspect MCP listener")?;
+    let engine = MindEngine::with_mcp_address(config.tick_rate_hz, mcp_address);
     let started_at = engine.status().started_at;
-    let metadata = RuntimeMetadata::current(address, started_at);
+    let metadata = RuntimeMetadata::current(address, mcp_address, started_at);
     metadata
         .write_atomic(&paths.runtime_file)
         .with_context(|| format!("failed to write {}", paths.runtime_file.display()))?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let engine_task = tokio::spawn(engine.clone().run(shutdown_rx.clone()));
+    let mcp_cancellation = CancellationToken::new();
+    let (mcp_exit_tx, mut mcp_exit_rx) = mpsc::channel(1);
+    let mcp_task = tokio::spawn({
+        let engine = engine.clone();
+        let cancellation = mcp_cancellation.clone();
+        async move {
+            let result = mind_mcp::serve_http(mcp_listener, engine, cancellation).await;
+            let message = result
+                .as_ref()
+                .map_or_else(|error| error.to_string(), |()| "server stopped".to_owned());
+            let _ = mcp_exit_tx.send(message).await;
+            result
+        }
+    });
     let mut connections = JoinSet::new();
-    info!(%address, pid = std::process::id(), "mind daemon ready");
+    let mut unexpected_mcp_exit = None;
+    info!(%address, %mcp_address, pid = std::process::id(), "mind daemon ready");
 
     loop {
         tokio::select! {
@@ -72,13 +94,30 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
                     break;
                 }
             }
+            mcp_exit = mcp_exit_rx.recv() => {
+                engine.begin_shutdown();
+                let _ = shutdown_tx.send(true);
+                let detail = mcp_exit.unwrap_or_else(|| "MCP task ended without a result".to_owned());
+                unexpected_mcp_exit = Some(detail);
+                break;
+            }
         }
     }
 
     let _ = shutdown_tx.send(true);
+    mcp_cancellation.cancel();
     while connections.join_next().await.is_some() {}
-    engine_task.await.context("engine task failed")?;
+    let engine_result = engine_task.await.context("engine task failed");
+    let mcp_result = match mcp_task.await {
+        Ok(result) => result.context("MCP HTTP server failed during shutdown"),
+        Err(error) => Err(anyhow::Error::new(error).context("MCP HTTP task failed")),
+    };
     remove_own_metadata(&paths, metadata.pid);
+    engine_result?;
+    mcp_result?;
+    if let Some(detail) = unexpected_mcp_exit {
+        anyhow::bail!("MCP HTTP server exited unexpectedly: {detail}");
+    }
     info!("mind daemon stopped");
     Ok(())
 }
@@ -200,6 +239,10 @@ async fn dispatch_frame(
     let (response, shutdown) = match request.method.as_str() {
         method::PING => (success(request.id, protocol::PingResult::current()), false),
         method::GET_STATUS => (success(request.id, engine.status()), false),
+        method::TRIGGER_DIAGNOSTIC_PULSE => (
+            success(request.id, engine.trigger_diagnostic_pulse()),
+            false,
+        ),
         method::SUBSCRIBE_STATUS => {
             let id = subscription.get_or_insert_with(Uuid::new_v4);
             (

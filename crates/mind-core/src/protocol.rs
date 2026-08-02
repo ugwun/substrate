@@ -1,5 +1,6 @@
 use crate::PROTOCOL_VERSION;
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -14,17 +15,18 @@ pub mod method {
     pub const SUBSCRIBE_STATUS: &str = "mind.subscribe_status";
     pub const UNSUBSCRIBE_STATUS: &str = "mind.unsubscribe_status";
     pub const SHUTDOWN: &str = "daemon.shutdown";
+    pub const TRIGGER_DIAGNOSTIC_PULSE: &str = "mind.trigger_diagnostic_pulse";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthState {
     Ready,
     ShuttingDown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct StatusSnapshot {
     pub protocol_version: u32,
     pub daemon_version: String,
@@ -35,6 +37,37 @@ pub struct StatusSnapshot {
     pub tick: u64,
     pub tick_rate_hz: u32,
     pub connected_clients: u32,
+    pub mcp_url: String,
+    pub last_diagnostic: Option<DiagnosticPulseResult>,
+    pub recent_events: Vec<EngineEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineEventKind {
+    DaemonStarted,
+    DiagnosticPulse,
+    ShutdownRequested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct EngineEvent {
+    pub event_id: u64,
+    pub occurred_at: DateTime<Utc>,
+    pub tick: u64,
+    pub kind: EngineEventKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DiagnosticPulseResult {
+    pub pulse_id: u64,
+    pub emitted_at: DateTime<Utc>,
+    pub tick: u64,
+    pub health: HealthState,
+    pub components_checked: u32,
+    pub paths_traversed: u32,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +209,9 @@ mod tests {
                 tick: 2,
                 tick_rate_hz: 20,
                 connected_clients: 1,
+                mcp_url: "http://127.0.0.1:7777/mcp".into(),
+                last_diagnostic: None,
+                recent_events: Vec::new(),
             },
         };
         let wire = notification(method::STATUS_CHANGED, &params);

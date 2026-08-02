@@ -8,11 +8,13 @@ use std::{
 use thiserror::Error;
 
 pub const DEFAULT_IPC_PORT: u16 = 7776;
+pub const DEFAULT_MCP_PORT: u16 = 7777;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub address: SocketAddr,
+    pub mcp_address: SocketAddr,
     pub tick_rate_hz: u32,
     pub status_publish_interval_ms: u64,
 }
@@ -21,6 +23,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_IPC_PORT),
+            mcp_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_MCP_PORT),
             tick_rate_hz: 20,
             status_publish_interval_ms: 1_000,
         }
@@ -30,7 +33,19 @@ impl Default for Config {
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !self.address.ip().is_loopback() {
-            return Err(ConfigError::NonLoopback(self.address));
+            return Err(ConfigError::NonLoopback {
+                name: "IPC",
+                address: self.address,
+            });
+        }
+        if !self.mcp_address.ip().is_loopback() {
+            return Err(ConfigError::NonLoopback {
+                name: "MCP",
+                address: self.mcp_address,
+            });
+        }
+        if self.address == self.mcp_address && self.address.port() != 0 {
+            return Err(ConfigError::AddressConflict(self.address));
         }
         if !(1..=1_000).contains(&self.tick_rate_hz) {
             return Err(ConfigError::InvalidTickRate(self.tick_rate_hz));
@@ -87,6 +102,7 @@ impl AppPaths {
 pub struct ConfigOverrides {
     pub config_path: Option<PathBuf>,
     pub address: Option<SocketAddr>,
+    pub mcp_address: Option<SocketAddr>,
 }
 
 pub fn load_or_create(overrides: ConfigOverrides) -> Result<(Config, AppPaths), ConfigError> {
@@ -118,6 +134,11 @@ pub fn load_or_create(overrides: ConfigOverrides) -> Result<(Config, AppPaths), 
             .parse()
             .map_err(|_| ConfigError::InvalidEnvironment("SUBSTRATE_TICK_RATE_HZ"))?;
     }
+    if let Ok(address) = env::var("SUBSTRATE_MCP_ADDR") {
+        config.mcp_address = address
+            .parse()
+            .map_err(|_| ConfigError::InvalidMcpAddress(address))?;
+    }
     if let Ok(interval) = env::var("SUBSTRATE_STATUS_INTERVAL_MS") {
         config.status_publish_interval_ms = interval
             .parse()
@@ -125,6 +146,9 @@ pub fn load_or_create(overrides: ConfigOverrides) -> Result<(Config, AppPaths), 
     }
     if let Some(address) = overrides.address {
         config.address = address;
+    }
+    if let Some(address) = overrides.mcp_address {
+        config.mcp_address = address;
     }
     config.validate()?;
     Ok((config, paths))
@@ -142,10 +166,17 @@ fn write_config(path: &Path, config: &Config) -> Result<(), ConfigError> {
 pub enum ConfigError {
     #[error("could not determine a platform configuration directory")]
     NoHomeDirectory,
-    #[error("configuration address must be loopback, got {0}")]
-    NonLoopback(SocketAddr),
+    #[error("{name} address must be loopback, got {address}")]
+    NonLoopback {
+        name: &'static str,
+        address: SocketAddr,
+    },
+    #[error("IPC and MCP must use different ports, both were configured as {0}")]
+    AddressConflict(SocketAddr),
     #[error("invalid socket address in SUBSTRATE_ADDR: {0}")]
     InvalidAddress(String),
+    #[error("invalid socket address in SUBSTRATE_MCP_ADDR: {0}")]
+    InvalidMcpAddress(String),
     #[error("invalid value for {0}")]
     InvalidEnvironment(&'static str),
     #[error("tick_rate_hz must be between 1 and 1000, got {0}")]
@@ -175,7 +206,19 @@ mod tests {
         };
         assert!(matches!(
             config.validate(),
-            Err(ConfigError::NonLoopback(_))
+            Err(ConfigError::NonLoopback { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_public_mcp_bind_addresses() {
+        let config = Config {
+            mcp_address: "0.0.0.0:7777".parse().unwrap(),
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::NonLoopback { name: "MCP", .. })
         ));
     }
 
@@ -185,5 +228,17 @@ mod tests {
         let encoded = toml::to_string(&config).unwrap();
         let decoded: Config = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn rejects_shared_nonzero_port() {
+        let config = Config {
+            mcp_address: Config::default().address,
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::AddressConflict(_))
+        ));
     }
 }

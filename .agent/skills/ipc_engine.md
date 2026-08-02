@@ -8,7 +8,7 @@ Use this guide when changing local client/server communication.
 - UTF-8 newline-delimited JSON-RPC 2.0
 - Maximum frame size: 1 MiB
 - Protocol version: 1, verified through `system.ping`
-- Methods: `system.ping`, `mind.get_status`, `mind.subscribe_status`, `mind.unsubscribe_status`, `daemon.shutdown`
+- Methods: `system.ping`, `mind.get_status`, `mind.subscribe_status`, `mind.unsubscribe_status`, `mind.trigger_diagnostic_pulse`, `daemon.shutdown`
 - Notification: `mind.status_changed`
 
 Requests and responses use standard JSON-RPC error codes for parse errors, invalid requests, unknown methods, and invalid parameters. A malformed request must not crash or stop the daemon. Subscription state belongs to the connection and disappears on disconnect. Status updates are full snapshots; do not introduce deltas without a protocol-version decision.

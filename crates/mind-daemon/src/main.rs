@@ -11,6 +11,8 @@ struct Args {
     config: Option<PathBuf>,
     #[arg(long, env = "SUBSTRATE_ADDR")]
     addr: Option<SocketAddr>,
+    #[arg(long, env = "SUBSTRATE_MCP_ADDR")]
+    mcp_addr: Option<SocketAddr>,
     #[arg(long, hide = true)]
     background: bool,
 }
@@ -21,6 +23,7 @@ async fn main() -> Result<()> {
     let (config, paths) = load_or_create(ConfigOverrides {
         config_path: args.config,
         address: args.addr,
+        mcp_address: args.mcp_addr,
     })?;
     init_logging(args.background, &paths)?;
     mind_daemon::run(config, paths).await

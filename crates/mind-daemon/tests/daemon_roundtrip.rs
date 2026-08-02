@@ -22,6 +22,7 @@ async fn serves_status_subscription_and_shutdown() {
     paths.ensure_directories().unwrap();
     let config = Config {
         address: "127.0.0.1:0".parse().unwrap(),
+        mcp_address: "127.0.0.1:0".parse().unwrap(),
         tick_rate_hz: 100,
         status_publish_interval_ms: 50,
     };
@@ -40,9 +41,15 @@ async fn serves_status_subscription_and_shutdown() {
     .unwrap();
 
     let mut client = IpcClient::connect(metadata.address).await.unwrap();
+    assert!(tokio::net::TcpStream::connect(metadata.mcp_address)
+        .await
+        .is_ok());
     let initial = client.status().await.unwrap();
     assert_eq!(initial.tick_rate_hz, 100);
     let subscription_id = client.subscribe_status().await.unwrap();
+    let pulse = client.trigger_diagnostic_pulse().await.unwrap();
+    assert_eq!(pulse.pulse_id, 1);
+    assert_eq!(client.status().await.unwrap().last_diagnostic, Some(pulse));
     let update = client.next_status().await.unwrap();
     assert_eq!(update.subscription_id, subscription_id);
     assert!(update.status.tick >= initial.tick);
@@ -64,4 +71,21 @@ async fn refuses_non_loopback_configuration_before_run() {
         ..Config::default()
     };
     assert!(config.validate().is_err());
+}
+
+#[tokio::test]
+async fn mcp_port_conflict_aborts_before_runtime_metadata() {
+    let temp = TempDir::new().unwrap();
+    let paths = paths(&temp);
+    paths.ensure_directories().unwrap();
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = Config {
+        address: "127.0.0.1:0".parse().unwrap(),
+        mcp_address: occupied.local_addr().unwrap(),
+        ..Config::default()
+    };
+    let runtime_file = paths.runtime_file.clone();
+    let error = mind_daemon::run(config, paths).await.unwrap_err();
+    assert!(error.to_string().contains("failed to bind MCP listener"));
+    assert!(RuntimeMetadata::read(&runtime_file).unwrap().is_none());
 }

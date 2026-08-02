@@ -23,6 +23,8 @@ struct Cli {
     config: Option<PathBuf>,
     #[arg(long, env = "SUBSTRATE_ADDR", global = true)]
     addr: Option<SocketAddr>,
+    #[arg(long, env = "SUBSTRATE_MCP_ADDR", global = true)]
+    mcp_addr: Option<SocketAddr>,
     #[command(subcommand)]
     command: TopLevel,
 }
@@ -66,6 +68,7 @@ async fn run() -> Result<()> {
     let (config, paths) = load_or_create(ConfigOverrides {
         config_path: cli.config,
         address: cli.addr,
+        mcp_address: cli.mcp_addr,
     })?;
     match cli.command {
         TopLevel::Daemon(args) => match args.command {
@@ -91,7 +94,9 @@ async fn start(config: &Config, paths: &AppPaths, foreground: bool) -> Result<()
         .arg("--config")
         .arg(&paths.config_file)
         .arg("--addr")
-        .arg(config.address.to_string());
+        .arg(config.address.to_string())
+        .arg("--mcp-addr")
+        .arg(config.mcp_address.to_string());
 
     if foreground {
         let status = command
@@ -130,8 +135,8 @@ async fn start(config: &Config, paths: &AppPaths, foreground: bool) -> Result<()
         {
             let status = client.status().await?;
             println!(
-                "mind daemon started (pid {}, {})",
-                status.pid, config.address
+                "mind daemon started (pid {}, IPC {}, MCP {})",
+                status.pid, config.address, status.mcp_url
             );
             return Ok(());
         }
@@ -203,13 +208,18 @@ fn print_status(status: &StatusSnapshot, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(status)?);
     } else {
         println!(
-            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz clients={}",
+            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz clients={} diagnostics={} mcp={}",
             status.health,
             status.pid,
             status.uptime_ms,
             status.tick,
             status.tick_rate_hz,
-            status.connected_clients
+            status.connected_clients,
+            status
+                .last_diagnostic
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |pulse| pulse.pulse_id.to_string()),
+            status.mcp_url
         );
     }
     Ok(())

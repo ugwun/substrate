@@ -4,19 +4,30 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io, net::SocketAddr, path::Path};
 use thiserror::Error;
 
+fn default_mcp_address() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 7777))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeMetadata {
     pub pid: u32,
     pub address: SocketAddr,
+    #[serde(default = "default_mcp_address")]
+    pub mcp_address: SocketAddr,
     pub protocol_version: u32,
     pub started_at: DateTime<Utc>,
 }
 
 impl RuntimeMetadata {
-    pub fn current(address: SocketAddr, started_at: DateTime<Utc>) -> Self {
+    pub fn current(
+        address: SocketAddr,
+        mcp_address: SocketAddr,
+        started_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             pid: std::process::id(),
             address,
+            mcp_address,
             protocol_version: PROTOCOL_VERSION,
             started_at,
         }

@@ -1,7 +1,8 @@
 use crate::{
     protocol::{
-        self, decode_result, method, PingResult, ProtocolError, RpcIncoming, StatusNotification,
-        StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, decode_result, method, DiagnosticPulseResult, PingResult, ProtocolError, RpcIncoming,
+        StatusNotification, StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION,
+        MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
 };
@@ -60,6 +61,10 @@ impl IpcClient {
 
     pub async fn shutdown(&mut self) -> Result<bool, IpcError> {
         self.call(method::SHUTDOWN, None).await
+    }
+
+    pub async fn trigger_diagnostic_pulse(&mut self) -> Result<DiagnosticPulseResult, IpcError> {
+        self.call(method::TRIGGER_DIAGNOSTIC_PULSE, None).await
     }
 
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {
