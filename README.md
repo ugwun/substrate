@@ -113,4 +113,5 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-mcp`: shared MCP tools, embedded HTTP service, and stdio bridge
 - `mind-tui`: attachable Ratatui telemetry and diagnostic dashboard
 
-See `kickoff.md` for the product direction and `AGENTS.md` for repository conventions.
+See [`GAME_PLAN.md`](GAME_PLAN.md) for the current game vision and future roadmap.
+[`AGENTS.md`](AGENTS.md) defines repository conventions.

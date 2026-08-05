@@ -26,7 +26,7 @@ Build all binaries with `cargo build --workspace` before exercising `mind-cli da
 
 Keep daemon logic independent of rendering and transport presentation. Extend protocol DTOs in `mind-core`, handle requests in the daemon, and consume them through the shared client. MCP handlers must adapt the same engine operations rather than implementing alternate state. Reject non-loopback endpoints unless the security model is deliberately redesigned.
 
-When adding or materially changing a subsystem, update or add its corresponding document under `.agent/skills/`. Keep this guide and the README synchronized with commands and architecture.
+Before changing a covered subsystem, read and follow its matching repository skill under `.agents/skills/<skill-name>/SKILL.md`. When adding or materially changing a subsystem, update or add its corresponding skill there. Keep this guide and the README synchronized with commands and architecture.
 
 ## Operational commands
 
