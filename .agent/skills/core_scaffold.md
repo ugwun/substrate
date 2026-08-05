@@ -14,6 +14,6 @@ Use this guide when changing workspace structure, configuration, or the engine l
 
 ## Extension points
 
-Add durable gameplay state behind the core engine API, not in IPC or MCP handlers. Add commands as typed request/result structures in `mind-core`, mutate state inside the engine, and then expose them through daemon dispatch and transport adapters. Persistence must use atomic replacement or transactions and must not serialize transient client counts, diagnostic events, or process metadata as game state.
+Durable gameplay state belongs behind the core engine API, not in IPC or MCP handlers. Add commands as typed request/result structures in `mind-core`, mutate state transactionally inside the engine, and then expose them through daemon dispatch and transport adapters. Persistence uses a versioned JSON envelope and same-directory atomic replacement; it must not serialize transient signals, client counts, diagnostic events, or process metadata as game state. Reject corrupt, future-version, or invariant-breaking saves instead of silently resetting progression.
 
 Update `AGENTS.md`, the README, tests, and this file whenever these invariants or operational commands change.

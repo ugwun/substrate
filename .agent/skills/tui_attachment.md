@@ -5,15 +5,16 @@ Use this guide when changing the Ratatui dashboard or its daemon attachment beha
 ## Architecture boundary
 
 - `mind-tui` attaches to an existing daemon and never owns daemon lifecycle or simulation state.
-- Authoritative telemetry, health, events, and diagnostic results come from `StatusSnapshot` over `IpcClient`.
-- Presentation state may include a bounded cache of already-received events, observed delivery/tick rate, scroll position, help visibility, and stale age.
-- Do not read the daemon log file or recreate simulation values in widgets. Power remains explicitly unavailable until a real engine mechanic exists.
+- Authoritative telemetry, resources, progression, health, events, and diagnostic results come from `StatusSnapshot`; nodes, wires, and signal levels come from `CircuitGraphSnapshot` over `IpcClient`.
+- Presentation state may include bounded caches of already-received events, graphs, and command results; observed delivery/tick rate; scroll position; help visibility; prompt/history state; and stale age.
+- Do not read the daemon log file or recreate simulation or circuit values in widgets.
 
 ## Runtime behavior
 
 - Keep one connection worker responsible for handshake, status subscription, commands, unsubscribe, and reconnect.
 - Retry transport failures every second and retain the most recent snapshot with an obvious stale indicator. `r` requests an immediate retry.
-- `q`, `Esc`, and Ctrl-C detach without stopping the daemon. Diagnostic pulse is the only mutating dashboard command in Phase 1.3.
+- F1 selects Dashboard and F2 selects Assembly. `i` focuses the Assembly prompt; Enter executes through IPC, Tab completes, Up/Down navigate history, and Esc cancels prompt input before it detaches.
+- `q` and Ctrl-C detach without stopping the daemon. Diagnostic pulses and DSL commands are sent through the connection worker.
 - Render from pure application state. Keep terminal input handling and IPC work out of widget functions.
 - Restore raw mode, cursor, and the main screen on success, error, or panic.
 

@@ -1,6 +1,7 @@
 use crate::{
     protocol::{
-        self, decode_result, method, DiagnosticPulseResult, PingResult, ProtocolError, RpcIncoming,
+        self, decode_result, method, CircuitGraphSnapshot, DiagnosticPulseResult,
+        DslExecutionResult, ExecuteDslParams, PingResult, ProtocolError, RpcIncoming,
         StatusNotification, StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION,
         MAX_FRAME_BYTES,
     },
@@ -65,6 +66,20 @@ impl IpcClient {
 
     pub async fn trigger_diagnostic_pulse(&mut self) -> Result<DiagnosticPulseResult, IpcError> {
         self.call(method::TRIGGER_DIAGNOSTIC_PULSE, None).await
+    }
+
+    pub async fn execute_dsl(
+        &mut self,
+        command: impl Into<String>,
+    ) -> Result<DslExecutionResult, IpcError> {
+        let params = serde_json::to_value(ExecuteDslParams {
+            command: command.into(),
+        })?;
+        self.call(method::EXECUTE_DSL, Some(params)).await
+    }
+
+    pub async fn circuit_graph(&mut self) -> Result<CircuitGraphSnapshot, IpcError> {
+        self.call(method::QUERY_CIRCUIT_GRAPH, None).await
     }
 
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {

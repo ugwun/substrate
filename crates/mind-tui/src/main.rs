@@ -3,7 +3,7 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_tui::{
-    app::{App, ConnectionState},
+    app::{App, ConnectionState, Workspace},
     connection::{self, ConnectionCommand, ConnectionUpdate},
     ui::{self, RenderOptions},
 };
@@ -92,6 +92,8 @@ async fn run_dashboard(
                         app.diagnostic_completed(&result);
                     }
                     Some(ConnectionUpdate::DiagnosticFailed(error)) => app.diagnostic_failed(error),
+                    Some(ConnectionUpdate::DslCompleted(result)) => app.apply_dsl_result(result),
+                    Some(ConnectionUpdate::Graph(graph)) => app.apply_graph(graph),
                     None => app.disconnected("connection worker stopped"),
                 }
             }
@@ -107,11 +109,55 @@ async fn handle_key(
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return Ok(false);
     }
+    if matches!(key.code, KeyCode::Char('c'))
+        && key.modifiers.contains(event::KeyModifiers::CONTROL)
+    {
+        return Ok(true);
+    }
+    match key.code {
+        KeyCode::F(1) => {
+            app.set_workspace(Workspace::Dashboard);
+            return Ok(false);
+        }
+        KeyCode::F(2) => {
+            app.set_workspace(Workspace::Assembly);
+            return Ok(false);
+        }
+        _ => {}
+    }
+
+    if app.workspace == Workspace::Assembly && app.prompt_focused {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(command) = app.take_prompt_command() {
+                    commands
+                        .send(ConnectionCommand::ExecuteDsl(command))
+                        .await
+                        .context("connection worker stopped")?;
+                }
+            }
+            KeyCode::Esc => app.blur_prompt(),
+            KeyCode::Tab => app.complete_prompt(),
+            KeyCode::Backspace => app.backspace_prompt(),
+            KeyCode::Delete => app.delete_prompt(),
+            KeyCode::Left => app.move_prompt_left(),
+            KeyCode::Right => app.move_prompt_right(),
+            KeyCode::Home => app.prompt_cursor = 0,
+            KeyCode::End => app.prompt_cursor = app.prompt.len(),
+            KeyCode::Up => app.history_previous(),
+            KeyCode::Down => app.history_next(),
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == event::KeyModifiers::SHIFT =>
+            {
+                app.insert_prompt_char(character)
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-            return Ok(true)
-        }
         KeyCode::Esc if app.show_help => app.show_help = false,
         KeyCode::Esc => return Ok(true),
         KeyCode::Char('?') => app.show_help = !app.show_help,
@@ -135,6 +181,7 @@ async fn handle_key(
         KeyCode::Home => app.scroll_home(),
         KeyCode::End => app.scroll_end(),
         KeyCode::Char('f') => app.toggle_follow(),
+        KeyCode::Char('i') if app.workspace == Workspace::Assembly => app.focus_prompt(),
         _ => {}
     }
     Ok(false)

@@ -1,6 +1,6 @@
 use mind_core::{
     ipc::IpcClient,
-    protocol::{DiagnosticPulseResult, StatusSnapshot},
+    protocol::{CircuitGraphSnapshot, DiagnosticPulseResult, DslExecutionResult, StatusSnapshot},
 };
 use std::{net::SocketAddr, time::Duration};
 use tokio::{sync::mpsc, time};
@@ -8,6 +8,7 @@ use tokio::{sync::mpsc, time};
 #[derive(Debug)]
 pub enum ConnectionCommand {
     DiagnosticPulse,
+    ExecuteDsl(String),
     Retry,
     Detach,
 }
@@ -20,6 +21,8 @@ pub enum ConnectionUpdate {
     Disconnected(String),
     DiagnosticCompleted(DiagnosticPulseResult),
     DiagnosticFailed(String),
+    DslCompleted(DslExecutionResult),
+    Graph(CircuitGraphSnapshot),
 }
 
 pub async fn run(
@@ -83,6 +86,21 @@ pub async fn run(
                 continue;
             }
         }
+        let mut graph_revision = match client.circuit_graph().await {
+            Ok(graph) => {
+                let revision = graph.revision;
+                if updates.send(ConnectionUpdate::Graph(graph)).await.is_err() {
+                    return;
+                }
+                revision
+            }
+            Err(error) => {
+                if !wait_to_retry(&mut commands, &updates, error.to_string()).await {
+                    return;
+                }
+                continue;
+            }
+        };
 
         let mut retry_immediately = false;
         let disconnect_reason = loop {
@@ -90,8 +108,20 @@ pub async fn run(
                 notification = client.next_status() => {
                     match notification {
                         Ok(notification) if notification.subscription_id == subscription_id => {
+                            let next_graph_revision = notification.status.circuit.revision;
                             if updates.send(ConnectionUpdate::Snapshot(notification.status)).await.is_err() {
                                 return;
+                            }
+                            if next_graph_revision != graph_revision {
+                                match client.circuit_graph().await {
+                                    Ok(graph) => {
+                                        graph_revision = graph.revision;
+                                        if updates.send(ConnectionUpdate::Graph(graph)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(error) => break error.to_string(),
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -112,6 +142,33 @@ pub async fn run(
                                     let _ = updates.send(ConnectionUpdate::DiagnosticFailed(message.clone())).await;
                                     break message;
                                 }
+                            }
+                        }
+                        Some(ConnectionCommand::ExecuteDsl(command)) => {
+                            match client.execute_dsl(command).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::DslCompleted(result)).await.is_err() {
+                                        return;
+                                    }
+                                    match client.status().await {
+                                        Ok(status) => {
+                                            if updates.send(ConnectionUpdate::Snapshot(status)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                    match client.circuit_graph().await {
+                                        Ok(graph) => {
+                                            graph_revision = graph.revision;
+                                            if updates.send(ConnectionUpdate::Graph(graph)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
                             }
                         }
                         Some(ConnectionCommand::Retry) => {

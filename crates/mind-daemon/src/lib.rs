@@ -3,8 +3,8 @@ use mind_core::{
     config::{AppPaths, Config},
     engine::MindEngine,
     protocol::{
-        self, failure, method, notification, success, RpcRequest, StatusNotification,
-        SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, failure, method, notification, success, ExecuteDslParams, RpcRequest,
+        StatusNotification, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
 };
@@ -35,7 +35,12 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     let mcp_address = mcp_listener
         .local_addr()
         .context("failed to inspect MCP listener")?;
-    let engine = MindEngine::with_mcp_address(config.tick_rate_hz, mcp_address);
+    let engine = MindEngine::persistent(
+        config.tick_rate_hz,
+        mcp_address,
+        paths.game_state_file.clone(),
+    )
+    .with_context(|| format!("failed to load {}", paths.game_state_file.display()))?;
     let started_at = engine.status().started_at;
     let metadata = RuntimeMetadata::current(address, mcp_address, started_at);
     metadata
@@ -45,6 +50,7 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let engine_task = tokio::spawn(engine.clone().run(shutdown_rx.clone()));
     let telemetry_task = tokio::spawn(sample_process_cpu(engine.clone(), shutdown_rx.clone()));
+    let persistence_task = tokio::spawn(checkpoint_game_state(engine.clone(), shutdown_rx.clone()));
     let mcp_cancellation = CancellationToken::new();
     let (mcp_exit_tx, mut mcp_exit_rx) = mpsc::channel(1);
     let mcp_task = tokio::spawn({
@@ -111,6 +117,7 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     while connections.join_next().await.is_some() {}
     let engine_result = engine_task.await.context("engine task failed");
     let telemetry_result = telemetry_task.await.context("telemetry task failed");
+    let persistence_result = persistence_task.await.context("persistence task failed");
     let mcp_result = match mcp_task.await {
         Ok(result) => result.context("MCP HTTP server failed during shutdown"),
         Err(error) => Err(anyhow::Error::new(error).context("MCP HTTP task failed")),
@@ -118,12 +125,36 @@ pub async fn run(config: Config, paths: AppPaths) -> Result<()> {
     remove_own_metadata(&paths, metadata.pid);
     engine_result?;
     telemetry_result?;
+    persistence_result??;
     mcp_result?;
     if let Some(detail) = unexpected_mcp_exit {
         anyhow::bail!("MCP HTTP server exited unexpectedly: {detail}");
     }
     info!("mind daemon stopped");
     Ok(())
+}
+
+async fn checkpoint_game_state(
+    engine: Arc<MindEngine>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), mind_core::game::GameError> {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(error) = engine.checkpoint_game_state() {
+                    warn!(%error, "game-state checkpoint failed; will retry");
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return engine.checkpoint_game_state();
+                }
+            }
+        }
+    }
 }
 
 async fn sample_process_cpu(engine: Arc<MindEngine>, mut shutdown: watch::Receiver<bool>) {
@@ -275,6 +306,19 @@ async fn dispatch_frame(
             success(request.id, engine.trigger_diagnostic_pulse()),
             false,
         ),
+        method::EXECUTE_DSL => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<ExecuteDslParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.execute_dsl(&params.command)),
+                    false,
+                ),
+                None => (failure(request.id, -32602, "invalid DSL parameters"), false),
+            }
+        }
+        method::QUERY_CIRCUIT_GRAPH => (success(request.id, engine.circuit_graph()), false),
         method::SUBSCRIBE_STATUS => {
             let id = subscription.get_or_insert_with(Uuid::new_v4);
             (
@@ -363,5 +407,39 @@ mod tests {
         );
         server.abort();
         let _ = Config::default();
+    }
+
+    #[tokio::test]
+    async fn execute_dsl_rejects_missing_parameters() {
+        let engine = MindEngine::new(20);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(
+                stream,
+                engine,
+                shutdown_tx,
+                shutdown_rx,
+                Duration::from_secs(1),
+            )
+            .await;
+        });
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"mind.execute_dsl\"}\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["error"]["code"],
+            -32602
+        );
+        server.abort();
     }
 }

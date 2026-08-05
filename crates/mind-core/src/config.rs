@@ -65,6 +65,7 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub runtime_file: PathBuf,
     pub log_file: PathBuf,
+    pub game_state_file: PathBuf,
 }
 
 impl AppPaths {
@@ -80,6 +81,7 @@ impl AppPaths {
             config_file,
             runtime_file: data_dir.join("daemon.json"),
             log_file: data_dir.join("mind-daemon.log"),
+            game_state_file: data_dir.join("game_state.json"),
             data_dir,
         })
     }

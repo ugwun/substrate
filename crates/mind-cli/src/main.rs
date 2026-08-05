@@ -208,7 +208,7 @@ fn print_status(status: &StatusSnapshot, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(status)?);
     } else {
         println!(
-            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz cpu={} clients={} diagnostics={} mcp={}",
+            "health={:?} pid={} uptime={}ms tick={} tick_rate={}Hz cpu={} power={:.1}/{:.0} memory={}/{} bandwidth={}/{} core={} spark={} clients={} diagnostics={} mcp={}",
             status.health,
             status.pid,
             status.uptime_ms,
@@ -217,6 +217,14 @@ fn print_status(status: &StatusSnapshot, json: bool) -> Result<()> {
             status
                 .cpu_usage_percent
                 .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}%")),
+            status.resources.power_milliunits as f64 / 1000.0,
+            status.resources.power_capacity_milliunits as f64 / 1000.0,
+            status.resources.memory_used,
+            status.resources.memory_total,
+            status.resources.bandwidth_used,
+            status.resources.bandwidth_total,
+            if status.progression.logic_core_active { "online" } else { "offline" },
+            if status.progression.cognitive_spark_complete { "stable" } else { "dormant" },
             status.connected_clients,
             status
                 .last_diagnostic

@@ -1,6 +1,6 @@
-use crate::app::{App, ConnectionState};
+use crate::app::{App, ConnectionState, Workspace};
 use chrono::Local;
-use mind_core::protocol::EngineEventKind;
+use mind_core::protocol::{CircuitNodeKind, EngineEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -59,6 +59,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
         .border_style(Style::default().fg(palette.primary));
     let inner = root.inner(area);
     frame.render_widget(root, area);
+
+    if app.workspace == Workspace::Assembly {
+        render_assembly(frame, inner, app, options, palette);
+        if app.show_help {
+            render_help(frame, centered_rect(64, 18, area), options, palette);
+        }
+        return;
+    }
 
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -151,6 +159,17 @@ fn render_metrics(
             )
         },
     );
+    let power = app.snapshot.as_ref().map_or_else(
+        || "--\nSAMPLING".to_owned(),
+        |snapshot| {
+            format!(
+                "{:.1} / {:.0}\n+{:.1}/s",
+                snapshot.resources.power_milliunits as f64 / 1000.0,
+                snapshot.resources.power_capacity_milliunits as f64 / 1000.0,
+                snapshot.resources.power_per_second_milliunits as f64 / 1000.0,
+            )
+        },
+    );
     metric(
         frame,
         columns[0],
@@ -171,9 +190,9 @@ fn render_metrics(
         frame,
         columns[2],
         " SIMULATED POWER ",
-        "OFFLINE\nPHASE 1.4".to_owned(),
+        power,
         options,
-        palette.warning,
+        palette.healthy,
     );
     metric(
         frame,
@@ -222,6 +241,11 @@ fn render_events(
         let label = match event.kind {
             EngineEventKind::DaemonStarted => "BOOT",
             EngineEventKind::DiagnosticPulse => "PULSE",
+            EngineEventKind::LogicCoreActivated => "CORE",
+            EngineEventKind::CircuitChanged => "WIRE",
+            EngineEventKind::MilestoneReached => "SPARK",
+            EngineEventKind::PersistenceDegraded => "SAVE!",
+            EngineEventKind::PersistenceRecovered => "SAVE",
             EngineEventKind::ShutdownRequested => "HALT",
         };
         lines.push(Line::from(vec![
@@ -267,6 +291,26 @@ fn render_diagnostics(
         lines.push(Line::from(format!(
             "CLIENTS      {}",
             snapshot.connected_clients
+        )));
+        lines.push(Line::from(format!(
+            "MEMORY       {}/{}    BUS {}/{}",
+            snapshot.resources.memory_used,
+            snapshot.resources.memory_total,
+            snapshot.resources.bandwidth_used,
+            snapshot.resources.bandwidth_total
+        )));
+        lines.push(Line::from(format!(
+            "LOGIC CORE   {}    SPARK {}",
+            if snapshot.progression.logic_core_active {
+                "ONLINE"
+            } else {
+                "OFFLINE"
+            },
+            if snapshot.progression.cognitive_spark_complete {
+                "STABLE"
+            } else {
+                "DORMANT"
+            }
         )));
         lines.push(Line::from(format!("MCP          {}", snapshot.mcp_url)));
         lines.push(Line::from(""));
@@ -316,11 +360,289 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette)
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " q detach  d pulse  r reconnect  j/k scroll  f follow  ? help   // {follow}"
+            " F1 dashboard  F2 assembly  q detach  d pulse  j/k scroll  f follow  ? help // {follow}"
         ))
         .style(Style::default().fg(palette.muted)),
         area,
     );
+}
+
+fn render_assembly(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(6),
+        Constraint::Length(5),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let resource_text =
+        app.snapshot.as_ref().map_or_else(
+            || "POWER --  //  MEMORY --  //  BANDWIDTH --".to_owned(),
+            |snapshot| {
+                format!(
+                "POWER {:>5.1}/{:.0} (+1/s)  //  MEMORY {}/{}  //  BANDWIDTH {}/{}  //  CORE {}",
+                snapshot.resources.power_milliunits as f64 / 1000.0,
+                snapshot.resources.power_capacity_milliunits as f64 / 1000.0,
+                snapshot.resources.memory_used,
+                snapshot.resources.memory_total,
+                snapshot.resources.bandwidth_used,
+                snapshot.resources.bandwidth_total,
+                if snapshot.progression.logic_core_active { "ONLINE" } else { "OFFLINE" }
+            )
+            },
+        );
+    frame.render_widget(
+        Paragraph::new(resource_text)
+            .style(Style::default().fg(palette.primary))
+            .block(panel(" ASSEMBLY RESOURCES ", options)),
+        rows[0],
+    );
+    let objective = app.snapshot.as_ref().map_or_else(
+        || "Awaiting objective telemetry...".to_owned(),
+        |snapshot| snapshot.progression.objective.clone(),
+    );
+    frame.render_widget(
+        Paragraph::new(objective)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(palette.warning))
+            .block(panel(" AWAKENING OBJECTIVE ", options)),
+        rows[1],
+    );
+
+    let body = if area.width >= 100 {
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[2])
+    } else {
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[2])
+    };
+    render_graph_nodes(frame, body[0], app, options, palette);
+    render_graph_wires(frame, body[1], app, options, palette);
+    render_transcript(frame, rows[3], app, options, palette);
+    render_prompt(frame, rows[4], app, options, palette);
+    frame.render_widget(
+        Paragraph::new(" F1 dashboard  F2 assembly  Enter execute  Tab complete  Esc command mode  i input  Ctrl-C detach")
+            .style(Style::default().fg(palette.muted)),
+        rows[5],
+    );
+}
+
+fn render_graph_nodes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let lines = app.graph.as_ref().map_or_else(
+        || {
+            vec![Line::styled(
+                "Awaiting circuit graph...",
+                Style::default().fg(palette.muted),
+            )]
+        },
+        |graph| {
+            graph
+                .nodes
+                .iter()
+                .map(|node| {
+                    let kind = match node.node {
+                        CircuitNodeKind::Sensor => "SENSOR".to_owned(),
+                        CircuitNodeKind::Gate { gate } => format!("{gate:?}").to_uppercase(),
+                        CircuitNodeKind::Output => "OUTPUT".to_owned(),
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            if node.signal { "HIGH " } else { "LOW  " },
+                            Style::default().fg(if node.signal {
+                                palette.healthy
+                            } else {
+                                palette.muted
+                            }),
+                        ),
+                        Span::styled(format!("{kind:<6} "), Style::default().fg(palette.primary)),
+                        Span::raw(node.id.clone()),
+                    ])
+                })
+                .collect()
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(panel(" CIRCUIT NODES // LIVE SIGNALS ", options)),
+        area,
+    );
+}
+
+fn render_graph_wires(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let arrow = if options.ascii { "->" } else { "→" };
+    let lines = app.graph.as_ref().map_or_else(
+        || {
+            vec![Line::styled(
+                "No graph available",
+                Style::default().fg(palette.muted),
+            )]
+        },
+        |graph| {
+            if graph.wires.is_empty() {
+                vec![Line::styled(
+                    "No wires installed",
+                    Style::default().fg(palette.muted),
+                )]
+            } else {
+                graph
+                    .wires
+                    .iter()
+                    .map(|wire| {
+                        Line::from(format!(
+                            "{} {arrow} {}.{}",
+                            wire.source, wire.target, wire.port
+                        ))
+                    })
+                    .collect()
+            }
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(panel(" BUS ROUTES ", options)),
+        area,
+    );
+}
+
+fn render_transcript(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let lines: Vec<_> = app
+        .transcript
+        .iter()
+        .rev()
+        .take(visible)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|entry| {
+            Line::from(vec![
+                Span::styled(
+                    if entry.ok { "OK  " } else { "ERR " },
+                    Style::default().fg(if entry.ok {
+                        palette.healthy
+                    } else {
+                        palette.failure
+                    }),
+                ),
+                Span::styled(
+                    format!("> {} // ", entry.command),
+                    Style::default().fg(palette.primary),
+                ),
+                Span::raw(entry.message.clone()),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(if lines.is_empty() {
+            vec![Line::styled(
+                "Enter HELP to inspect the DSL",
+                Style::default().fg(palette.muted),
+            )]
+        } else {
+            lines
+        })
+        .wrap(Wrap { trim: true })
+        .block(panel(" COMMAND TRANSCRIPT ", options)),
+        area,
+    );
+}
+
+fn render_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let mut display = app.prompt.clone();
+    if app.prompt_focused {
+        display.insert_str(app.prompt_cursor, if options.ascii { "|" } else { "▏" });
+    }
+    let line = highlight_dsl(&display, palette);
+    frame.render_widget(
+        Paragraph::new(line).block(
+            panel(
+                if app.prompt_focused {
+                    " DSL INPUT // ACTIVE "
+                } else {
+                    " DSL INPUT // PRESS i "
+                },
+                options,
+            )
+            .border_style(Style::default().fg(if app.prompt_focused {
+                palette.primary
+            } else {
+                palette.muted
+            })),
+        ),
+        area,
+    );
+}
+
+fn highlight_dsl(input: &str, palette: Palette) -> Line<'static> {
+    let keywords = [
+        "HELP",
+        "STATUS",
+        "ACTIVATE",
+        "LOGIC_CORE",
+        "CREATE",
+        "REMOVE",
+        "WIRE",
+        "UNWIRE",
+        "SET",
+        "INSPECT",
+        "CLEAR",
+        "CIRCUIT",
+        "AND",
+        "OR",
+        "NOT",
+        "XOR",
+        "HIGH",
+        "LOW",
+    ];
+    let spans = input
+        .split_inclusive(char::is_whitespace)
+        .map(|part| {
+            let token = part.trim().to_ascii_uppercase();
+            let color = if matches!(token.as_str(), "HIGH") {
+                palette.healthy
+            } else if matches!(token.as_str(), "LOW") {
+                palette.muted
+            } else if keywords.contains(&token.as_str()) {
+                palette.primary
+            } else {
+                Color::Reset
+            };
+            Span::styled(part.to_owned(), Style::default().fg(color))
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 fn render_too_small(
@@ -366,7 +688,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, palett
             Line::from("? / Esc        close this overlay"),
             Line::from(""),
             Line::styled(
-                "POWER REMAINS OFFLINE UNTIL CIRCUIT INITIALIZATION",
+                "F2 OPENS THE CIRCUIT ASSEMBLY WORKSPACE",
                 Style::default().fg(palette.warning),
             ),
         ])
@@ -434,7 +756,11 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use mind_core::protocol::{EngineEvent, HealthState, StatusSnapshot};
+    use mind_core::engine::MindEngine;
+    use mind_core::protocol::{
+        CircuitSummary, EngineEvent, HealthState, ProgressionSnapshot, ResourceSnapshot,
+        StatusSnapshot,
+    };
     use ratatui::{backend::TestBackend, Terminal};
 
     fn populated_app() -> App {
@@ -448,7 +774,7 @@ mod tests {
         };
         app.apply_snapshot(
             StatusSnapshot {
-                protocol_version: 1,
+                protocol_version: 2,
                 daemon_version: "0.1.0".into(),
                 pid: 42,
                 health: HealthState::Ready,
@@ -457,6 +783,30 @@ mod tests {
                 tick: 1_300,
                 tick_rate_hz: 20,
                 cpu_usage_percent: Some(4.2),
+                resources: ResourceSnapshot {
+                    power_milliunits: 15_000,
+                    power_capacity_milliunits: 100_000,
+                    power_per_second_milliunits: 1_000,
+                    memory_used: 2,
+                    memory_total: 8,
+                    bandwidth_used: 0,
+                    bandwidth_total: 8,
+                },
+                progression: ProgressionSnapshot {
+                    logic_core_active: true,
+                    cognitive_spark_complete: false,
+                    unlocked_gates: vec![],
+                    objective: "Build the interlock".into(),
+                },
+                circuit: CircuitSummary {
+                    revision: 0,
+                    gate_count: 0,
+                    wire_count: 0,
+                    sensor_a: false,
+                    sensor_b: false,
+                    awakening_bus: false,
+                    unresolved_inputs: 1,
+                },
                 connected_clients: 1,
                 mcp_url: "http://127.0.0.1:7777/mcp".into(),
                 last_diagnostic: None,
@@ -535,5 +885,25 @@ mod tests {
         assert!(screen.contains("SIGNAL LOST"));
         assert!(screen.contains("ATTACHMENT CONTROLS"));
         assert!(screen.contains("daemon keeps running"));
+    }
+
+    #[test]
+    fn assembly_workspace_shows_resources_graph_and_prompt() {
+        let mut app = populated_app();
+        app.apply_graph(MindEngine::new(20).circuit_graph());
+        app.set_workspace(Workspace::Assembly);
+        let screen = draw(
+            120,
+            36,
+            &app,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(screen.contains("ASSEMBLY RESOURCES"));
+        assert!(screen.contains("AWAKENING OBJECTIVE"));
+        assert!(screen.contains("SENSOR_A"));
+        assert!(screen.contains("DSL INPUT // ACTIVE"));
     }
 }

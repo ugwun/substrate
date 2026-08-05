@@ -4,10 +4,13 @@ use axum::Router;
 use mind_core::{
     engine::MindEngine,
     ipc::IpcClient,
-    protocol::{DiagnosticPulseResult, StatusSnapshot},
+    protocol::{
+        CircuitGraphSnapshot, DiagnosticPulseResult, DslExecutionResult, ExecuteDslParams,
+        StatusSnapshot,
+    },
 };
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, tool::schema_for_output},
+    handler::server::{router::tool::ToolRouter, tool::schema_for_output, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
         ServerInfo,
@@ -59,6 +62,36 @@ impl MindBackend {
                     .trigger_diagnostic_pulse()
                     .await
                     .map_err(|error| format!("diagnostic pulse failed: {error}"))
+            }
+        }
+    }
+
+    async fn execute_dsl(&self, command: String) -> Result<DslExecutionResult, String> {
+        match self {
+            Self::Direct(engine) => Ok(engine.execute_dsl(&command)),
+            Self::Ipc(address) => {
+                let mut client = IpcClient::connect(*address)
+                    .await
+                    .map_err(|error| format!("mind daemon is unavailable: {error}"))?;
+                client
+                    .execute_dsl(command)
+                    .await
+                    .map_err(|error| format!("DSL execution failed: {error}"))
+            }
+        }
+    }
+
+    async fn circuit_graph(&self) -> Result<CircuitGraphSnapshot, String> {
+        match self {
+            Self::Direct(engine) => Ok(engine.circuit_graph()),
+            Self::Ipc(address) => {
+                let mut client = IpcClient::connect(*address)
+                    .await
+                    .map_err(|error| format!("mind daemon is unavailable: {error}"))?;
+                client
+                    .circuit_graph()
+                    .await
+                    .map_err(|error| format!("circuit query failed: {error}"))
             }
         }
     }
@@ -134,6 +167,41 @@ impl MindMcpServer {
             Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
         }
     }
+
+    #[tool(
+        name = "execute_dsl_command",
+        description = "Execute one Substrate circuit or awakening DSL command against the authoritative daemon",
+        output_schema = schema_for_output::<DslExecutionResult>()
+    )]
+    async fn execute_dsl_command(
+        &self,
+        Parameters(params): Parameters<ExecuteDslParams>,
+    ) -> CallToolResult {
+        match self.backend.execute_dsl(params.command).await {
+            Ok(result) => structured_result(result.message.clone(), &result),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
+        }
+    }
+
+    #[tool(
+        name = "query_circuit_graph",
+        description = "Read the current circuit nodes, ports, signals, and wires",
+        output_schema = schema_for_output::<CircuitGraphSnapshot>()
+    )]
+    async fn query_circuit_graph(&self) -> CallToolResult {
+        match self.backend.circuit_graph().await {
+            Ok(graph) => structured_result(
+                format!(
+                    "Circuit revision {} contains {} nodes and {} wires",
+                    graph.revision,
+                    graph.nodes.len(),
+                    graph.wires.len()
+                ),
+                &graph,
+            ),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -142,7 +210,7 @@ impl ServerHandler for MindMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("substrate", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect the awakening mind and run non-destructive diagnostic pulses.",
+                "Inspect the awakening mind, assemble circuits through the DSL, and run diagnostic pulses.",
             )
     }
 
@@ -219,7 +287,15 @@ mod tests {
             .map(|tool| tool.name.into_owned())
             .collect();
         names.sort_unstable();
-        assert_eq!(names, ["get_mind_status", "trigger_diagnostic_pulse"]);
+        assert_eq!(
+            names,
+            [
+                "execute_dsl_command",
+                "get_mind_status",
+                "query_circuit_graph",
+                "trigger_diagnostic_pulse"
+            ]
+        );
         assert!(server
             .tool_router
             .list_all()
@@ -247,9 +323,11 @@ mod tests {
 
         let mut tools = client.list_all_tools().await?;
         tools.sort_by(|left, right| left.name.cmp(&right.name));
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "get_mind_status");
-        assert_eq!(tools[1].name, "trigger_diagnostic_pulse");
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0].name, "execute_dsl_command");
+        assert_eq!(tools[1].name, "get_mind_status");
+        assert_eq!(tools[2].name, "query_circuit_graph");
+        assert_eq!(tools[3].name, "trigger_diagnostic_pulse");
         assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
 
         let pulse = client
@@ -261,6 +339,18 @@ mod tests {
             .unwrap()
             .text
             .contains("Diagnostic pulse 1"));
+        let dsl = client
+            .call_tool(
+                CallToolRequestParams::new("execute_dsl_command").with_arguments(
+                    serde_json::from_value(serde_json::json!({"command": "STATUS"})).unwrap(),
+                ),
+            )
+            .await?;
+        assert_eq!(dsl.structured_content.as_ref().unwrap()["ok"], true);
+        let graph = client
+            .call_tool(CallToolRequestParams::new("query_circuit_graph"))
+            .await?;
+        assert_eq!(graph.structured_content.as_ref().unwrap()["revision"], 0);
         let status = client
             .call_tool(CallToolRequestParams::new("get_mind_status"))
             .await?;
@@ -316,7 +406,7 @@ mod tests {
                 },
             )
             .await?;
-        assert_eq!(client.list_all_tools().await?.len(), 2);
+        assert_eq!(client.list_all_tools().await?.len(), 4);
         client.cancel().await?;
 
         let discovery = serde_json::json!({
