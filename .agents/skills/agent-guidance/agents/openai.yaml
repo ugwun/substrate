@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Guidance"
+  short_description: "Maintain repository instructions and skills"
+  default_prompt: "Use $agent-guidance to update repository agent instructions and skills."

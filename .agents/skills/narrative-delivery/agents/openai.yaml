@@ -1,0 +1,4 @@
+interface:
+  display_name: "Narrative Delivery"
+  short_description: "Implement spoiler-safe story breadcrumbs"
+  default_prompt: "Use $narrative-delivery to implement an approved, spoiler-safe story breadcrumb."

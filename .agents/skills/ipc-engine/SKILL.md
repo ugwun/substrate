@@ -1,25 +1,24 @@
 ---
 name: ipc-engine
-description: Maintain Substrate local IPC and shared client behavior. Use when changing JSON-RPC methods or DTOs, framing, protocol versions, subscriptions, notifications, connection lifecycle, daemon dispatch, error semantics, or the reusable IpcClient.
+description: Maintain Substrate local IPC and shared client behavior. Use when changing JSON-RPC methods or DTOs, framing, protocol versions, subscriptions, notifications, connection lifecycle, daemon dispatch, error semantics, domain snapshots, or the reusable IpcClient.
 ---
 
 # IPC engine
 
-## Wire contract
+## Current wire contract
 
-- Use loopback TCP, defaulting to `127.0.0.1:7776`.
-- Encode UTF-8 newline-delimited JSON-RPC 2.0 with a maximum frame size of 1 MiB.
-- Keep protocol version 2 and verify it through `system.ping`.
-- Support `system.ping`, `mind.get_status`, `mind.subscribe_status`, `mind.unsubscribe_status`, `mind.trigger_diagnostic_pulse`, `mind.execute_dsl`, `mind.query_circuit_graph`, and `daemon.shutdown`.
-- Publish `mind.status_changed` notifications.
+- Use loopback TCP at `127.0.0.1:7776` by default and newline-delimited UTF-8 JSON-RPC 2.0 with a 1 MiB frame limit.
+- Keep protocol version 2 until a deliberate compatibility decision changes it; verify identity through `system.ping`.
+- Preserve `system.ping`, `mind.get_status`, `mind.subscribe_status`, `mind.unsubscribe_status`, `mind.trigger_diagnostic_pulse`, `mind.execute_dsl`, `mind.query_circuit_graph`, `daemon.shutdown`, and `mind.status_changed` until their owning phase changes them.
+- Use standard protocol error codes for malformed JSON-RPC. Return well-formed game-rule rejections as typed operation results, never crashes.
+- Keep subscription state connection-local, send full status snapshots, and use separate revisioned domain snapshots for large graphs or world models.
 
-Use standard JSON-RPC error codes for parse errors, invalid requests, unknown methods, and invalid parameters. Return DSL parse or game-rule failures as successful RPC responses with `ok: false` and stable diagnostics; keep malformed RPC parameters as protocol errors. Never let a malformed request crash or stop the daemon.
+## Evolution rules
 
-Keep subscription state on its connection and discard it on disconnect. Send full status snapshots. Fetch circuit graph snapshots separately and include a revision for cache invalidation. Do not introduce deltas without a protocol-version decision.
+- Add typed planetary actions and DTOs in `mind-core`; do not replace the legacy DSL with a generic text, natural-language, or untyped command endpoint.
+- Keep authoritative rules in the engine and consume every new operation through the reusable `IpcClient`.
+- Do not expose hidden world state, unreleased narrative truth, provider credentials, or transport-local state in client DTOs.
+- Use revisions for cache invalidation. Do not add deltas or silently change field meaning without an explicit protocol-version decision.
+- Remove legacy DSL and circuit methods coherently during Phase 0 and document compatibility impact.
 
-## Change checklist
-
-- Define public wire structures in `mind-core` and preserve serialization tests.
-- Exercise new behavior through `IpcClient` rather than ad hoc sockets.
-- Integration-test fragmented or malformed traffic, disconnects, multiple clients, and shutdown ordering where relevant.
-- Document compatibility breaks and increment the protocol version before merging one.
+Test serialization, fragmented and oversized frames, malformed traffic, typed game-rule failures, reconnects, subscriptions, multiple clients, revision behavior, and shutdown ordering. Increment the protocol version before merging a breaking wire change.

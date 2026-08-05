@@ -1,0 +1,4 @@
+interface:
+  display_name: "TUI Attachment"
+  short_description: "Build the attach-only graphical terminal UI"
+  default_prompt: "Use $tui-attachment to build an attach-only graphical terminal interaction."

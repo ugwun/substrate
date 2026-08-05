@@ -1,0 +1,4 @@
+interface:
+  display_name: "Planetary Gameplay"
+  short_description: "Build probes, worlds, resources, and bases"
+  default_prompt: "Use $planetary-gameplay to implement a daemon-owned planetary exploration mechanic."

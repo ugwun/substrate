@@ -1,29 +1,34 @@
 ---
 name: circuit-dsl
-description: Maintain Substrate circuit commands, solver rules, resources, and progression. Use when modifying DSL parsing or diagnostics, gates, wires, graph validation, circuit revisions, the COGNITIVE_SPARK objective, or circuit adapters in the TUI or MCP server.
+description: Maintain or retire Substrate's legacy circuit prototype. Use when changing the current DSL parser, diagnostics, gates, wires, COGNITIVE_SPARK objective, circuit persistence, or its TUI, IPC, and MCP adapters, including Phase 0 removal work.
 ---
 
-# Circuit DSL and solver
+# Legacy circuit DSL and solver
 
-## Authority and grammar
+## Product boundary
+
+- Treat circuits, the Assembly prompt, and COGNITIVE_SPARK as the current playable prototype, not the future product direction.
+- Do not add new gates, objectives, DSL families, or a larger circuit canvas unless the user explicitly requests legacy work.
+- Follow `GAME_PLAN.md`: Phase 0 removes this surface before planetary gameplay becomes the main loop.
+- Preserve current behavior while the prototype remains runnable; do not partially remove a wire contract or persisted invariant.
+
+## Current invariants
 
 - Parse the line-oriented, case-insensitive DSL in `mind-core`; normalize identifiers to ASCII uppercase and retain byte spans for diagnostics.
-- Support `HELP`, `STATUS`, `ACTIVATE LOGIC_CORE`, `CREATE`, `REMOVE`, `WIRE`, `UNWIRE`, `SET`, `INSPECT`, and `CLEAR CIRCUIT`.
-- Parse and validate a command before mutating. Leave resources, progression, revisions, and persistence unchanged when rejecting a command.
-- Keep the TUI and MCP as adapters over the same `MindEngine::execute_dsl` operation; never implement command semantics in a frontend.
+- Support `HELP`, `STATUS`, `ACTIVATE LOGIC_CORE`, `CREATE`, `REMOVE`, `WIRE`, `UNWIRE`, `SET`, `INSPECT`, and `CLEAR CIRCUIT` until retirement.
+- Parse and validate before mutation. Leave resources, progression, revisions, and persistence unchanged on rejection.
+- Keep TUI and MCP behavior as adapters over `MindEngine::execute_dsl`; never duplicate semantics in a frontend or transport.
+- Reserve `SENSOR_A`, `SENSOR_B`, and single-input `AWAKENING_BUS`; give AND, OR, and XOR inputs A/B and NOT input A.
+- Keep circuits combinational and acyclic, enforce one source per target input, allow output fan-out, treat unwired inputs as LOW, and consume one bandwidth per wire.
+- Cap power at 100.0 and generate 1.0 per daemon-running second. Charge 10.0 power and 2 memory for the core, 5.0 power and 1 memory per gate, and 1 bandwidth per wire.
+- Keep AND, OR, and NOT initially available, XOR locked, and COGNITIVE_SPARK complete only after AWAKENING_BUS implements the full AND truth table and both sensors are currently HIGH.
+- Keep completion permanent, unlock XOR afterward, and keep `CLEAR CIRCUIT` non-refundable while existing saves use these rules.
 
-## Circuit invariants
+## Retirement workflow
 
-- Reserve the built-in identifiers `SENSOR_A`, `SENSOR_B`, and single-input `AWAKENING_BUS`.
-- Give AND, OR, and XOR inputs A/B; give NOT input A. Allow at most one source per input, permit outputs to fan out, and consume one bandwidth per wire.
-- Keep circuits combinational and acyclic. Treat unwired inputs as LOW and reject any wire that introduces a cycle.
-- Cap power at 100.0 and generate exactly 1.0 per daemon-running second. Charge 10.0 for the core and 5.0 per gate. Charge 2 memory for the core, 1 memory per gate, and 1 bandwidth per wire.
-- Make `CLEAR CIRCUIT` remove gates, wires, and sensor levels without refunds or progression reset.
+- Remove the objective, parser, solver, graph DTOs, IPC methods, MCP tools, TUI Assembly workspace, tests, and documentation as one deliberate phase.
+- Introduce an explicit save-schema migration or documented prototype-save transition; never silently reinterpret or discard an existing save.
+- Replace command-based awakening with graphical onboarding before declaring the retirement playable.
+- Remove this skill after no circuit code, protocol surface, persistence field, or user workflow remains.
 
-## Awakening objective
-
-- Make AND, OR, and NOT available before completion and keep XOR locked.
-- Complete COGNITIVE_SPARK only when the current wiring makes `AWAKENING_BUS` equal `SENSOR_A AND SENSOR_B` for all four input combinations and both current sensors are HIGH.
-- Keep completion permanent and unlock XOR after completion.
-
-Test parser spans and normalization, every gate truth table, cycles, occupied inputs, capacity limits, failed-command atomicity, milestone truth-table verification, and revision behavior.
+Test legacy parser spans, truth tables, graph invariants, rejected-command atomicity, and revisions while maintained. For retirement, test save transition, removed protocol/tool discovery, graphical onboarding, and absence of stale circuit references.

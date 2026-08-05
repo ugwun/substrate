@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCP Server"
+  short_description: "Maintain secure shared MCP adapters"
+  default_prompt: "Use $mcp-server to add or revise Substrate MCP tools and transports."

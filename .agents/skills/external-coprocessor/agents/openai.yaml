@@ -1,0 +1,4 @@
+interface:
+  display_name: "External Co-processor"
+  short_description: "Build research-gated MCP automation"
+  default_prompt: "Use $external-coprocessor to implement research-gated external LLM automation."

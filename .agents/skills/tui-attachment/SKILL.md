@@ -1,33 +1,30 @@
 ---
 name: tui-attachment
-description: Maintain the attach-only Ratatui frontend and its daemon connection behavior. Use when changing TUI workspaces, reducers, widgets, key handling, IPC connection or reconnect logic, stale-state presentation, terminal restoration, responsive layouts, or ASCII and monochrome fallbacks.
+description: Maintain the attach-only Ratatui frontend and daemon connection behavior. Use when changing TUI workspaces, reducers, widgets, globe or panel rendering, key handling, typed actions, reconnect logic, stale presentation, terminal restoration, responsive layouts, or ASCII and monochrome fallbacks.
 ---
 
 # TUI attachment
 
-## Architecture boundary
+## Permanent boundaries
 
-- Attach `mind-tui` to an existing daemon; never let it own daemon lifecycle or simulation state.
-- Read authoritative telemetry, resources, progression, health, events, and diagnostics from `StatusSnapshot`.
-- Read nodes, wires, and signal levels from `CircuitGraphSnapshot` through `IpcClient`.
-- Limit presentation state to bounded caches of received events, graphs, and command results; observed delivery or tick rate; scroll position; help visibility; prompt and history state; and stale age.
-- Do not read the daemon log file or recreate simulation or circuit values in widgets.
+- Attach to an existing daemon; never own daemon lifecycle or simulate authoritative game state.
+- Render authoritative snapshots and send typed actions through one connection worker responsible for handshake, subscriptions, requests, unsubscribe, and reconnect.
+- Limit local state to view focus, selections, contextual UI state, bounded received caches, observed delivery rate, scroll state, help, stale age, and legacy prompt/history state only while Assembly remains.
+- Never read daemon logs or reconstruct hidden resource, mission, world, circuit, research, or story values in widgets.
+- Retry failures every second, retain the latest snapshot with an obvious stale indicator, make immediate retry available, and detach without stopping the daemon.
+- Render from pure application state and restore raw mode, cursor, and screen on every exit, error, and panic path.
 
-## Runtime behavior
+## Current and target interfaces
 
-- Keep one connection worker responsible for handshake, status subscription, commands, unsubscribe, and reconnect.
-- Retry transport failures every second and retain the latest snapshot with an obvious stale indicator. Make `r` request an immediate retry.
-- Make F1 select Dashboard and F2 select Assembly.
-- Make `i` focus the Assembly prompt; Enter execute through IPC; Tab complete; Up and Down navigate history; and Esc cancel prompt input before detaching.
-- Make `q` and Ctrl-C detach without stopping the daemon.
-- Send diagnostic pulses and DSL commands through the connection worker.
-- Render from pure application state. Keep terminal input handling and IPC work out of widget functions.
-- Restore raw mode, cursor, and the main screen on success, error, or panic.
+- Treat Dashboard, Assembly, F1/F2, the `i` prompt, and DSL submission as legacy prototype behavior while it remains implemented.
+- Do not expand command-entry gameplay. Phase 0 replaces Assembly and typed awakening with graphical onboarding.
+- Build the target interface around keyboard-first Planet, Operations, Industry, Research, and Archive destinations, with a rotating selectable globe and contextual actions rather than typed commands.
+- Let arrows move focus or rotate the globe, Enter open or confirm, Esc move back, and Tab move between panels; keep frequent actions visible in context.
+- Require clear confirmation for destructive actions and display automation scope, approvals, and audit results when those systems exist.
 
 ## Rendering and validation
 
-- Use restrained cyan and amber sci-fi telemetry with semantic green and red states by default.
-- Use a side-by-side body at 100x28 and above, a stacked body below that, and a resize message below 60x18.
-- Honor `--ascii`, `--no-color`, `TERM=dumb`, and `NO_COLOR`. Do not make fallback output depend on color or non-ASCII decoration.
-- Test reducers directly and use Ratatui `TestBackend` for wide, stacked, tiny, disconnected, stale, help, Unicode, and fallback frames.
-- Finish with a live PTY session against the real daemon. Trigger a pulse, force a disconnect and reconnect, detach, and verify that the daemon remains reachable and the terminal is restored.
+- Use restrained cyan and amber styling with semantic states, never color alone.
+- Preserve side-by-side wide layouts, stacked narrow layouts, a useful tiny-terminal message, Unicode defaults, and equivalent `--ascii`, `--no-color`, `TERM=dumb`, and `NO_COLOR` behavior.
+- Test reducers and Ratatui `TestBackend` frames for wide, stacked, tiny, disconnected, stale, help, Unicode, fallback, globe selection, contextual actions, and confirmations as implemented.
+- Finish with live PTY inspection against the real daemon. Trigger a diagnostic pulse, force disconnect/reconnect, detach, and verify daemon reachability and terminal restoration.

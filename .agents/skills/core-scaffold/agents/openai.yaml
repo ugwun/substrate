@@ -1,0 +1,4 @@
+interface:
+  display_name: "Core Scaffold"
+  short_description: "Maintain daemon authority and architecture"
+  default_prompt: "Use $core-scaffold to evolve Substrate without breaking its daemon-owned architecture."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Legacy Circuit DSL"
+  short_description: "Maintain or retire the circuit prototype"
+  default_prompt: "Use $circuit-dsl to maintain or retire the legacy circuit prototype safely."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "IPC Engine"
+  short_description: "Maintain typed local IPC and clients"
+  default_prompt: "Use $ipc-engine to extend the typed local protocol and shared client."

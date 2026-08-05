@@ -1,0 +1,4 @@
+interface:
+  display_name: "Game Persistence"
+  short_description: "Maintain durable state and save migrations"
+  default_prompt: "Use $game-persistence to change durable game state and its migration safely."
