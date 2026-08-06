@@ -9,15 +9,15 @@ description: Maintain the attach-only Ratatui frontend and daemon connection beh
 
 - Attach to an existing daemon; never own daemon lifecycle or simulate authoritative game state.
 - Render authoritative snapshots and send typed actions through one connection worker responsible for handshake, subscriptions, requests, unsubscribe, and reconnect.
-- Limit local state to view focus, selections, contextual UI state, bounded received caches, observed delivery rate, scroll state, help, stale age, and legacy prompt/history state only while Assembly remains.
-- Never read daemon logs or reconstruct hidden resource, mission, world, circuit, research, or story values in widgets.
+- Limit local state to view focus, selections, onboarding alignment proposals, contextual UI state, bounded received caches, observed delivery rate, scroll state, help, and stale age.
+- Never read daemon logs or reconstruct hidden resource, mission, world, research, or story values in widgets.
 - Retry failures every second, retain the latest snapshot with an obvious stale indicator, make immediate retry available, and detach without stopping the daemon.
 - Render from pure application state and restore raw mode, cursor, and screen on every exit, error, and panic path.
 
 ## Current and target interfaces
 
-- Treat Dashboard, Assembly, F1/F2, the `i` prompt, and DSL submission as legacy prototype behavior while it remains implemented.
-- Do not expand command-entry gameplay. Phase 0 replaces Assembly and typed awakening with graphical onboarding.
+- Keep the Stage 0 Coherence onboarding graphical, untimed, and failure-free; persist only daemon-validated completion, not local band positions.
+- Do not add command-entry gameplay.
 - Build the target interface around keyboard-first Planet, Operations, Industry, Research, and Archive destinations, with a rotating selectable globe and contextual actions rather than typed commands.
 - Let arrows move focus or rotate the globe, Enter open or confirm, Esc move back, and Tab move between panels; keep frequent actions visible in context.
 - Require clear confirmation for destructive actions and display automation scope, approvals, and audit results when those systems exist.

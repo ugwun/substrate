@@ -3,7 +3,7 @@ use mind_core::{
     config::{AppPaths, Config},
     engine::MindEngine,
     protocol::{
-        self, failure, method, notification, success, ExecuteDslParams, RpcRequest,
+        self, failure, method, notification, success, CompleteOnboardingParams, RpcRequest,
         StatusNotification, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
@@ -306,19 +306,24 @@ async fn dispatch_frame(
             success(request.id, engine.trigger_diagnostic_pulse()),
             false,
         ),
-        method::EXECUTE_DSL => {
+        method::COMPLETE_ONBOARDING => {
             let params = request
                 .params
-                .and_then(|value| serde_json::from_value::<ExecuteDslParams>(value).ok());
+                .and_then(|value| serde_json::from_value::<CompleteOnboardingParams>(value).ok());
             match params {
                 Some(params) => (
-                    success(request.id, engine.execute_dsl(&params.command)),
+                    success(
+                        request.id,
+                        engine.complete_onboarding(params.band_positions),
+                    ),
                     false,
                 ),
-                None => (failure(request.id, -32602, "invalid DSL parameters"), false),
+                None => (
+                    failure(request.id, -32602, "invalid onboarding parameters"),
+                    false,
+                ),
             }
         }
-        method::QUERY_CIRCUIT_GRAPH => (success(request.id, engine.circuit_graph()), false),
         method::SUBSCRIBE_STATUS => {
             let id = subscription.get_or_insert_with(Uuid::new_v4);
             (
@@ -410,7 +415,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_dsl_rejects_missing_parameters() {
+    async fn complete_onboarding_rejects_missing_parameters() {
+        let engine = MindEngine::new(20);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(
+                stream,
+                engine,
+                shutdown_tx,
+                shutdown_rx,
+                Duration::from_secs(1),
+            )
+            .await;
+        });
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"mind.complete_onboarding\"}\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["error"]["code"],
+            -32602
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retired_prototype_method_is_not_found() {
         let engine = MindEngine::new(20);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -438,7 +477,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&response).unwrap()["error"]["code"],
-            -32602
+            -32601
         );
         server.abort();
     }

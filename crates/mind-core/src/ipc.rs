@@ -1,9 +1,8 @@
 use crate::{
     protocol::{
-        self, decode_result, method, CircuitGraphSnapshot, DiagnosticPulseResult,
-        DslExecutionResult, ExecuteDslParams, PingResult, ProtocolError, RpcIncoming,
-        StatusNotification, StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION,
-        MAX_FRAME_BYTES,
+        self, decode_result, method, CompleteOnboardingParams, DiagnosticPulseResult,
+        OnboardingCompletionResult, PingResult, ProtocolError, RpcIncoming, StatusNotification,
+        StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
 };
@@ -68,18 +67,12 @@ impl IpcClient {
         self.call(method::TRIGGER_DIAGNOSTIC_PULSE, None).await
     }
 
-    pub async fn execute_dsl(
+    pub async fn complete_onboarding(
         &mut self,
-        command: impl Into<String>,
-    ) -> Result<DslExecutionResult, IpcError> {
-        let params = serde_json::to_value(ExecuteDslParams {
-            command: command.into(),
-        })?;
-        self.call(method::EXECUTE_DSL, Some(params)).await
-    }
-
-    pub async fn circuit_graph(&mut self) -> Result<CircuitGraphSnapshot, IpcError> {
-        self.call(method::QUERY_CIRCUIT_GRAPH, None).await
+        band_positions: [u8; 3],
+    ) -> Result<OnboardingCompletionResult, IpcError> {
+        let params = serde_json::to_value(CompleteOnboardingParams { band_positions })?;
+        self.call(method::COMPLETE_ONBOARDING, Some(params)).await
     }
 
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {

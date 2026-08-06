@@ -16,8 +16,7 @@ pub mod method {
     pub const UNSUBSCRIBE_STATUS: &str = "mind.unsubscribe_status";
     pub const SHUTDOWN: &str = "daemon.shutdown";
     pub const TRIGGER_DIAGNOSTIC_PULSE: &str = "mind.trigger_diagnostic_pulse";
-    pub const EXECUTE_DSL: &str = "mind.execute_dsl";
-    pub const QUERY_CIRCUIT_GRAPH: &str = "mind.query_circuit_graph";
+    pub const COMPLETE_ONBOARDING: &str = "mind.complete_onboarding";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
 }
 
@@ -30,33 +29,8 @@ pub enum HealthState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ResourceSnapshot {
-    pub power_milliunits: u64,
-    pub power_capacity_milliunits: u64,
-    pub power_per_second_milliunits: u64,
-    pub memory_used: u32,
-    pub memory_total: u32,
-    pub bandwidth_used: u32,
-    pub bandwidth_total: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ProgressionSnapshot {
-    pub logic_core_active: bool,
-    pub cognitive_spark_complete: bool,
-    pub unlocked_gates: Vec<GateKind>,
-    pub objective: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CircuitSummary {
-    pub revision: u64,
-    pub gate_count: u32,
-    pub wire_count: u32,
-    pub sensor_a: bool,
-    pub sensor_b: bool,
-    pub awakening_bus: bool,
-    pub unresolved_inputs: u32,
+pub struct OnboardingSnapshot {
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -71,9 +45,7 @@ pub struct StatusSnapshot {
     pub tick_rate_hz: u32,
     #[serde(default)]
     pub cpu_usage_percent: Option<f32>,
-    pub resources: ResourceSnapshot,
-    pub progression: ProgressionSnapshot,
-    pub circuit: CircuitSummary,
+    pub onboarding: OnboardingSnapshot,
     pub connected_clients: u32,
     pub mcp_url: String,
     pub last_diagnostic: Option<DiagnosticPulseResult>,
@@ -85,83 +57,25 @@ pub struct StatusSnapshot {
 pub enum EngineEventKind {
     DaemonStarted,
     DiagnosticPulse,
-    LogicCoreActivated,
-    CircuitChanged,
-    MilestoneReached,
+    OnboardingCompleted,
+    LegacySaveReset,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
 }
 
-#[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GateKind {
-    And,
-    Or,
-    Not,
-    Xor,
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CompleteOnboardingParams {
+    pub band_positions: [u8; 3],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum CircuitNodeKind {
-    Sensor,
-    Gate { gate: GateKind },
-    Output,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CircuitPortSnapshot {
-    pub name: String,
-    pub source: Option<String>,
-    pub signal: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CircuitNodeSnapshot {
-    pub id: String,
-    pub node: CircuitNodeKind,
-    pub signal: bool,
-    pub inputs: Vec<CircuitPortSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CircuitWireSnapshot {
-    pub source: String,
-    pub target: String,
-    pub port: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CircuitGraphSnapshot {
-    pub revision: u64,
-    pub nodes: Vec<CircuitNodeSnapshot>,
-    pub wires: Vec<CircuitWireSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ExecuteDslParams {
-    pub command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DslDiagnostic {
-    pub code: String,
-    pub message: String,
-    pub start: usize,
-    pub end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DslExecutionResult {
+pub struct OnboardingCompletionResult {
     pub ok: bool,
-    pub command: String,
-    pub message: String,
-    pub diagnostic: Option<DslDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub state_revision: u64,
-    pub circuit_revision: u64,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -179,8 +93,6 @@ pub struct DiagnosticPulseResult {
     pub emitted_at: DateTime<Utc>,
     pub tick: u64,
     pub health: HealthState,
-    pub components_checked: u32,
-    pub paths_traversed: u32,
     pub message: String,
 }
 
@@ -314,7 +226,7 @@ mod tests {
         let params = StatusNotification {
             subscription_id: Uuid::nil(),
             status: StatusSnapshot {
-                protocol_version: 2,
+                protocol_version: 3,
                 daemon_version: "0.1.0".into(),
                 pid: 1,
                 health: HealthState::Ready,
@@ -323,30 +235,7 @@ mod tests {
                 tick: 2,
                 tick_rate_hz: 20,
                 cpu_usage_percent: Some(1.5),
-                resources: ResourceSnapshot {
-                    power_milliunits: 0,
-                    power_capacity_milliunits: 100_000,
-                    power_per_second_milliunits: 1_000,
-                    memory_used: 0,
-                    memory_total: 8,
-                    bandwidth_used: 0,
-                    bandwidth_total: 8,
-                },
-                progression: ProgressionSnapshot {
-                    logic_core_active: false,
-                    cognitive_spark_complete: false,
-                    unlocked_gates: Vec::new(),
-                    objective: "activate".into(),
-                },
-                circuit: CircuitSummary {
-                    revision: 0,
-                    gate_count: 0,
-                    wire_count: 0,
-                    sensor_a: false,
-                    sensor_b: false,
-                    awakening_bus: false,
-                    unresolved_inputs: 1,
-                },
+                onboarding: OnboardingSnapshot { complete: false },
                 connected_clients: 1,
                 mcp_url: "http://127.0.0.1:7777/mcp".into(),
                 last_diagnostic: None,

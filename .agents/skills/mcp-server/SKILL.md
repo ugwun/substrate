@@ -9,7 +9,7 @@ description: Maintain AI-agent access to Substrate through MCP. Use when changin
 
 - Use the official `rmcp` SDK pinned at 3.1.0 and advertise only MCP protocol `2026-07-28`.
 - Serve Streamable HTTP at `http://127.0.0.1:7777/mcp` and stdio through `mind-mcp`, which requires a running daemon.
-- Keep `get_mind_status`, `trigger_diagnostic_pulse`, `execute_dsl_command`, and `query_circuit_graph` until their owning roadmap phase changes them.
+- Keep `get_mind_status` and `trigger_diagnostic_pulse` as the current diagnostic surface until their owning roadmap phase changes them.
 - Instantiate the same `MindMcpServer` handler for direct-engine HTTP and IPC-backed stdio. Never create a fallback engine or transport-owned mutation.
 
 ## Security and lifecycle
@@ -22,7 +22,6 @@ description: Maintain AI-agent access to Substrate through MCP. Use when changin
 
 - Return concise text plus schema-backed `structuredContent` for successful tools. Surface backend failures as tool errors and malformed requests as protocol errors.
 - Add typed core DTOs, one authoritative engine operation, IPC coverage where needed, and direct-engine plus IPC-backed tests for every tool.
-- During Phase 0, remove DSL and circuit tools with their engine and IPC owners; do not retain them as an alternate main game.
 - Add future domain tools only after their gameplay system exists. Gate gameplay tool discovery and calls through authoritative research state.
 - Expose unlocked gameplay SKILLS as versioned, spoiler-safe Markdown resources; possession of instructions must never bypass engine capability gates.
 - Use stable `capability_locked` and `policy_denied` results for well-formed future gameplay denials.

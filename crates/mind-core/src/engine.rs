@@ -1,9 +1,8 @@
 use crate::{
-    dsl,
-    game::{GameError, GameEvent, GameState},
+    game::{GameError, GameState, LoadDisposition},
     protocol::{
-        CircuitGraphSnapshot, DiagnosticPulseResult, DslExecutionResult, EngineEvent,
-        EngineEventKind, HealthState, StatusSnapshot,
+        DiagnosticPulseResult, EngineEvent, EngineEventKind, HealthState,
+        OnboardingCompletionResult, StatusSnapshot,
     },
     PROTOCOL_VERSION,
 };
@@ -62,13 +61,21 @@ impl MindEngine {
         mcp_address: SocketAddr,
         game_state_file: PathBuf,
     ) -> Result<Arc<Self>, GameError> {
-        let state = GameState::load(&game_state_file)?;
-        Ok(Self::build(
+        let loaded = GameState::load(&game_state_file)?;
+        let disposition = loaded.disposition;
+        let engine = Self::build(
             tick_rate_hz,
             mcp_address,
-            state,
+            loaded.state,
             Some(game_state_file),
-        ))
+        );
+        if disposition == LoadDisposition::LegacyReset {
+            engine.record_event(
+                EngineEventKind::LegacySaveReset,
+                "Prototype save reset for graphical onboarding",
+            );
+        }
+        Ok(engine)
     }
 
     fn build(
@@ -110,7 +117,6 @@ impl MindEngine {
             tokio::select! {
                 _ = interval.tick() => {
                     self.tick.fetch_add(1, Ordering::Relaxed);
-                    self.game().advance_tick(self.tick_rate_hz);
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -123,7 +129,7 @@ impl MindEngine {
     }
 
     pub fn status(&self) -> StatusSnapshot {
-        let game = self.game().view();
+        let game = self.game();
         let history = self.history();
         StatusSnapshot {
             protocol_version: PROTOCOL_VERSION,
@@ -135,9 +141,7 @@ impl MindEngine {
             tick: self.tick.load(Ordering::Relaxed),
             tick_rate_hz: self.tick_rate_hz,
             cpu_usage_percent: self.cpu_usage_percent(),
-            resources: game.resources,
-            progression: game.progression,
-            circuit: game.circuit,
+            onboarding: game.onboarding(),
             connected_clients: self.clients.load(Ordering::Relaxed),
             mcp_url: format!("http://{}/mcp", self.mcp_address),
             last_diagnostic: history.last_diagnostic.clone(),
@@ -158,6 +162,10 @@ impl MindEngine {
         self.clients.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn client_disconnected(&self) {
+        self.clients.fetch_sub(1, Ordering::Relaxed);
+    }
+
     pub fn set_cpu_usage_percent(&self, value: Option<f32>) {
         let value = value.filter(|value| value.is_finite() && *value >= 0.0);
         self.cpu_usage_bits
@@ -167,10 +175,6 @@ impl MindEngine {
     fn cpu_usage_percent(&self) -> Option<f32> {
         let value = f32::from_bits(self.cpu_usage_bits.load(Ordering::Relaxed));
         value.is_finite().then_some(value)
-    }
-
-    pub fn client_disconnected(&self) {
-        self.clients.fetch_sub(1, Ordering::Relaxed);
     }
 
     pub fn begin_shutdown(&self) {
@@ -189,20 +193,13 @@ impl MindEngine {
     pub fn trigger_diagnostic_pulse(&self) -> DiagnosticPulseResult {
         let tick = self.tick.load(Ordering::Relaxed);
         let health = self.health();
-        let circuit = self.game().view().circuit;
         let mut history = self.history();
         let result = DiagnosticPulseResult {
             pulse_id: history.next_pulse_id,
             emitted_at: Utc::now(),
             tick,
             health,
-            components_checked: circuit.gate_count + 3,
-            paths_traversed: circuit.wire_count,
-            message: format!(
-                "Circuit traversal complete; {} unresolved inputs; AWAKENING_BUS {}",
-                circuit.unresolved_inputs,
-                if circuit.awakening_bus { "HIGH" } else { "LOW" }
-            ),
+            message: "Daemon responsive; persistence and simulation checks complete".into(),
         };
         history.next_pulse_id += 1;
         history.last_diagnostic = Some(result.clone());
@@ -215,80 +212,38 @@ impl MindEngine {
         result
     }
 
-    pub fn execute_dsl(&self, command: &str) -> DslExecutionResult {
-        let parsed = match dsl::parse(command) {
-            Ok(parsed) => parsed,
-            Err(diagnostic) => return self.dsl_failure(command, diagnostic),
-        };
+    pub fn complete_onboarding(&self, band_positions: [u8; 3]) -> OnboardingCompletionResult {
         let _persistence_write = self
             .game_state_file
             .as_ref()
             .map(|_| self.persistence_write());
         let mut state = self.game();
         let mut candidate = state.clone();
-        let applied = match candidate.apply(parsed) {
-            Ok(applied) => applied,
-            Err(mut diagnostic) => {
-                if diagnostic.start == diagnostic.end {
-                    diagnostic.end = command.len();
-                }
-                return self.dsl_failure_with_state(command, diagnostic, &state);
-            }
-        };
-
-        if applied.mutated {
-            if let Some(path) = &self.game_state_file {
-                if let Err(error) = candidate.save(path) {
-                    drop(state);
-                    self.set_persistence_error(Some(error.to_string()));
-                    return self.dsl_failure(
-                        command,
-                        crate::protocol::DslDiagnostic {
-                            code: "persistence_failed".into(),
-                            message: format!("command was not committed: {error}"),
-                            start: 0,
-                            end: command.len(),
-                        },
-                    );
-                }
-                if let Some(generation) = candidate.dirty_generation() {
-                    candidate.mark_saved(generation);
-                }
-            }
-            *state = candidate;
+        let mut result = candidate.complete_onboarding(band_positions);
+        if !result.ok || candidate.state_revision() == state.state_revision() {
+            return result;
         }
-        let state_revision = state.state_revision();
-        let circuit_revision = state.circuit_revision();
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                result.completed = false;
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
         drop(state);
-        if applied.mutated {
-            self.set_persistence_error(None);
-        }
-        if let Some(event) = applied.event {
-            match event {
-                GameEvent::LogicCoreActivated => {
-                    self.record_event(EngineEventKind::LogicCoreActivated, "LOGIC_CORE activated")
-                }
-                GameEvent::CircuitChanged(message) => {
-                    self.record_event(EngineEventKind::CircuitChanged, message)
-                }
-                GameEvent::MilestoneReached => self.record_event(
-                    EngineEventKind::MilestoneReached,
-                    "COGNITIVE_SPARK established; XOR fabrication unlocked",
-                ),
-            }
-        }
-        DslExecutionResult {
-            ok: true,
-            command: command.to_owned(),
-            message: applied.message,
-            diagnostic: None,
-            state_revision,
-            circuit_revision,
-        }
-    }
-
-    pub fn circuit_graph(&self) -> CircuitGraphSnapshot {
-        self.game().graph()
+        self.set_persistence_error(None);
+        self.record_event(
+            EngineEventKind::OnboardingCompleted,
+            "Graphical onboarding completed",
+        );
+        result
     }
 
     pub fn checkpoint_game_state(&self) -> Result<(), GameError> {
@@ -351,31 +306,6 @@ impl MindEngine {
                 ),
                 None => {}
             }
-        }
-    }
-
-    fn dsl_failure(
-        &self,
-        command: &str,
-        diagnostic: crate::protocol::DslDiagnostic,
-    ) -> DslExecutionResult {
-        let state = self.game();
-        self.dsl_failure_with_state(command, diagnostic, &state)
-    }
-
-    fn dsl_failure_with_state(
-        &self,
-        command: &str,
-        diagnostic: crate::protocol::DslDiagnostic,
-        state: &GameState,
-    ) -> DslExecutionResult {
-        DslExecutionResult {
-            ok: false,
-            command: command.to_owned(),
-            message: diagnostic.message.clone(),
-            diagnostic: Some(diagnostic),
-            state_revision: state.state_revision(),
-            circuit_revision: state.circuit_revision(),
         }
     }
 
@@ -451,6 +381,26 @@ mod tests {
     }
 
     #[test]
+    fn completion_is_validated_and_idempotent() {
+        let engine = MindEngine::new(20);
+        assert_eq!(
+            engine.complete_onboarding([1, 2, 1]).code.as_deref(),
+            Some("not_coherent")
+        );
+        let completed = engine.complete_onboarding([4, 4, 4]);
+        assert!(completed.ok);
+        assert!(engine.status().onboarding.complete);
+        assert_eq!(engine.complete_onboarding([0, 0, 0]).state_revision, 1);
+        let events = engine
+            .status()
+            .recent_events
+            .into_iter()
+            .filter(|event| event.kind == EngineEventKind::OnboardingCompleted)
+            .count();
+        assert_eq!(events, 1);
+    }
+
+    #[test]
     fn shutdown_event_is_idempotent() {
         let engine = MindEngine::new(20);
         engine.begin_shutdown();
@@ -475,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_failure_rolls_back_a_mutating_command() {
+    fn persistence_failure_rolls_back_completion() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("missing/game_state.json");
         let engine = MindEngine::persistent(
@@ -484,20 +434,10 @@ mod tests {
             path,
         )
         .unwrap();
-        for _ in 0..200 {
-            engine.game().advance_tick(20);
-        }
-        let before = engine.status();
-        let result = engine.execute_dsl("ACTIVATE LOGIC_CORE");
-        let after = engine.status();
-
+        let result = engine.complete_onboarding([2, 2, 2]);
         assert!(!result.ok);
-        assert_eq!(result.diagnostic.unwrap().code, "persistence_failed");
-        assert!(!after.progression.logic_core_active);
-        assert_eq!(
-            after.resources.power_milliunits,
-            before.resources.power_milliunits
-        );
-        assert_eq!(after.health, HealthState::Degraded);
+        assert_eq!(result.code.as_deref(), Some("persistence_failed"));
+        assert!(!engine.status().onboarding.complete);
+        assert_eq!(engine.status().health, HealthState::Degraded);
     }
 }

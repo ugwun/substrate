@@ -51,13 +51,13 @@ async fn serves_status_subscription_and_shutdown() {
         .is_ok());
     let initial = client.status().await.unwrap();
     assert_eq!(initial.tick_rate_hz, 100);
-    assert_eq!(initial.protocol_version, 2);
-    let dsl = client.execute_dsl("STATUS").await.unwrap();
-    assert!(dsl.ok);
-    assert!(dsl.message.contains("power"));
-    let graph = client.circuit_graph().await.unwrap();
-    assert_eq!(graph.nodes.len(), 3);
-    assert!(graph.wires.is_empty());
+    assert_eq!(initial.protocol_version, 3);
+    assert!(!initial.onboarding.complete);
+    let rejected = client.complete_onboarding([1, 2, 1]).await.unwrap();
+    assert_eq!(rejected.code.as_deref(), Some("not_coherent"));
+    let completed = client.complete_onboarding([3, 3, 3]).await.unwrap();
+    assert!(completed.ok);
+    assert!(client.status().await.unwrap().onboarding.complete);
     let subscription_id = client.subscribe_status().await.unwrap();
     let pulse = client.trigger_diagnostic_pulse().await.unwrap();
     assert_eq!(pulse.pulse_id, 1);
@@ -88,7 +88,7 @@ async fn serves_status_subscription_and_shutdown() {
 }
 
 #[tokio::test]
-async fn graceful_restart_preserves_generated_power_without_offline_progress() {
+async fn graceful_restart_preserves_onboarding_completion_without_offline_progress() {
     let temp = TempDir::new().unwrap();
     let paths = paths(&temp);
     paths.ensure_directories().unwrap();
@@ -103,14 +103,14 @@ async fn graceful_restart_preserves_generated_power_without_offline_progress() {
     let first_daemon = tokio::spawn(mind_daemon::run(config.clone(), paths.clone()));
     let first_metadata = wait_for_metadata(&runtime_file).await;
     let mut first_client = IpcClient::connect(first_metadata.address).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let first_power = first_client
-        .status()
-        .await
-        .unwrap()
-        .resources
-        .power_milliunits;
-    assert!(first_power >= 100);
+    assert!(
+        first_client
+            .complete_onboarding([6, 6, 6])
+            .await
+            .unwrap()
+            .ok
+    );
+    let first_tick = first_client.status().await.unwrap().tick;
     assert!(first_client.shutdown().await.unwrap());
     drop(first_client);
     tokio::time::timeout(Duration::from_secs(2), first_daemon)
@@ -123,14 +123,9 @@ async fn graceful_restart_preserves_generated_power_without_offline_progress() {
     let second_daemon = tokio::spawn(mind_daemon::run(config, paths));
     let second_metadata = wait_for_metadata(&runtime_file).await;
     let mut second_client = IpcClient::connect(second_metadata.address).await.unwrap();
-    let restored_power = second_client
-        .status()
-        .await
-        .unwrap()
-        .resources
-        .power_milliunits;
-    assert!(restored_power >= first_power);
-    assert!(restored_power < first_power + 200);
+    let restored = second_client.status().await.unwrap();
+    assert!(restored.onboarding.complete);
+    assert!(restored.tick <= first_tick + 5);
     assert!(second_client.shutdown().await.unwrap());
     drop(second_client);
     tokio::time::timeout(Duration::from_secs(2), second_daemon)

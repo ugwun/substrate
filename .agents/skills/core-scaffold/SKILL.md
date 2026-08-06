@@ -18,7 +18,7 @@ description: Maintain Substrate workspace architecture, configuration, and engin
 ## Product direction
 
 - Treat `GAME_PLAN.md` as the authoritative public future direction and current code/README as the implemented state.
-- Do not describe a planned system as implemented or extend the legacy circuit prototype contrary to Phase 0.
+- Do not describe a planned system as implemented or reintroduce the retired circuit prototype or typed command gameplay.
 - Place world generation, probes, missions, resources, research, bases, discoveries, automation policy, and pulse schedules behind engine APIs.
 - Add typed request/result structures in `mind-core`, mutate state transactionally in the engine, and adapt the same operation through daemon, IPC, MCP, and TUI layers.
 
@@ -27,6 +27,6 @@ description: Maintain Substrate workspace architecture, configuration, and engin
 - Use a versioned JSON envelope and same-directory atomic replacement.
 - Persist authoritative progression and permanent knowledge; keep derived render caches, connection state, diagnostics, and runtime metadata transient.
 - Reject corrupt, future-version, or invariant-breaking saves rather than silently resetting progression.
-- Add explicit migrations before changing persisted representations or removing the circuit prototype.
+- Add explicit migrations or reset transitions before changing persisted representations.
 
 Update `AGENTS.md`, README, tests, `GAME_PLAN.md` when product intent changes, and every affected repository skill when its subsystem contract changes.

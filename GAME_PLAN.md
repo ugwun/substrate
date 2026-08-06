@@ -448,12 +448,13 @@ restoration, and portable paths remain architectural invariants.
 
 ### Phase 0: Retire the circuit prototype
 
-- Remove the circuit objective, DSL command entry, circuit graph UI, and related MCP
+**Status: implemented.**
+
+- Removed the circuit objective, DSL command entry, circuit graph UI, and related MCP
   gameplay surface before building the new main loop.
-- Replace the current awakening interaction with a minimal graphical onboarding flow.
-- Introduce an explicit save-schema transition for existing prototype state; never
-  silently reinterpret or discard a save.
-- Keep daemon lifecycle, IPC, persistence, MCP transport, and TUI attachment foundations.
+- Replaced the prototype awakening interaction with a minimal graphical onboarding flow.
+- Introduced an explicit save-schema reset for prototype state.
+- Retained daemon lifecycle, IPC, persistence, MCP transport, and TUI attachment foundations.
 
 **Playable result:** the Mind can awaken through selections rather than commands, and
 the repository no longer presents circuit assembly as the product direction.

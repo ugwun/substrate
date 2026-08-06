@@ -4,19 +4,19 @@
 
 Substrate is a Rust 2021 workspace. `mind-daemon` is the sole authority for simulation state. `mind-cli`, `mind-tui`, and MCP adapters communicate with it over the shared IPC types and client in `mind-core`; frontend code must never own or advance game state.
 
-The local IPC protocol is newline-delimited JSON-RPC 2.0 on loopback TCP, defaulting to `127.0.0.1:7776`. Protocol version 2 supports ping, status query/subscription, diagnostic pulses, DSL execution, circuit graph queries, unsubscribe, and graceful shutdown.
+The local IPC protocol is newline-delimited JSON-RPC 2.0 on loopback TCP, defaulting to `127.0.0.1:7776`. Protocol version 3 supports ping, status query/subscription, graphical onboarding completion, diagnostic pulses, unsubscribe, and graceful shutdown.
 
-MCP protocol `2026-07-28` is exposed through Streamable HTTP at `http://127.0.0.1:7777/mcp` and through the `mind-mcp` stdio bridge. `mind-mcp` attaches to the existing daemon over IPC and never owns simulation state. The MCP surface contains `get_mind_status`, `trigger_diagnostic_pulse`, `execute_dsl_command`, and `query_circuit_graph`.
+MCP protocol `2026-07-28` is exposed through Streamable HTTP at `http://127.0.0.1:7777/mcp` and through the `mind-mcp` stdio bridge. `mind-mcp` attaches to the existing daemon over IPC and never owns simulation state. The current MCP surface contains `get_mind_status` and `trigger_diagnostic_pulse`.
 
-`mind-tui` is an attach-only Ratatui frontend with Dashboard and Assembly workspaces. Its local application state may cache received events and graphs, calculate client-observed tick rate, and remember view and prompt state, but authoritative telemetry, resources, progression, circuit signals, and diagnostics always originate in daemon snapshots. Detaching must never stop the daemon.
+`mind-tui` is an attach-only Ratatui frontend with graphical Coherence onboarding and an operational dashboard. Its local application state may cache received events, calculate client-observed tick rate, and remember view, alignment, and scroll state, but authoritative onboarding completion, telemetry, and diagnostics always originate in daemon snapshots. Detaching must never stop the daemon.
 
-Configuration uses platform-native directories and `PathBuf`. CLI options override `SUBSTRATE_*` environment variables, which override `config.toml`, which overrides defaults. Versioned game state is atomically persisted beneath the platform-local data directory; it advances only while the daemon is running.
+Configuration uses platform-native directories and `PathBuf`. CLI options override `SUBSTRATE_*` environment variables, which override `config.toml`, which overrides defaults. Versioned game state is atomically persisted beneath the platform-local data directory; it advances only while the daemon is running. Save schema 2 intentionally resets schema-1 prototype saves into fresh graphical onboarding.
 
 ## Product direction
 
-`GAME_PLAN.md` is the authoritative public product direction. Keep current architecture descriptions accurate, but do not mistake the implemented circuit vertical slice for the intended long-term game.
+`GAME_PLAN.md` is the authoritative public product direction. Keep current architecture descriptions accurate and distinguish the implemented Phase 0 foundation from planned planetary systems.
 
-The circuit DSL, COGNITIVE_SPARK objective, Assembly prompt, and circuit MCP tools are legacy prototype surfaces. Do not expand them unless explicitly asked to maintain the prototype. Phase 0 removes them coherently before planetary exploration becomes the main loop, with an explicit save transition and graphical awakening replacement.
+Phase 0 retired the circuit prototype, typed awakening, Assembly prompt, and related IPC and MCP surfaces. Do not reintroduce generic command-entry gameplay. The next product phase introduces planetary exploration on the retained daemon, persistence, IPC, MCP, and attach-only TUI foundations.
 
 The target game is a keyboard-first graphical TUI centered on a rotating regional globe, probes, geological resources, energy, logistics, research, bases, permanent discoveries, and optional research-gated external LLM assistance. Typed command entry must not be required for player progression. All world simulation, risk, progression, story eligibility, automation policy, and pulse timing remain daemon-owned and advance only while the daemon runs.
 
@@ -52,7 +52,7 @@ Build all binaries with `cargo build --workspace` before exercising `mind-cli da
 
 Keep daemon logic independent of rendering and transport presentation. Extend protocol DTOs in `mind-core`, handle requests in the daemon, and consume them through the shared client. MCP handlers must adapt the same engine operations rather than implementing alternate state. Reject non-loopback endpoints unless the security model is deliberately redesigned.
 
-Follow the maintenance rules above and each matching repository skill. Use `circuit-dsl` only for legacy maintenance or retirement, `planetary-gameplay` for the future main loop, `narrative-delivery` for public story work, and `external-coprocessor` for research-gated LLM gameplay.
+Follow the maintenance rules above and each matching repository skill. Use `planetary-gameplay` for the future main loop, `narrative-delivery` for public story work, and `external-coprocessor` for research-gated LLM gameplay.
 
 ## Operational commands
 

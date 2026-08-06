@@ -3,7 +3,7 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_tui::{
-    app::{App, ConnectionState, Workspace},
+    app::{App, ConnectionState, OnboardingView},
     connection::{self, ConnectionCommand, ConnectionUpdate},
     ui::{self, RenderOptions},
 };
@@ -92,8 +92,9 @@ async fn run_dashboard(
                         app.diagnostic_completed(&result);
                     }
                     Some(ConnectionUpdate::DiagnosticFailed(error)) => app.diagnostic_failed(error),
-                    Some(ConnectionUpdate::DslCompleted(result)) => app.apply_dsl_result(result),
-                    Some(ConnectionUpdate::Graph(graph)) => app.apply_graph(graph),
+                    Some(ConnectionUpdate::OnboardingCompleted(result)) => {
+                        app.onboarding_completed(result);
+                    }
                     None => app.disconnected("connection worker stopped"),
                 }
             }
@@ -114,42 +115,69 @@ async fn handle_key(
     {
         return Ok(true);
     }
-    match key.code {
-        KeyCode::F(1) => {
-            app.set_workspace(Workspace::Dashboard);
-            return Ok(false);
+    if app.show_help {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') => app.show_help = false,
+            _ => {}
         }
-        KeyCode::F(2) => {
-            app.set_workspace(Workspace::Assembly);
-            return Ok(false);
-        }
-        _ => {}
+        return Ok(false);
     }
 
-    if app.workspace == Workspace::Assembly && app.prompt_focused {
+    if app.snapshot.is_none() {
         match key.code {
-            KeyCode::Enter => {
-                if let Some(command) = app.take_prompt_command() {
-                    commands
-                        .send(ConnectionCommand::ExecuteDsl(command))
-                        .await
-                        .context("connection worker stopped")?;
-                }
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+            KeyCode::Char('?') => app.show_help = true,
+            KeyCode::Char('r') => {
+                commands
+                    .send(ConnectionCommand::Retry)
+                    .await
+                    .context("connection worker stopped")?;
             }
-            KeyCode::Esc => app.blur_prompt(),
-            KeyCode::Tab => app.complete_prompt(),
-            KeyCode::Backspace => app.backspace_prompt(),
-            KeyCode::Delete => app.delete_prompt(),
-            KeyCode::Left => app.move_prompt_left(),
-            KeyCode::Right => app.move_prompt_right(),
-            KeyCode::Home => app.prompt_cursor = 0,
-            KeyCode::End => app.prompt_cursor = app.prompt.len(),
-            KeyCode::Up => app.history_previous(),
-            KeyCode::Down => app.history_next(),
-            KeyCode::Char(character)
-                if key.modifiers.is_empty() || key.modifiers == event::KeyModifiers::SHIFT =>
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+    if app.onboarding_pending() {
+        match key.code {
+            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('?') => app.show_help = true,
+            KeyCode::Char('r') => {
+                commands
+                    .send(ConnectionCommand::Retry)
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            KeyCode::Esc if app.onboarding_view == OnboardingView::Confirming => {
+                app.cancel_confirmation();
+            }
+            KeyCode::Up if app.onboarding_view == OnboardingView::Adjusting => {
+                app.select_previous_band();
+            }
+            KeyCode::Down if app.onboarding_view == OnboardingView::Adjusting => {
+                app.select_next_band();
+            }
+            KeyCode::Left if app.onboarding_view == OnboardingView::Adjusting => {
+                app.rotate_selected(-1);
+            }
+            KeyCode::Right if app.onboarding_view == OnboardingView::Adjusting => {
+                app.rotate_selected(1);
+            }
+            KeyCode::Enter if app.onboarding_view == OnboardingView::Adjusting => {
+                app.observe();
+            }
+            KeyCode::Enter
+                if app.onboarding_view == OnboardingView::Confirming
+                    && matches!(app.connection, ConnectionState::Connected) =>
             {
-                app.insert_prompt_char(character)
+                app.begin_submission();
+                commands
+                    .send(ConnectionCommand::CompleteOnboarding(app.band_positions))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            KeyCode::Enter if app.onboarding_view == OnboardingView::Confirming => {
+                app.notice = Some("A daemon connection is required to awaken.".into());
             }
             _ => {}
         }
@@ -158,7 +186,6 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc if app.show_help => app.show_help = false,
         KeyCode::Esc => return Ok(true),
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('d') if matches!(app.connection, ConnectionState::Connected) => {
@@ -181,8 +208,65 @@ async fn handle_key(
         KeyCode::Home => app.scroll_home(),
         KeyCode::End => app.scroll_end(),
         KeyCode::Char('f') => app.toggle_follow(),
-        KeyCode::Char('i') if app.workspace == Workspace::Assembly => app.focus_prompt(),
         _ => {}
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[tokio::test]
+    async fn aligned_onboarding_requires_observe_then_awaken() {
+        let mut app = App::default();
+        app.apply_snapshot(
+            mind_core::engine::MindEngine::new(20).status(),
+            std::time::Instant::now(),
+        );
+        app.connected();
+        app.band_positions = [4, 4, 4];
+        let (commands, mut received) = mpsc::channel(2);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.onboarding_view, OnboardingView::Confirming);
+        assert!(received.try_recv().is_err());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.onboarding_view, OnboardingView::Submitting);
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::CompleteOnboarding([4, 4, 4]))
+        ));
+    }
+
+    #[tokio::test]
+    async fn onboarding_input_is_blocked_until_status_arrives() {
+        let mut app = App::default();
+        app.band_positions = [4, 4, 4];
+        let (commands, mut received) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.onboarding_view, OnboardingView::Adjusting);
+        assert!(received.try_recv().is_err());
+    }
 }
