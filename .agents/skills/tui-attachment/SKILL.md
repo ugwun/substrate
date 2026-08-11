@@ -24,9 +24,11 @@ description: Maintain the attach-only Ratatui frontend and daemon connection beh
 
 ## Rendering and validation
 
-- Use restrained cyan and amber styling with semantic states, never color alone.
+- Use the centralized Substrate Dark theme instead of widget-local color literals. Keep its Solarized-derived deep canvas, layered panel and raised surfaces, warm text hierarchy, restrained cyan focus and communication, amber actions, and distinct success, warning, and failure roles.
+- Reserve bright borders for the active surface and amber borders for modal or warning surfaces. Keep inactive borders and secondary text quiet; express every state through text, symbols, borders, or modifiers as well as color.
+- Fill the full terminal and panel surfaces in color mode. Never force foreground or background colors in `--no-color`, `NO_COLOR`, or `TERM=dumb` mode; preserve hierarchy there with ASCII-safe symbols and modifiers.
 - Render the regional world through a true orthographic near-hemisphere projection. Use half-block foreground/background colors for square Unicode subpixels, continuous lighting and limb depth, subtle projected region boundaries, and overlays for selection, scout position, and active paths. Never sample undiscovered world truth to add visual texture.
 - Keep yaw, pitch, idle rotation, easing, and animation phase transient and client-local. Navigation may recenter the camera but must not change selection during idle rotation or advance authoritative missions.
 - Preserve side-by-side wide layouts, stacked narrow layouts, a useful tiny-terminal message, Unicode defaults, and equivalent `--ascii`, `--no-color`, `TERM=dumb`, and `NO_COLOR` behavior.
-- Test reducers and Ratatui `TestBackend` frames for wide, stacked, tiny, disconnected, stale, help, Unicode, fallback, globe selection, idle rotation, workspace navigation, scout deployment and recall, contextual actions, and confirmations as implemented.
+- Test palette semantics and essential contrast, then exercise reducers and Ratatui `TestBackend` frames for wide, medium-footer, stacked, tiny, disconnected, stale, help, Unicode, fallback, globe selection, idle rotation, workspace navigation, scout deployment and recall, contextual actions, and confirmations as implemented.
 - Finish with live PTY inspection against the real daemon. Trigger a diagnostic pulse, force disconnect/reconnect, detach, and verify daemon reachability and terminal restoration.

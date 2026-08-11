@@ -1,3 +1,4 @@
+use crate::theme::{Theme, AMBER_RGB, CYAN_RGB};
 use mind_core::protocol::{
     PlanetSnapshot, RegionKnowledge, RegionSnapshot, ScoutState, TerrainClass,
 };
@@ -22,6 +23,7 @@ pub struct GlobeRenderOptions {
     pub phase: f64,
     pub ascii: bool,
     pub no_color: bool,
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,9 +130,17 @@ pub fn render(
                         options.pitch,
                     );
                     if rich_unicode {
-                        rich_cell(top, bottom, x, y)
+                        rich_cell(top, bottom, x, y, options.theme)
                     } else {
-                        fallback_cell(top, bottom, options.ascii, options.no_color, x, y)
+                        fallback_cell(
+                            top,
+                            bottom,
+                            options.ascii,
+                            options.no_color,
+                            x,
+                            y,
+                            options.theme,
+                        )
                     }
                 })
                 .collect::<Vec<_>>()
@@ -212,10 +222,10 @@ fn sample_surface(
     }
     color = color.scale(luminance);
     if radius_squared > 0.93 {
-        color = color.mix(Rgb(34, 150, 170), ((radius_squared - 0.93) / 0.07) * 0.38);
+        color = color.mix(Rgb::from(CYAN_RGB), ((radius_squared - 0.93) / 0.07) * 0.38);
     }
     if selected_edge {
-        color = Rgb(208, 142, 45).scale(0.68 + diffuse * 0.32);
+        color = Rgb::from(AMBER_RGB).scale(0.68 + diffuse * 0.32);
         luminance = 0.86;
     }
 
@@ -233,6 +243,7 @@ fn rich_cell(
     bottom: Option<SurfaceSample>,
     x: usize,
     y: usize,
+    theme: Theme,
 ) -> Cell {
     match (top, bottom) {
         (Some(top), Some(bottom)) => Cell {
@@ -249,7 +260,7 @@ fn rich_cell(
             symbol: Cow::Borrowed("▄"),
             style: Style::default().fg(bottom.color.color()),
         },
-        (None, None) => star_cell(x, y, false),
+        (None, None) => star_cell(x, y, false, theme),
     }
 }
 
@@ -260,6 +271,7 @@ fn fallback_cell(
     no_color: bool,
     x: usize,
     y: usize,
+    theme: Theme,
 ) -> Cell {
     let sample = match (top, bottom) {
         (Some(top), Some(bottom)) => Some(if top.luminance >= bottom.luminance {
@@ -271,7 +283,7 @@ fn fallback_cell(
         (None, None) => None,
     };
     let Some(sample) = sample else {
-        return star_cell(x, y, ascii);
+        return star_cell(x, y, ascii, theme);
     };
     let symbol = if sample.selected_edge {
         if ascii {
@@ -301,7 +313,7 @@ fn fallback_cell(
         }
     } else if sample.selected || sample.selected_edge {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.amber)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(sample.color.color())
@@ -312,7 +324,7 @@ fn fallback_cell(
     }
 }
 
-fn star_cell(x: usize, y: usize, ascii: bool) -> Cell {
+fn star_cell(x: usize, y: usize, ascii: bool, theme: Theme) -> Cell {
     let hash = x
         .wrapping_mul(0x9e37)
         .wrapping_add(y.wrapping_mul(0x85eb))
@@ -320,7 +332,7 @@ fn star_cell(x: usize, y: usize, ascii: bool) -> Cell {
     if hash % 89 == 3 {
         Cell {
             symbol: Cow::Borrowed(if ascii { "." } else { "·" }),
-            style: Style::default().fg(Color::DarkGray),
+            style: Style::default().fg(theme.faint),
         }
     } else {
         Cell::blank()
@@ -349,7 +361,7 @@ fn draw_region_markers(
             core,
             "◇",
             "o",
-            Color::Cyan,
+            options.theme.blue,
             false,
             options,
             center_x,
@@ -367,7 +379,7 @@ fn draw_region_markers(
                 "◉"
             },
             "T",
-            Color::Yellow,
+            options.theme.amber,
             false,
             options,
             center_x,
@@ -381,7 +393,7 @@ fn draw_region_markers(
             scout,
             "●",
             "S",
-            Color::LightCyan,
+            options.theme.cyan_bright,
             false,
             options,
             center_x,
@@ -395,7 +407,7 @@ fn draw_region_markers(
             selected,
             "◆",
             "@",
-            Color::Yellow,
+            options.theme.amber,
             true,
             options,
             center_x,
@@ -514,9 +526,9 @@ fn draw_mission_path(
             let foreground = if options.no_color {
                 Color::Reset
             } else if is_pulse {
-                Color::Yellow
+                options.theme.amber
             } else {
-                Color::Cyan
+                options.theme.cyan
             };
             let cell = &mut cells[y as usize][x as usize];
             if options.ascii || options.no_color {
@@ -606,10 +618,16 @@ fn find_region<'a>(planet: &'a PlanetSnapshot, id: &str) -> Option<&'a RegionSna
 
 fn knowledge_color(knowledge: RegionKnowledge) -> Rgb {
     match knowledge {
-        RegionKnowledge::Unknown => Rgb(31, 69, 77),
-        RegionKnowledge::Detected => Rgb(35, 88, 97),
-        RegionKnowledge::Surveyed => Rgb(43, 117, 126),
-        RegionKnowledge::Observed => Rgb(56, 158, 166),
+        RegionKnowledge::Unknown => Rgb(18, 55, 64),
+        RegionKnowledge::Detected => Rgb(22, 75, 85),
+        RegionKnowledge::Surveyed => Rgb(28, 102, 112),
+        RegionKnowledge::Observed => Rgb(42, 145, 145),
+    }
+}
+
+impl From<(u8, u8, u8)> for Rgb {
+    fn from((red, green, blue): (u8, u8, u8)) -> Self {
+        Self(red, green, blue)
     }
 }
 
@@ -732,6 +750,7 @@ mod tests {
                 phase: 0.0,
                 ascii: false,
                 no_color: false,
+                theme: Theme::new(false),
             },
         );
         let plain = plain_text(&output);
@@ -756,6 +775,7 @@ mod tests {
                 phase: 0.0,
                 ascii: true,
                 no_color: true,
+                theme: Theme::new(true),
             },
         );
         let plain = plain_text(&output);
@@ -799,6 +819,7 @@ mod tests {
                 phase: 0.5,
                 ascii: true,
                 no_color: true,
+                theme: Theme::new(true),
             },
         );
         let plain = plain_text(&output);
@@ -817,13 +838,14 @@ mod tests {
                 phase: 0.5,
                 ascii: false,
                 no_color: false,
+                theme: Theme::new(false),
             },
         );
         assert!(rich_output
             .lines
             .iter()
             .flat_map(|line| line.spans.iter())
-            .any(|span| span.style.fg == Some(Color::Cyan)));
+            .any(|span| span.style.fg == Some(Theme::new(false).cyan)));
         assert!(!plain_text(&rich_output).contains('•'));
     }
 }

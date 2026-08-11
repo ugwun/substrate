@@ -2,7 +2,9 @@
 
 Substrate is an atmospheric terminal game about an awakening machine intelligence exploring an unknown planet, growing its physical reach, and searching for evidence of its origin. Its simulation runs in a headless daemon and exposes local, versioned IPC and MCP interfaces to terminal and AI clients.
 
-The repository currently implements the Phase 0 foundation and the first playable Phase 1 survey slice: daemon-owned state, durable graphical onboarding, a lit orthographic regional globe with smooth idle rotation, fog and survey knowledge, one timed scout deployment, diagnostic telemetry, native MCP access, managed daemon lifecycle, and an attach-only Ratatui interface.
+![Animated Substrate terminal gameplay showing the rotating regional globe, region inspection, and scout deployment](docs/assets/substrate-terminal-demo.gif)
+
+The repository currently implements the Phase 0 foundation and the first playable Phase 1 survey slice: daemon-owned state, durable graphical onboarding, a lit orthographic regional globe with smooth idle rotation, fog and survey knowledge, one timed scout deployment, diagnostic telemetry, native MCP access, managed daemon lifecycle, and an attach-only Ratatui interface with the Solarized-derived Substrate Dark theme.
 
 ## Prerequisites
 
@@ -70,7 +72,7 @@ Operations uses Enter to recall an outbound, surveying, or holding scout. System
 
 The starting scout can reach regions up to two graph hops from the core. Arrival permanently detects broad terrain; completing the focused survey records temperature and atmospheric severity, then leaves the scout holding the region under continuous observation. Recall returns the scout to the core without erasing surveyed knowledge. Mission time advances only while the daemon runs.
 
-Unicode and color are enabled by default. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color.
+Unicode and the Substrate Dark truecolor theme are enabled by default. Its deep blue-black canvas, layered teal surfaces, restrained cyan focus, amber actions, and explicit semantic states remain consistent across onboarding and every workspace. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color without removing the symbol, border, text, or modifier hierarchy.
 
 ## IPC contract
 
