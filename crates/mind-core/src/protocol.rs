@@ -17,7 +17,13 @@ pub mod method {
     pub const SHUTDOWN: &str = "daemon.shutdown";
     pub const TRIGGER_DIAGNOSTIC_PULSE: &str = "mind.trigger_diagnostic_pulse";
     pub const COMPLETE_ONBOARDING: &str = "mind.complete_onboarding";
+    pub const GET_PLANET: &str = "mind.get_planet";
+    pub const SUBSCRIBE_PLANET: &str = "mind.subscribe_planet";
+    pub const UNSUBSCRIBE_PLANET: &str = "mind.unsubscribe_planet";
+    pub const DEPLOY_SCOUT: &str = "mind.deploy_scout";
+    pub const RECALL_SCOUT: &str = "mind.recall_scout";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
+    pub const PLANET_CHANGED: &str = "mind.planet_changed";
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -58,10 +64,154 @@ pub enum EngineEventKind {
     DaemonStarted,
     DiagnosticPulse,
     OnboardingCompleted,
-    LegacySaveReset,
+    SaveReset,
+    ScoutDeployed,
+    RegionDetected,
+    SurveyCompleted,
+    ScoutRecallRequested,
+    ScoutReturned,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerrainClass {
+    Basin,
+    Plain,
+    Highland,
+    Ridge,
+    Fractured,
+    Polar,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemperatureBand {
+    Frigid,
+    Cold,
+    Temperate,
+    Hot,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AtmosphericSeverity {
+    Stable,
+    Variable,
+    Severe,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionKnowledge {
+    Unknown,
+    Detected,
+    Surveyed,
+    Observed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurveyConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoutState {
+    Ready,
+    Outbound,
+    Surveying,
+    Holding,
+    Returning,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionReportOutcome {
+    SurveyCompleted,
+    Recalled,
+    Returned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct RegionPosition {
+    pub latitude_band: u8,
+    pub longitude_sector: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct RegionSnapshot {
+    pub id: String,
+    pub designation: String,
+    pub position: RegionPosition,
+    pub core: bool,
+    pub knowledge: RegionKnowledge,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terrain: Option<TerrainClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<TemperatureBand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atmospheric_severity: Option<AtmosphericSeverity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<SurveyConfidence>,
+    pub hop_distance_from_core: u8,
+    pub within_scout_range: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ScoutSnapshot {
+    pub id: String,
+    pub designation: String,
+    pub state: ScoutState,
+    pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActiveMissionSnapshot {
+    pub mission_id: u64,
+    pub target_region_id: String,
+    pub phase: ScoutState,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MissionReport {
+    pub mission_id: u64,
+    pub region_id: String,
+    pub outcome: MissionReportOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanetSnapshot {
+    pub revision: u64,
+    pub core_region_id: String,
+    pub regions: Vec<RegionSnapshot>,
+    pub scout: ScoutSnapshot,
+    pub active_mission: Option<ActiveMissionSnapshot>,
+    pub recent_reports: Vec<MissionReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DeployScoutParams {
+    pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanetActionResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -125,6 +275,12 @@ pub struct UnsubscribeParams {
 pub struct StatusNotification {
     pub subscription_id: Uuid,
     pub status: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanetNotification {
+    pub subscription_id: Uuid,
+    pub planet: PlanetSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -226,7 +382,7 @@ mod tests {
         let params = StatusNotification {
             subscription_id: Uuid::nil(),
             status: StatusSnapshot {
-                protocol_version: 3,
+                protocol_version: 4,
                 daemon_version: "0.1.0".into(),
                 pid: 1,
                 health: HealthState::Ready,

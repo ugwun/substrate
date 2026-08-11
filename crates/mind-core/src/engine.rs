@@ -1,8 +1,8 @@
 use crate::{
-    game::{GameError, GameState, LoadDisposition},
+    game::{GameAdvanceEvent, GameError, GameState, LoadDisposition},
     protocol::{
         DiagnosticPulseResult, EngineEvent, EngineEventKind, HealthState,
-        OnboardingCompletionResult, StatusSnapshot,
+        OnboardingCompletionResult, PlanetActionResult, PlanetSnapshot, StatusSnapshot,
     },
     PROTOCOL_VERSION,
 };
@@ -69,10 +69,10 @@ impl MindEngine {
             loaded.state,
             Some(game_state_file),
         );
-        if disposition == LoadDisposition::LegacyReset {
+        if disposition == LoadDisposition::PreviousReset {
             engine.record_event(
-                EngineEventKind::LegacySaveReset,
-                "Prototype save reset for graphical onboarding",
+                EngineEventKind::SaveReset,
+                "Previous save reset for the regional planet model",
             );
         }
         Ok(engine)
@@ -117,6 +117,25 @@ impl MindEngine {
             tokio::select! {
                 _ = interval.tick() => {
                     self.tick.fetch_add(1, Ordering::Relaxed);
+                    let elapsed_ms = period.as_millis().max(1) as u64;
+                    let events = self.game().advance(elapsed_ms);
+                    for event in events {
+                        let (kind, message) = match event {
+                            GameAdvanceEvent::RegionDetected => (
+                                EngineEventKind::RegionDetected,
+                                "Scout sensors resolved regional terrain",
+                            ),
+                            GameAdvanceEvent::SurveyCompleted => (
+                                EngineEventKind::SurveyCompleted,
+                                "Regional survey completed",
+                            ),
+                            GameAdvanceEvent::ScoutReturned => (
+                                EngineEventKind::ScoutReturned,
+                                "Scout returned to the core",
+                            ),
+                        };
+                        self.record_event(kind, message);
+                    }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -242,6 +261,73 @@ impl MindEngine {
         self.record_event(
             EngineEventKind::OnboardingCompleted,
             "Graphical onboarding completed",
+        );
+        result
+    }
+
+    pub fn planet(&self) -> Option<PlanetSnapshot> {
+        self.game().planet_snapshot()
+    }
+
+    pub fn deploy_scout(&self, region_id: &str) -> PlanetActionResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = state.clone();
+        let mut result = candidate.deploy_scout(region_id);
+        if !result.ok {
+            return result;
+        }
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+        self.record_event(EngineEventKind::ScoutDeployed, "Scout deployment launched");
+        result
+    }
+
+    pub fn recall_scout(&self) -> PlanetActionResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = state.clone();
+        let mut result = candidate.recall_scout();
+        if !result.ok {
+            return result;
+        }
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+        self.record_event(
+            EngineEventKind::ScoutRecallRequested,
+            "Scout recall requested",
         );
         result
     }

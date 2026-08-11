@@ -3,7 +3,7 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_tui::{
-    app::{App, ConnectionState, OnboardingView},
+    app::{App, ConnectionState, ContextAction, OnboardingView, Workspace},
     connection::{self, ConnectionCommand, ConnectionUpdate},
     ui::{self, RenderOptions},
 };
@@ -63,14 +63,16 @@ async fn run_dashboard(
     options: RenderOptions,
 ) -> Result<()> {
     let mut app = App::default();
-    let mut draw_interval = time::interval(Duration::from_millis(100));
+    let mut draw_interval = time::interval(Duration::from_millis(160));
     draw_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = draw_interval.tick() => {
+                let now = std::time::Instant::now();
+                app.advance_globe_animation(now);
                 terminal
-                    .draw(|frame| ui::render(frame, &app, options, std::time::Instant::now()))
+                    .draw(|frame| ui::render(frame, &app, options, now))
                     .context("failed to draw dashboard")?;
                 while event::poll(Duration::ZERO).context("failed to poll terminal input")? {
                     if let Event::Key(key) = event::read().context("failed to read terminal input")? {
@@ -87,6 +89,9 @@ async fn run_dashboard(
                     Some(ConnectionUpdate::Snapshot(snapshot)) => {
                         app.apply_snapshot(snapshot, std::time::Instant::now());
                     }
+                    Some(ConnectionUpdate::Planet(planet)) => {
+                        app.apply_planet(planet, std::time::Instant::now());
+                    }
                     Some(ConnectionUpdate::Disconnected(error)) => app.disconnected(error),
                     Some(ConnectionUpdate::DiagnosticCompleted(result)) => {
                         app.diagnostic_completed(&result);
@@ -94,6 +99,9 @@ async fn run_dashboard(
                     Some(ConnectionUpdate::DiagnosticFailed(error)) => app.diagnostic_failed(error),
                     Some(ConnectionUpdate::OnboardingCompleted(result)) => {
                         app.onboarding_completed(result);
+                    }
+                    Some(ConnectionUpdate::PlanetActionCompleted(kind, result)) => {
+                        app.planet_action_completed(kind, result);
                     }
                     None => app.disconnected("connection worker stopped"),
                 }
@@ -115,6 +123,7 @@ async fn handle_key(
     {
         return Ok(true);
     }
+    app.record_input(std::time::Instant::now());
     if app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') => app.show_help = false,
@@ -186,28 +195,66 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => return Ok(true),
-        KeyCode::Char('?') => app.show_help = !app.show_help,
-        KeyCode::Char('d') if matches!(app.connection, ConnectionState::Connected) => {
+        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('r') if !matches!(app.connection, ConnectionState::Connected) => {
+            commands
+                .send(ConnectionCommand::Retry)
+                .await
+                .context("connection worker stopped")?;
+        }
+        KeyCode::Tab => app.cycle_workspace(key.modifiers.contains(event::KeyModifiers::SHIFT)),
+        KeyCode::BackTab => app.cycle_workspace(true),
+        KeyCode::Esc if app.detail_open => app.close_detail(),
+        KeyCode::Left if app.workspace == Workspace::Planet && !app.detail_open => {
+            app.move_selection(0, -1);
+        }
+        KeyCode::Right if app.workspace == Workspace::Planet && !app.detail_open => {
+            app.move_selection(0, 1);
+        }
+        KeyCode::Up if app.workspace == Workspace::Planet && !app.detail_open => {
+            app.move_selection(-1, 0);
+        }
+        KeyCode::Down if app.workspace == Workspace::Planet && !app.detail_open => {
+            app.move_selection(1, 0);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Planet && !app.detail_open => {
+            app.open_detail();
+        }
+        KeyCode::Enter if app.workspace == Workspace::Planet && app.detail_open => {
+            if let Some(ContextAction::Deploy(region_id)) = app.context_action() {
+                commands
+                    .send(ConnectionCommand::DeployScout(region_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+        }
+        KeyCode::Enter if app.workspace == Workspace::Operations => {
+            if matches!(app.context_action(), Some(ContextAction::Recall)) {
+                commands
+                    .send(ConnectionCommand::RecallScout)
+                    .await
+                    .context("connection worker stopped")?;
+            }
+        }
+        KeyCode::Char('d')
+            if app.workspace == Workspace::System
+                && matches!(app.connection, ConnectionState::Connected) =>
+        {
             app.notice = Some("DIAGNOSTIC PULSE REQUESTED".to_owned());
             commands
                 .send(ConnectionCommand::DiagnosticPulse)
                 .await
                 .context("connection worker stopped")?;
         }
-        KeyCode::Char('r') => {
-            commands
-                .send(ConnectionCommand::Retry)
-                .await
-                .context("connection worker stopped")?;
+        KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::System => app.scroll_up(1),
+        KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::System => {
+            app.scroll_down(1);
         }
-        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
-        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
-        KeyCode::PageUp => app.scroll_up(10),
-        KeyCode::PageDown => app.scroll_down(10),
-        KeyCode::Home => app.scroll_home(),
-        KeyCode::End => app.scroll_end(),
-        KeyCode::Char('f') => app.toggle_follow(),
+        KeyCode::PageUp if app.workspace == Workspace::System => app.scroll_up(10),
+        KeyCode::PageDown if app.workspace == Workspace::System => app.scroll_down(10),
+        KeyCode::Home if app.workspace == Workspace::System => app.scroll_home(),
+        KeyCode::End if app.workspace == Workspace::System => app.scroll_end(),
+        KeyCode::Char('f') if app.workspace == Workspace::System => app.toggle_follow(),
         _ => {}
     }
     Ok(false)
@@ -268,5 +315,53 @@ mod tests {
         .unwrap();
         assert_eq!(app.onboarding_view, OnboardingView::Adjusting);
         assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn planet_and_operations_enter_keys_send_typed_actions() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.connected();
+        app.move_selection(0, 1);
+        let target = app.selected_region_id.clone().unwrap();
+        let (commands, mut received) = mpsc::channel(2);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(app.detail_open);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::DeployScout(region)) if region == target
+        ));
+
+        engine.deploy_scout(&target);
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.workspace = Workspace::Operations;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::RecallScout)
+        ));
     }
 }

@@ -461,6 +461,11 @@ the repository no longer presents circuit assembly as the product direction.
 
 ### Phase 1: Globe and first expeditions
 
+**Status: in progress.** The first survey slice implements a 24-region globe, staged
+fog knowledge, one local-range scout, daemon-timed travel and surveying, hold and
+recall, mission reports, and durable terrain and environmental discoveries. Broader
+mission preparation and additional scout roles remain planned.
+
 - Add the regional world model, fog states, rotating globe, keyboard navigation, and
   region details.
 - Add basic scouts, mission preparation, travel, surveys, recall, and mission reports.

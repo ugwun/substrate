@@ -1,14 +1,15 @@
 use crate::{
     protocol::{
-        self, decode_result, method, CompleteOnboardingParams, DiagnosticPulseResult,
-        OnboardingCompletionResult, PingResult, ProtocolError, RpcIncoming, StatusNotification,
+        self, decode_result, method, CompleteOnboardingParams, DeployScoutParams,
+        DiagnosticPulseResult, OnboardingCompletionResult, PingResult, PlanetActionResult,
+        PlanetNotification, PlanetSnapshot, ProtocolError, RpcIncoming, StatusNotification,
         StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::{io, net::SocketAddr};
+use std::{collections::VecDeque, io, net::SocketAddr};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -20,6 +21,13 @@ pub struct IpcClient {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
     next_id: u64,
+    pending_notifications: VecDeque<IpcNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IpcNotification {
+    Status(StatusNotification),
+    Planet(PlanetNotification),
 }
 
 impl IpcClient {
@@ -30,6 +38,7 @@ impl IpcClient {
             reader: BufReader::new(reader),
             writer,
             next_id: 1,
+            pending_notifications: VecDeque::new(),
         };
         let ping = client.ping().await?;
         if ping.protocol_version != PROTOCOL_VERSION {
@@ -75,7 +84,46 @@ impl IpcClient {
         self.call(method::COMPLETE_ONBOARDING, Some(params)).await
     }
 
+    pub async fn planet(&mut self) -> Result<PlanetSnapshot, IpcError> {
+        self.call(method::GET_PLANET, None).await
+    }
+
+    pub async fn subscribe_planet(&mut self) -> Result<Uuid, IpcError> {
+        let result: SubscribeResult = self.call(method::SUBSCRIBE_PLANET, None).await?;
+        Ok(result.subscription_id)
+    }
+
+    pub async fn unsubscribe_planet(&mut self, subscription_id: Uuid) -> Result<bool, IpcError> {
+        let params = serde_json::to_value(UnsubscribeParams { subscription_id })?;
+        self.call(method::UNSUBSCRIBE_PLANET, Some(params)).await
+    }
+
+    pub async fn deploy_scout(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(DeployScoutParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::DEPLOY_SCOUT, Some(params)).await
+    }
+
+    pub async fn recall_scout(&mut self) -> Result<PlanetActionResult, IpcError> {
+        self.call(method::RECALL_SCOUT, None).await
+    }
+
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {
+        loop {
+            if let IpcNotification::Status(status) = self.next_notification().await? {
+                return Ok(status);
+            }
+        }
+    }
+
+    pub async fn next_notification(&mut self) -> Result<IpcNotification, IpcError> {
+        if let Some(notification) = self.pending_notifications.pop_front() {
+            return Ok(notification);
+        }
         loop {
             let incoming = self.read_incoming().await?;
             if incoming.jsonrpc != JSONRPC_VERSION {
@@ -83,9 +131,8 @@ impl IpcClient {
                     incoming.jsonrpc,
                 )));
             }
-            if incoming.method.as_deref() == Some(method::STATUS_CHANGED) {
-                let params = incoming.params.ok_or(IpcError::MissingNotificationParams)?;
-                return Ok(serde_json::from_value(params)?);
+            if let Some(notification) = Self::decode_notification(incoming)? {
+                return Ok(notification);
             }
         }
     }
@@ -104,6 +151,25 @@ impl IpcClient {
             if incoming.id.as_ref() == Some(&Value::from(id)) {
                 return decode_result(incoming).map_err(IpcError::Protocol);
             }
+            if let Some(notification) = Self::decode_notification(incoming)? {
+                self.pending_notifications.push_back(notification);
+            }
+        }
+    }
+
+    fn decode_notification(incoming: RpcIncoming) -> Result<Option<IpcNotification>, IpcError> {
+        let Some(method_name) = incoming.method.as_deref() else {
+            return Ok(None);
+        };
+        let params = incoming.params.ok_or(IpcError::MissingNotificationParams)?;
+        match method_name {
+            method::STATUS_CHANGED => Ok(Some(IpcNotification::Status(serde_json::from_value(
+                params,
+            )?))),
+            method::PLANET_CHANGED => Ok(Some(IpcNotification::Planet(serde_json::from_value(
+                params,
+            )?))),
+            _ => Ok(None),
         }
     }
 

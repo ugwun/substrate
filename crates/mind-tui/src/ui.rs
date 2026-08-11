@@ -1,5 +1,8 @@
-use crate::app::{App, ConnectionState, OnboardingView};
-use mind_core::protocol::EngineEventKind;
+use crate::{
+    app::{App, ConnectionState, ContextAction, OnboardingView, Workspace},
+    globe::{self, GlobeRenderOptions},
+};
+use mind_core::protocol::{EngineEventKind, PlanetSnapshot, ScoutState};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -67,11 +70,349 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
     } else if app.onboarding_pending() {
         render_onboarding(frame, area, app, options, palette);
     } else {
-        render_dashboard(frame, area, app, options, palette, now);
+        match app.workspace {
+            Workspace::Planet => render_planet(frame, area, app, options, palette, now),
+            Workspace::Operations => render_operations(frame, area, app, options, palette, now),
+            Workspace::System => render_dashboard(frame, area, app, options, palette, now),
+        }
     }
     if app.show_help {
         render_help(frame, area, options, palette);
     }
+}
+
+fn render_planet(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+    now: Instant,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(8),
+        Constraint::Length(2),
+    ])
+    .split(area);
+    render_workspace_header(frame, rows[0], Workspace::Planet, options, palette);
+    let Some(planet) = &app.planet else {
+        frame.render_widget(
+            Paragraph::new("Awaiting authoritative planetary state...")
+                .alignment(Alignment::Center)
+                .block(panel(" PLANET ", options, palette)),
+            rows[1],
+        );
+        render_workspace_footer(frame, rows[2], app, now, "q detach  ? help", palette);
+        return;
+    };
+
+    if area.width >= 72 {
+        let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .split(rows[1]);
+        render_globe(frame, columns[0], app, planet, options, palette);
+        render_region_summary(frame, columns[1], app, options, palette);
+    } else {
+        let body = Layout::vertical([Constraint::Percentage(68), Constraint::Percentage(32)])
+            .split(rows[1]);
+        render_globe(frame, body[0], app, planet, options, palette);
+        render_region_summary(frame, body[1], app, options, palette);
+    }
+    if app.detail_open {
+        render_region_detail(frame, area, app, options, palette);
+    }
+    let controls = if area.width < 72 {
+        "arrows  Enter  Tab  q detach"
+    } else {
+        "arrows navigate  Enter details  Tab workspace  q detach  ? help"
+    };
+    render_workspace_footer(frame, rows[2], app, now, controls, palette);
+}
+
+fn render_operations(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+    now: Instant,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(8),
+        Constraint::Length(2),
+    ])
+    .split(area);
+    render_workspace_header(frame, rows[0], Workspace::Operations, options, palette);
+    let Some(planet) = &app.planet else {
+        frame.render_widget(
+            Paragraph::new("Awaiting authoritative operations state...")
+                .alignment(Alignment::Center)
+                .block(panel(" OPERATIONS ", options, palette)),
+            rows[1],
+        );
+        render_workspace_footer(frame, rows[2], app, now, "q detach  ? help", palette);
+        return;
+    };
+    let columns = if area.width >= 72 {
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1])
+    } else {
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1])
+    };
+    let mission_text = if let Some(mission) = &planet.active_mission {
+        let target_designation = region_designation(planet, &mission.target_region_id);
+        let progress = if mission.phase == ScoutState::Holding || mission.phase_total_ms == 0 {
+            100
+        } else {
+            100_u64
+                .saturating_sub(mission.remaining_ms.saturating_mul(100) / mission.phase_total_ms)
+        };
+        let remaining = mission.remaining_ms.div_ceil(1_000);
+        format!(
+            "{} // {:?}\nTarget: {}\nPhase progress: {:>3}%\nRemaining: {}s\n\n{}",
+            planet.scout.designation,
+            planet.scout.state,
+            target_designation,
+            progress,
+            remaining,
+            if matches!(app.context_action(), Some(ContextAction::Recall)) {
+                "Enter  Recall scout"
+            } else {
+                "Scout is returning; no action required."
+            }
+        )
+    } else {
+        let location_designation = region_designation(planet, &planet.scout.region_id);
+        format!(
+            "{} // READY\nLocation: {}\n\nSelect a reachable region in Planet to deploy.",
+            planet.scout.designation, location_designation
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(mission_text)
+            .wrap(Wrap { trim: true })
+            .block(panel(" ACTIVE SCOUT ", options, palette)),
+        columns[0],
+    );
+    let reports = if planet.recent_reports.is_empty() {
+        Text::from("No mission reports recorded.")
+    } else {
+        Text::from(
+            planet
+                .recent_reports
+                .iter()
+                .rev()
+                .take(columns[1].height.saturating_sub(2) as usize)
+                .map(|report| {
+                    let region_designation = region_designation(planet, &report.region_id);
+                    Line::from(format!(
+                        "#{:03} {} // {:?}",
+                        report.mission_id, region_designation, report.outcome
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(reports).block(panel(" RECENT REPORTS ", options, palette)),
+        columns[1],
+    );
+    render_workspace_footer(
+        frame,
+        rows[2],
+        app,
+        now,
+        "Enter contextual action  Tab workspace  q detach  ? help",
+        palette,
+    );
+}
+
+fn region_designation<'a>(planet: &'a PlanetSnapshot, region_id: &'a str) -> &'a str {
+    planet
+        .regions
+        .iter()
+        .find(|region| region.id == region_id)
+        .map_or(region_id, |region| region.designation.as_str())
+}
+
+fn render_workspace_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    active: Workspace,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let tab = |workspace, label| {
+        if active == workspace {
+            Span::styled(
+                format!("[{label}]"),
+                Style::default().fg(palette.accent).bold(),
+            )
+        } else {
+            Span::styled(label, Style::default().fg(palette.muted))
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("SUBSTRATE  ", Style::default().fg(palette.primary).bold()),
+            tab(Workspace::Planet, "PLANET"),
+            Span::raw("  "),
+            tab(Workspace::Operations, "OPERATIONS"),
+            Span::raw("  "),
+            tab(Workspace::System, "SYSTEM"),
+        ]))
+        .block(panel(" MIND INTERFACE ", options, palette)),
+        area,
+    );
+}
+
+fn render_globe(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    planet: &PlanetSnapshot,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let inner_height = area.height.saturating_sub(2).max(1);
+    let inner_width = area.width.saturating_sub(2).max(1);
+    frame.render_widget(
+        Paragraph::new(globe::render(
+            planet,
+            app.selected_region_id.as_deref(),
+            GlobeRenderOptions {
+                width: inner_width,
+                height: inner_height,
+                yaw: app.globe_yaw,
+                pitch: app.globe_pitch,
+                phase: app.globe_phase,
+                ascii: options.ascii,
+                no_color: options.no_color,
+            },
+        ))
+        .alignment(Alignment::Center)
+        .block(panel(" REGIONAL GLOBE ", options, palette)),
+        area,
+    );
+}
+
+fn render_region_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let text = app.selected_region().map_or_else(
+        || "No region selected.".to_owned(),
+        |region| {
+            format!(
+                "{}{}\nKnowledge: {:?}\nTerrain: {}\nRange: {} hop(s) // {}\n\nEnter for details",
+                region.designation,
+                if region.core { " // CORE" } else { "" },
+                region.knowledge,
+                region
+                    .terrain
+                    .map_or_else(|| "unresolved".into(), |value| format!("{value:?}")),
+                region.hop_distance_from_core,
+                if region.within_scout_range || region.core {
+                    "reachable"
+                } else {
+                    "beyond scout range"
+                }
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(text).wrap(Wrap { trim: true }).block(panel(
+            " SELECTED REGION ",
+            options,
+            palette,
+        )),
+        area,
+    );
+}
+
+fn render_region_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    palette: Palette,
+) {
+    let detail_area = centered_rect(58.min(area.width.saturating_sub(2)), 16, area);
+    let text = app.selected_region().map_or_else(
+        || "No region selected.".to_owned(),
+        |region| {
+            let action = match app.context_action() {
+                Some(ContextAction::Deploy(_)) => "Enter  Deploy Scout 01",
+                _ if region.core => "The scout is already based here.",
+                _ if !region.within_scout_range => "Destination is beyond current scout range.",
+                _ => "Scout unavailable; inspect Operations.",
+            };
+            format!(
+                "{}{}\n\nKnowledge: {:?}\nTerrain: {}\nTemperature: {}\nAtmosphere: {}\nConfidence: {}\nDistance: {} hop(s)\n\n{}\nEsc  Close",
+                region.designation,
+                if region.core { " // CORE" } else { "" },
+                region.knowledge,
+                option_debug(region.terrain),
+                option_debug(region.temperature),
+                option_debug(region.atmospheric_severity),
+                option_debug(region.confidence),
+                region.hop_distance_from_core,
+                action,
+            )
+        },
+    );
+    frame.render_widget(Clear, detail_area);
+    frame.render_widget(
+        Paragraph::new(text).wrap(Wrap { trim: true }).block(panel(
+            " REGION DETAIL ",
+            options,
+            palette,
+        )),
+        detail_area,
+    );
+}
+
+fn option_debug<T: std::fmt::Debug>(value: Option<T>) -> String {
+    value.map_or_else(|| "unresolved".into(), |value| format!("{value:?}"))
+}
+
+fn render_workspace_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: Instant,
+    controls: &str,
+    palette: Palette,
+) {
+    let stale = app.last_update.map_or_else(String::new, |last| {
+        if matches!(app.connection, ConnectionState::Connected) {
+            String::new()
+        } else {
+            format!(
+                " // STALE {:.1}s",
+                now.saturating_duration_since(last).as_secs_f64()
+            )
+        }
+    });
+    let notice = app
+        .notice
+        .as_ref()
+        .map_or_else(String::new, |notice| format!(" // {notice}"));
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}{}{} // {}",
+            connection_label(&app.connection),
+            stale,
+            notice,
+            controls
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(palette.muted)),
+        area,
+    );
 }
 
 fn render_connection_required(
@@ -256,14 +597,7 @@ fn render_dashboard(
         .split(area);
         (rows[0], rows[1], rows[2], rows[3], rows[4])
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("SUBSTRATE", Style::default().fg(palette.primary).bold()),
-            Span::raw(" // ORIENTATION COMPLETE"),
-        ]))
-        .block(panel(" STATUS ", options, palette)),
-        header_area,
-    );
+    render_workspace_header(frame, header_area, Workspace::System, options, palette);
 
     let (system, diagnostic) = if let Some(snapshot) = &app.snapshot {
         (
@@ -319,7 +653,12 @@ fn render_dashboard(
                 EngineEventKind::DaemonStarted => "START",
                 EngineEventKind::DiagnosticPulse => "DIAG",
                 EngineEventKind::OnboardingCompleted => "READY",
-                EngineEventKind::LegacySaveReset => "RESET",
+                EngineEventKind::SaveReset => "RESET",
+                EngineEventKind::ScoutDeployed => "SCOUT",
+                EngineEventKind::RegionDetected => "SCAN",
+                EngineEventKind::SurveyCompleted => "SURVEY",
+                EngineEventKind::ScoutRecallRequested => "RECALL",
+                EngineEventKind::ScoutReturned => "RETURN",
                 EngineEventKind::PersistenceDegraded => "SAVE!",
                 EngineEventKind::PersistenceRecovered => "SAVE",
                 EngineEventKind::ShutdownRequested => "STOP",
@@ -343,7 +682,7 @@ fn render_dashboard(
         }
     });
     let footer = format!(
-        "{}{} // d diagnostic  r reconnect  ↑/↓ events  f follow  ? help  q detach",
+        "{}{} // d diagnostic  ↑/↓ events  f follow  Tab workspace  ? help  q detach",
         connection_label(&app.connection),
         stale_text
     );
@@ -460,7 +799,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, palett
     frame.render_widget(Clear, help_area);
     frame.render_widget(
         Paragraph::new(
-            "GLOBAL\n  q / Ctrl-C  Detach without stopping daemon\n  r           Reconnect immediately\n  ? / Esc     Close help\n\nONBOARDING\n  ↑/↓         Select band\n  ←/→         Adjust selected band\n  Enter       Observe / awaken",
+            "GLOBAL\n  q / Ctrl-C  Detach without stopping daemon\n  r           Reconnect when disconnected\n  Tab         Cycle workspace\n  ? / Esc     Close help\n\nPLANET\n  Arrows      Navigate regions\n  Enter       Details / deploy\n  Esc         Close details\n\nOPERATIONS\n  Enter       Recall active scout",
         )
         .wrap(Wrap { trim: false })
         .block(panel(" HELP ", options, palette)),
@@ -510,7 +849,7 @@ mod tests {
 
     fn status(complete: bool) -> StatusSnapshot {
         StatusSnapshot {
-            protocol_version: 3,
+            protocol_version: 4,
             daemon_version: "0.1.0".into(),
             pid: 1,
             health: HealthState::Ready,
@@ -584,7 +923,23 @@ mod tests {
         assert!(confirmation.contains("The interval holds."));
         assert!(confirmation.contains("Enter Awaken"));
 
-        app.apply_snapshot(status(true), Instant::now());
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        let planet = screen(
+            &app,
+            80,
+            24,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(planet.contains("REGIONAL GLOBE"));
+        assert!(planet.contains("SELECTED REGION"));
+
+        app.workspace = Workspace::System;
         let dashboard = screen(
             &app,
             80,
@@ -594,9 +949,9 @@ mod tests {
                 no_color: false,
             },
         );
-        assert!(dashboard.contains("ORIENTATION COMPLETE"));
         assert!(dashboard.contains("ENGINE EVENTS"));
 
+        app.workspace = Workspace::Planet;
         let narrow = screen(
             &app,
             50,
@@ -606,9 +961,8 @@ mod tests {
                 no_color: true,
             },
         );
-        assert!(narrow.contains("DAEMON"));
-        assert!(narrow.contains("DIAGNOSTIC"));
-        assert!(narrow.contains("ENGINE EVENTS"));
+        assert!(narrow.contains("REGIONAL GLOBE"));
+        assert!(narrow.contains("SELECTED REGION"));
     }
 
     #[test]
@@ -626,10 +980,45 @@ mod tests {
     }
 
     #[test]
+    fn operations_uses_player_facing_region_designations() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let planet = engine.planet().unwrap();
+        let target = planet
+            .regions
+            .iter()
+            .find(|region| region.within_scout_range && !region.core)
+            .unwrap();
+        let target_id = target.id.clone();
+        let target_designation = target.designation.clone();
+        assert!(engine.deploy_scout(&target_id).ok);
+
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.workspace = Workspace::Operations;
+        let output = screen(
+            &app,
+            80,
+            24,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+
+        assert!(output.contains(&target_designation));
+        assert!(!output.contains(&target_id));
+    }
+
+    #[test]
     fn disconnected_dashboard_retains_snapshot_as_stale() {
         let mut app = App::default();
         let received = Instant::now();
-        app.apply_snapshot(status(true), received);
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        app.apply_snapshot(engine.status(), received);
+        app.apply_planet(engine.planet().unwrap(), received);
         app.disconnected("test disconnect");
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();

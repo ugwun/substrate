@@ -13,3 +13,4 @@ crossterm = "0.29"
 mind-core = { path = "../mind-core" }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 tokio.workspace = true
+uuid.workspace = true

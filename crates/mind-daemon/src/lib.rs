@@ -3,8 +3,9 @@ use mind_core::{
     config::{AppPaths, Config},
     engine::MindEngine,
     protocol::{
-        self, failure, method, notification, success, CompleteOnboardingParams, RpcRequest,
-        StatusNotification, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, failure, method, notification, success, CompleteOnboardingParams, DeployScoutParams,
+        PlanetNotification, RpcRequest, StatusNotification, SubscribeResult, UnsubscribeParams,
+        JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
 };
@@ -212,6 +213,12 @@ impl Drop for ClientGuard {
     }
 }
 
+#[derive(Default)]
+struct ClientSubscriptions {
+    status: Option<Uuid>,
+    planet: Option<Uuid>,
+}
+
 async fn handle_connection(
     stream: TcpStream,
     engine: Arc<MindEngine>,
@@ -227,7 +234,7 @@ async fn handle_connection(
     let mut interval = tokio::time::interval(publish_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
-    let mut subscription: Option<Uuid> = None;
+    let mut subscriptions = ClientSubscriptions::default();
 
     loop {
         let mut frame = Vec::new();
@@ -246,7 +253,7 @@ async fn handle_connection(
                             &writer,
                             &engine,
                             &shutdown_tx,
-                            &mut subscription,
+                            &mut subscriptions,
                         ).await;
                         if should_close {
                             break;
@@ -258,13 +265,24 @@ async fn handle_connection(
                     }
                 }
             }
-            _ = interval.tick(), if subscription.is_some() => {
-                let params = StatusNotification {
-                    subscription_id: subscription.expect("subscription checked above"),
-                    status: engine.status(),
-                };
-                if write_value(&writer, &notification(method::STATUS_CHANGED, params)).await.is_err() {
-                    break;
+            _ = interval.tick(), if subscriptions.status.is_some() || subscriptions.planet.is_some() => {
+                if let Some(subscription_id) = subscriptions.status {
+                    let params = StatusNotification {
+                        subscription_id,
+                        status: engine.status(),
+                    };
+                    if write_value(&writer, &notification(method::STATUS_CHANGED, params)).await.is_err() {
+                        break;
+                    }
+                }
+                if let (Some(subscription_id), Some(planet)) = (subscriptions.planet, engine.planet()) {
+                    let params = PlanetNotification {
+                        subscription_id,
+                        planet,
+                    };
+                    if write_value(&writer, &notification(method::PLANET_CHANGED, params)).await.is_err() {
+                        break;
+                    }
                 }
             }
             changed = shutdown_rx.changed() => {
@@ -281,7 +299,7 @@ async fn dispatch_frame(
     writer: &Arc<Mutex<OwnedWriteHalf>>,
     engine: &Arc<MindEngine>,
     shutdown_tx: &watch::Sender<bool>,
-    subscription: &mut Option<Uuid>,
+    subscriptions: &mut ClientSubscriptions,
 ) -> bool {
     let request: RpcRequest = match serde_json::from_slice(frame) {
         Ok(request) => request,
@@ -324,8 +342,28 @@ async fn dispatch_frame(
                 ),
             }
         }
+        method::GET_PLANET => match engine.planet() {
+            Some(planet) => (success(request.id, planet), false),
+            None => (failure(request.id, -32010, "onboarding required"), false),
+        },
+        method::DEPLOY_SCOUT => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<DeployScoutParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.deploy_scout(&params.region_id)),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid scout deployment parameters"),
+                    false,
+                ),
+            }
+        }
+        method::RECALL_SCOUT => (success(request.id, engine.recall_scout()), false),
         method::SUBSCRIBE_STATUS => {
-            let id = subscription.get_or_insert_with(Uuid::new_v4);
+            let id = subscriptions.status.get_or_insert_with(Uuid::new_v4);
             (
                 success(
                     request.id,
@@ -342,9 +380,43 @@ async fn dispatch_frame(
                 .and_then(|value| serde_json::from_value::<UnsubscribeParams>(value).ok());
             match params {
                 Some(params) => {
-                    let removed = subscription.as_ref() == Some(&params.subscription_id);
+                    let removed = subscriptions.status.as_ref() == Some(&params.subscription_id);
                     if removed {
-                        *subscription = None;
+                        subscriptions.status = None;
+                    }
+                    (success(request.id, removed), false)
+                }
+                None => (
+                    failure(request.id, -32602, "invalid unsubscribe parameters"),
+                    false,
+                ),
+            }
+        }
+        method::SUBSCRIBE_PLANET => {
+            if engine.planet().is_none() {
+                (failure(request.id, -32010, "onboarding required"), false)
+            } else {
+                let id = subscriptions.planet.get_or_insert_with(Uuid::new_v4);
+                (
+                    success(
+                        request.id,
+                        SubscribeResult {
+                            subscription_id: *id,
+                        },
+                    ),
+                    false,
+                )
+            }
+        }
+        method::UNSUBSCRIBE_PLANET => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<UnsubscribeParams>(value).ok());
+            match params {
+                Some(params) => {
+                    let removed = subscriptions.planet.as_ref() == Some(&params.subscription_id);
+                    if removed {
+                        subscriptions.planet = None;
                     }
                     (success(request.id, removed), false)
                 }

@@ -2,7 +2,7 @@
 
 Substrate is an atmospheric terminal game about an awakening machine intelligence exploring an unknown planet, growing its physical reach, and searching for evidence of its origin. Its simulation runs in a headless daemon and exposes local, versioned IPC and MCP interfaces to terminal and AI clients.
 
-The repository currently implements the Phase 0 foundation: daemon-owned state, durable graphical onboarding, diagnostic telemetry, native MCP access, managed daemon lifecycle, and an attach-only Ratatui interface. Planetary exploration begins in the next roadmap phase.
+The repository currently implements the Phase 0 foundation and the first playable Phase 1 survey slice: daemon-owned state, durable graphical onboarding, a lit orthographic regional globe with smooth idle rotation, fog and survey knowledge, one timed scout deployment, diagnostic telemetry, native MCP access, managed daemon lifecycle, and an attach-only Ratatui interface.
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ The IPC listener defaults to `127.0.0.1:7776`. The MCP Streamable HTTP endpoint 
 
 Both listeners only accept loopback addresses. Authoritative game state is atomically persisted as `game_state.json` beneath the platform-local Substrate data directory. Simulation time advances only while the daemon runs.
 
-Phase 0 uses save schema 2. A schema-1 prototype save is intentionally replaced with a fresh graphical-onboarding state on first startup; malformed and future-version saves still stop startup with an error.
+The current game uses save schema 3. Schema-1 and schema-2 saves are intentionally replaced with fresh graphical onboarding, a newly generated 24-region planet, and one starter scout; malformed and future-version saves still stop startup with an error.
 
 ## Terminal interface
 
@@ -54,18 +54,27 @@ A fresh state begins with the graphical Coherence onboarding. Use Up/Down to sel
 Global controls:
 
 - `q` or Ctrl-C: detach without stopping the daemon
-- `r`: reconnect immediately
+- `r`: reconnect immediately while disconnected
 - `?`: show help
-- `d` after onboarding: trigger a diagnostic pulse
-- arrow keys or `j`/`k` after onboarding: scroll events
-- Page Up/Page Down and Home/End: navigate event history
-- `f`: toggle event follow mode
+- `Tab` or Shift-Tab: cycle Planet, Operations, and System workspaces
+
+Planet controls:
+
+- arrow keys: navigate the regional globe
+- Enter: open region details and deploy the scout when available
+- Esc: close region details
+
+The selected region eases into view after navigation. When left idle, the globe rotates without changing the selected region or authoritative world state.
+
+Operations uses Enter to recall an outbound, surveying, or holding scout. System retains `d` for a diagnostic pulse, arrow keys or `j`/`k` for event scrolling, Page Up/Page Down and Home/End for event navigation, and `f` for follow mode.
+
+The starting scout can reach regions up to two graph hops from the core. Arrival permanently detects broad terrain; completing the focused survey records temperature and atmospheric severity, then leaves the scout holding the region under continuous observation. Recall returns the scout to the core without erasing surveyed knowledge. Mission time advances only while the daemon runs.
 
 Unicode and color are enabled by default. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color.
 
 ## IPC contract
 
-IPC protocol version 3 uses newline-delimited JSON-RPC 2.0 over loopback TCP. It supports ping, status query and subscription, graphical onboarding completion, diagnostic pulses, unsubscribe, and graceful shutdown. `mind-core` provides the shared DTOs and reusable client.
+IPC protocol version 4 uses newline-delimited JSON-RPC 2.0 over loopback TCP. In addition to lifecycle, status, onboarding, and diagnostics, it provides separate revisioned planet query/subscription methods and typed scout deployment and recall. Planet DTOs omit undiscovered terrain and conditions. `mind-core` provides the shared DTOs and reusable client.
 
 ## MCP access
 
@@ -100,6 +109,6 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-daemon`: simulation loop, local JSON-RPC server, persistence checkpoints, and embedded MCP HTTP lifecycle
 - `mind-cli`: managed daemon lifecycle and status inspection
 - `mind-mcp`: shared MCP tools, embedded HTTP service, and stdio bridge
-- `mind-tui`: attach-only graphical onboarding and operational dashboard
+- `mind-tui`: attach-only graphical onboarding and Planet, Operations, and System workspaces
 
 See [`GAME_PLAN.md`](GAME_PLAN.md) for the public game vision and future roadmap. [`AGENTS.md`](AGENTS.md) defines repository conventions.

@@ -1,16 +1,28 @@
 use mind_core::{
-    ipc::IpcClient,
-    protocol::{DiagnosticPulseResult, OnboardingCompletionResult, StatusSnapshot},
+    ipc::{IpcClient, IpcNotification},
+    protocol::{
+        DiagnosticPulseResult, OnboardingCompletionResult, PlanetActionResult, PlanetSnapshot,
+        StatusSnapshot,
+    },
 };
 use std::{net::SocketAddr, time::Duration};
 use tokio::{sync::mpsc, time};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum ConnectionCommand {
     DiagnosticPulse,
     CompleteOnboarding([u8; 3]),
+    DeployScout(String),
+    RecallScout,
     Retry,
     Detach,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanetActionKind {
+    Deploy,
+    Recall,
 }
 
 #[derive(Debug)]
@@ -18,10 +30,12 @@ pub enum ConnectionUpdate {
     Connecting,
     Connected,
     Snapshot(StatusSnapshot),
+    Planet(PlanetSnapshot),
     Disconnected(String),
     DiagnosticCompleted(DiagnosticPulseResult),
     DiagnosticFailed(String),
     OnboardingCompleted(OnboardingCompletionResult),
+    PlanetActionCompleted(PlanetActionKind, PlanetActionResult),
 }
 
 pub async fn run(
@@ -56,7 +70,7 @@ pub async fn run(
             }
         };
 
-        let subscription_id = match client.subscribe_status().await {
+        let status_subscription = match client.subscribe_status().await {
             Ok(id) => id,
             Err(error) => {
                 if !wait_to_retry(&mut commands, &updates, error.to_string()).await {
@@ -68,31 +82,60 @@ pub async fn run(
         if updates.send(ConnectionUpdate::Connected).await.is_err() {
             return;
         }
-        match client.status().await {
-            Ok(status) => {
-                if updates
-                    .send(ConnectionUpdate::Snapshot(status))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
+        let initial_status = match client.status().await {
+            Ok(status) => status,
             Err(error) => {
                 if !wait_to_retry(&mut commands, &updates, error.to_string()).await {
                     return;
                 }
                 continue;
             }
+        };
+        let onboarding_complete = initial_status.onboarding.complete;
+        if updates
+            .send(ConnectionUpdate::Snapshot(initial_status))
+            .await
+            .is_err()
+        {
+            return;
         }
+        let mut planet_subscription = if onboarding_complete {
+            match attach_planet(&mut client, &updates).await {
+                Ok(id) => Some(id),
+                Err(error) => {
+                    if !wait_to_retry(&mut commands, &updates, error).await {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         let mut retry_immediately = false;
         let disconnect_reason = loop {
             tokio::select! {
-                notification = client.next_status() => {
+                notification = client.next_notification() => {
                     match notification {
-                        Ok(notification) if notification.subscription_id == subscription_id => {
+                        Ok(IpcNotification::Status(notification))
+                            if notification.subscription_id == status_subscription =>
+                        {
+                            let completed = notification.status.onboarding.complete;
                             if updates.send(ConnectionUpdate::Snapshot(notification.status)).await.is_err() {
+                                return;
+                            }
+                            if completed && planet_subscription.is_none() {
+                                match attach_planet(&mut client, &updates).await {
+                                    Ok(id) => planet_subscription = Some(id),
+                                    Err(error) => break error,
+                                }
+                            }
+                        }
+                        Ok(IpcNotification::Planet(notification))
+                            if Some(notification.subscription_id) == planet_subscription =>
+                        {
+                            if updates.send(ConnectionUpdate::Planet(notification.planet)).await.is_err() {
                                 return;
                             }
                         }
@@ -119,12 +162,55 @@ pub async fn run(
                         Some(ConnectionCommand::CompleteOnboarding(positions)) => {
                             match client.complete_onboarding(positions).await {
                                 Ok(result) => {
+                                    let completed = result.ok;
                                     if updates.send(ConnectionUpdate::OnboardingCompleted(result)).await.is_err() {
                                         return;
                                     }
                                     match client.status().await {
                                         Ok(status) => {
                                             if updates.send(ConnectionUpdate::Snapshot(status)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                    if completed && planet_subscription.is_none() {
+                                        match attach_planet(&mut client, &updates).await {
+                                            Ok(id) => planet_subscription = Some(id),
+                                            Err(error) => break error,
+                                        }
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::DeployScout(region_id)) => {
+                            match client.deploy_scout(region_id).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Deploy, result)).await.is_err() {
+                                        return;
+                                    }
+                                    match client.planet().await {
+                                        Ok(planet) => {
+                                            if updates.send(ConnectionUpdate::Planet(planet)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::RecallScout) => {
+                            match client.recall_scout().await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Recall, result)).await.is_err() {
+                                        return;
+                                    }
+                                    match client.planet().await {
+                                        Ok(planet) => {
+                                            if updates.send(ConnectionUpdate::Planet(planet)).await.is_err() {
                                                 return;
                                             }
                                         }
@@ -139,7 +225,10 @@ pub async fn run(
                             break "manual reconnect requested".to_owned();
                         }
                         Some(ConnectionCommand::Detach) | None => {
-                            let _ = client.unsubscribe_status(subscription_id).await;
+                            let _ = client.unsubscribe_status(status_subscription).await;
+                            if let Some(id) = planet_subscription {
+                                let _ = client.unsubscribe_planet(id).await;
+                            }
                             return;
                         }
                     }
@@ -154,6 +243,22 @@ pub async fn run(
             return;
         }
     }
+}
+
+async fn attach_planet(
+    client: &mut IpcClient,
+    updates: &mpsc::Sender<ConnectionUpdate>,
+) -> Result<Uuid, String> {
+    let subscription_id = client
+        .subscribe_planet()
+        .await
+        .map_err(|error| error.to_string())?;
+    let planet = client.planet().await.map_err(|error| error.to_string())?;
+    updates
+        .send(ConnectionUpdate::Planet(planet))
+        .await
+        .map_err(|_| "TUI update channel closed".to_owned())?;
+    Ok(subscription_id)
 }
 
 async fn wait_to_retry(

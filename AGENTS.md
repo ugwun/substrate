@@ -4,19 +4,19 @@
 
 Substrate is a Rust 2021 workspace. `mind-daemon` is the sole authority for simulation state. `mind-cli`, `mind-tui`, and MCP adapters communicate with it over the shared IPC types and client in `mind-core`; frontend code must never own or advance game state.
 
-The local IPC protocol is newline-delimited JSON-RPC 2.0 on loopback TCP, defaulting to `127.0.0.1:7776`. Protocol version 3 supports ping, status query/subscription, graphical onboarding completion, diagnostic pulses, unsubscribe, and graceful shutdown.
+The local IPC protocol is newline-delimited JSON-RPC 2.0 on loopback TCP, defaulting to `127.0.0.1:7776`. Protocol version 4 supports ping, status and planet query/subscription, graphical onboarding completion, typed scout deployment and recall, diagnostic pulses, unsubscribe, and graceful shutdown. Planetary state uses a separate revisioned snapshot and never exposes undiscovered region truth.
 
 MCP protocol `2026-07-28` is exposed through Streamable HTTP at `http://127.0.0.1:7777/mcp` and through the `mind-mcp` stdio bridge. `mind-mcp` attaches to the existing daemon over IPC and never owns simulation state. The current MCP surface contains `get_mind_status` and `trigger_diagnostic_pulse`.
 
-`mind-tui` is an attach-only Ratatui frontend with graphical Coherence onboarding and an operational dashboard. Its local application state may cache received events, calculate client-observed tick rate, and remember view, alignment, and scroll state, but authoritative onboarding completion, telemetry, and diagnostics always originate in daemon snapshots. Detaching must never stop the daemon.
+`mind-tui` is an attach-only Ratatui frontend with graphical Coherence onboarding and Planet, Operations, and System workspaces. Planet is the default post-onboarding view and renders the rotating 24-region world through a lit orthographic half-block globe with projected selection, scout, and mission overlays plus ASCII and monochrome fallbacks; Operations presents the starter scout and mission progress; System retains daemon telemetry and diagnostics. Local application state may cache received snapshots and events and remember selection, workspace, alignment, scroll, and transient camera-animation state, but authoritative onboarding, world knowledge, mission progress, telemetry, and diagnostics always originate in daemon snapshots. Detaching must never stop the daemon.
 
-Configuration uses platform-native directories and `PathBuf`. CLI options override `SUBSTRATE_*` environment variables, which override `config.toml`, which overrides defaults. Versioned game state is atomically persisted beneath the platform-local data directory; it advances only while the daemon is running. Save schema 2 intentionally resets schema-1 prototype saves into fresh graphical onboarding.
+Configuration uses platform-native directories and `PathBuf`. CLI options override `SUBSTRATE_*` environment variables, which override `config.toml`, which overrides defaults. Versioned game state is atomically persisted beneath the platform-local data directory; it advances only while the daemon is running. Save schema 3 intentionally resets schema-1 and schema-2 saves into fresh onboarding with a newly generated regional planet.
 
 ## Product direction
 
 `GAME_PLAN.md` is the authoritative public product direction. Keep current architecture descriptions accurate and distinguish the implemented Phase 0 foundation from planned planetary systems.
 
-Phase 0 retired the circuit prototype, typed awakening, Assembly prompt, and related IPC and MCP surfaces. Do not reintroduce generic command-entry gameplay. The next product phase introduces planetary exploration on the retained daemon, persistence, IPC, MCP, and attach-only TUI foundations.
+Phase 0 retired the circuit prototype, typed awakening, Assembly prompt, and related IPC and MCP surfaces. Do not reintroduce generic command-entry gameplay. Phase 1 is in progress: the first survey slice implements the regional globe, fog, one local-range scout, timed survey and recall, and permanent terrain and environmental knowledge on the retained daemon, persistence, IPC, MCP, and attach-only TUI foundations.
 
 The target game is a keyboard-first graphical TUI centered on a rotating regional globe, probes, geological resources, energy, logistics, research, bases, permanent discoveries, and optional research-gated external LLM assistance. Typed command entry must not be required for player progression. All world simulation, risk, progression, story eligibility, automation policy, and pulse timing remain daemon-owned and advance only while the daemon runs.
 

@@ -18,13 +18,15 @@ description: Maintain the attach-only Ratatui frontend and daemon connection beh
 
 - Keep the Stage 0 Coherence onboarding graphical, untimed, and failure-free; persist only daemon-validated completion, not local band positions.
 - Do not add command-entry gameplay.
-- Build the target interface around keyboard-first Planet, Operations, Industry, Research, and Archive destinations, with a rotating selectable globe and contextual actions rather than typed commands.
+- Keep Planet as the default implemented workspace, Operations as the scout and mission view, and System as the retained telemetry and diagnostics view. Build future Industry, Research, and Archive destinations without displacing the graphical globe or reintroducing typed commands.
 - Let arrows move focus or rotate the globe, Enter open or confirm, Esc move back, and Tab move between panels; keep frequent actions visible in context.
 - Require clear confirmation for destructive actions and display automation scope, approvals, and audit results when those systems exist.
 
 ## Rendering and validation
 
 - Use restrained cyan and amber styling with semantic states, never color alone.
+- Render the regional world through a true orthographic near-hemisphere projection. Use half-block foreground/background colors for square Unicode subpixels, continuous lighting and limb depth, subtle projected region boundaries, and overlays for selection, scout position, and active paths. Never sample undiscovered world truth to add visual texture.
+- Keep yaw, pitch, idle rotation, easing, and animation phase transient and client-local. Navigation may recenter the camera but must not change selection during idle rotation or advance authoritative missions.
 - Preserve side-by-side wide layouts, stacked narrow layouts, a useful tiny-terminal message, Unicode defaults, and equivalent `--ascii`, `--no-color`, `TERM=dumb`, and `NO_COLOR` behavior.
-- Test reducers and Ratatui `TestBackend` frames for wide, stacked, tiny, disconnected, stale, help, Unicode, fallback, globe selection, contextual actions, and confirmations as implemented.
+- Test reducers and Ratatui `TestBackend` frames for wide, stacked, tiny, disconnected, stale, help, Unicode, fallback, globe selection, idle rotation, workspace navigation, scout deployment and recall, contextual actions, and confirmations as implemented.
 - Finish with live PTY inspection against the real daemon. Trigger a diagnostic pulse, force disconnect/reconnect, detach, and verify daemon reachability and terminal restoration.

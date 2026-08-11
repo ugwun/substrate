@@ -14,6 +14,8 @@ description: Build and maintain Substrate's planetary game systems. Use when cha
 
 ## World and exploration
 
+- Preserve the implemented four-by-six regional topology, neutral designations, deterministic persisted generation, two-hop starter range, and `unknown` / `detected` / `surveyed` / `observed` knowledge progression until a deliberate Phase 1 expansion replaces them.
+- Keep undiscovered terrain, temperature, and atmospheric severity out of public planet snapshots. Arrival may expose terrain; a completed survey exposes environmental conditions; holding supplies observed confidence; recall preserves surveyed knowledge.
 - Model the planet as selectable regions suitable for a pseudo-3D terminal globe, not a tile-by-tile movement simulation.
 - Distinguish unknown, partly surveyed, and continuously observed knowledge. Store confidence and provenance rather than revealing perfect hidden data.
 - Keep undiscovered truth out of client snapshots and external co-processor tools.
@@ -21,6 +23,7 @@ description: Build and maintain Substrate's planetary game systems. Use when cha
 
 ## Probes, economy, and bases
 
+- Keep the first scout failure-free and daemon-timed: 15 seconds of travel per graph hop, 30 seconds of focused surveying, an indefinite hold, and explicit recall. Keep hazards, energy, loss, and additional roles out until their owning phase is introduced.
 - Build probes from role-producing chassis and module tradeoffs such as range, sensing, mining, cargo, communication, durability, and terrain access.
 - Resolve missions from destination, knowledge, environment, energy, loadout, hazards, and infrastructure support; give honest but imperfect risk information.
 - Use recognizable geological deposits, local energy, extraction, transport, refining, fabrication, and construction. Automate proven routine logistics without removing meaningful priorities and bottlenecks.
