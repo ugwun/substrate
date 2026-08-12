@@ -1,10 +1,11 @@
 use crate::{
     protocol::{
-        self, decode_result, method, CompleteOnboardingParams, ConstructRelayParams,
-        DeployExtractorParams, DeployScoutParams, DiagnosticPulseResult,
-        OnboardingCompletionResult, PingResult, PlanetActionResult, PlanetNotification,
-        PlanetSnapshot, ProtocolError, RpcIncoming, StatusNotification, StatusSnapshot,
-        SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, decode_result, method, AcknowledgeActivityParams, ActivateProfileParams,
+        CompleteOnboardingParams, ConstructRelayParams, DeployExtractorParams, DeployScoutParams,
+        DiagnosticPulseResult, OnboardingCompletionResult, PingResult, PlanetActionResult,
+        PlanetNotification, PlanetSnapshot, ProtocolError, RegionAutomationParams, ResearchProject,
+        RpcIncoming, StartResearchParams, StatusNotification, StatusSnapshot, SubscribeResult,
+        UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
 };
@@ -33,6 +34,36 @@ pub enum IpcNotification {
 
 impl IpcClient {
     pub async fn connect(address: SocketAddr) -> Result<Self, IpcError> {
+        let (client, ping) = Self::connect_and_ping(address).await?;
+        if ping.protocol_version != PROTOCOL_VERSION {
+            return Err(IpcError::IncompatibleProtocol {
+                client: PROTOCOL_VERSION,
+                daemon: ping.protocol_version,
+            });
+        }
+        Ok(client)
+    }
+
+    /// Probe a daemon without requiring it to use the current gameplay protocol.
+    ///
+    /// Lifecycle clients use this to distinguish a stale metadata file from an older
+    /// Substrate daemon that still owns an endpoint.
+    pub async fn probe(address: SocketAddr) -> Result<PingResult, IpcError> {
+        let (_, ping) = Self::connect_and_ping(address).await?;
+        Ok(ping)
+    }
+
+    /// Ask a daemon to shut down after verifying its identity with `system.ping`.
+    ///
+    /// Ping and graceful shutdown are stable lifecycle methods, so this deliberately
+    /// works across gameplay protocol revisions.
+    pub async fn request_shutdown(address: SocketAddr) -> Result<PingResult, IpcError> {
+        let (mut client, ping) = Self::connect_and_ping(address).await?;
+        client.shutdown().await?;
+        Ok(ping)
+    }
+
+    async fn connect_and_ping(address: SocketAddr) -> Result<(Self, PingResult), IpcError> {
         let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.into_split();
         let mut client = Self {
@@ -42,13 +73,7 @@ impl IpcClient {
             pending_notifications: VecDeque::new(),
         };
         let ping = client.ping().await?;
-        if ping.protocol_version != PROTOCOL_VERSION {
-            return Err(IpcError::IncompatibleProtocol {
-                client: PROTOCOL_VERSION,
-                daemon: ping.protocol_version,
-            });
-        }
-        Ok(client)
+        Ok((client, ping))
     }
 
     pub async fn ping(&mut self) -> Result<PingResult, IpcError> {
@@ -131,6 +156,66 @@ impl IpcClient {
             region_id: region_id.into(),
         })?;
         self.call(method::CONSTRUCT_RELAY, Some(params)).await
+    }
+
+    pub async fn start_research(
+        &mut self,
+        project: ResearchProject,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(StartResearchParams { project })?;
+        self.call(method::START_RESEARCH, Some(params)).await
+    }
+
+    pub async fn activate_profile(
+        &mut self,
+        profile: crate::protocol::OperationalProfile,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(ActivateProfileParams { profile })?;
+        self.call(method::ACTIVATE_PROFILE, Some(params)).await
+    }
+
+    pub async fn queue_survey(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(RegionAutomationParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::QUEUE_SURVEY, Some(params)).await
+    }
+
+    pub async fn remove_queued_survey(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(RegionAutomationParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::REMOVE_QUEUED_SURVEY, Some(params)).await
+    }
+
+    pub async fn set_extraction_route(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(RegionAutomationParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::SET_EXTRACTION_ROUTE, Some(params)).await
+    }
+
+    pub async fn clear_extraction_route(&mut self) -> Result<PlanetActionResult, IpcError> {
+        self.call(method::CLEAR_EXTRACTION_ROUTE, None).await
+    }
+
+    pub async fn acknowledge_activity(
+        &mut self,
+        through_activity_id: u64,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(AcknowledgeActivityParams {
+            through_activity_id,
+        })?;
+        self.call(method::ACKNOWLEDGE_ACTIVITY, Some(params)).await
     }
 
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {
@@ -234,4 +319,48 @@ pub enum IpcError {
     MissingNotificationParams,
     #[error("incompatible protocol: client {client}, daemon {daemon}")]
     IncompatibleProtocol { client: u32, daemon: u32 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn lifecycle_shutdown_accepts_an_older_daemon_protocol() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+
+            let ping_request: protocol::RpcRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ping_request.method, protocol::method::PING);
+            let ping = PingResult {
+                protocol_version: PROTOCOL_VERSION - 1,
+                daemon_version: "previous".into(),
+            };
+            let mut response =
+                serde_json::to_vec(&protocol::success(ping_request.id, ping)).unwrap();
+            response.push(b'\n');
+            writer.write_all(&response).await.unwrap();
+
+            let shutdown_request: protocol::RpcRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(shutdown_request.method, protocol::method::SHUTDOWN);
+            let mut response =
+                serde_json::to_vec(&protocol::success(shutdown_request.id, true)).unwrap();
+            response.push(b'\n');
+            writer.write_all(&response).await.unwrap();
+        });
+
+        let ping = IpcClient::request_shutdown(address).await.unwrap();
+        assert_eq!(ping.protocol_version, PROTOCOL_VERSION - 1);
+        server.await.unwrap();
+    }
 }

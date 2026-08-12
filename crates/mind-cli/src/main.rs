@@ -2,10 +2,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use mind_core::{
     config::{load_or_create, AppPaths, Config, ConfigOverrides},
-    ipc::IpcClient,
+    ipc::{IpcClient, IpcError},
     protocol::StatusSnapshot,
     runtime::RuntimeMetadata,
-    DAEMON_BINARY,
+    DAEMON_BINARY, PROTOCOL_VERSION, TUI_BINARY,
 };
 use std::{
     env,
@@ -31,6 +31,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopLevel {
+    /// Start the daemon if needed, then open the game.
+    Play {
+        #[arg(long)]
+        ascii: bool,
+        #[arg(long)]
+        no_color: bool,
+    },
     Daemon(DaemonArgs),
 }
 
@@ -71,6 +78,7 @@ async fn run() -> Result<()> {
         mcp_address: cli.mcp_addr,
     })?;
     match cli.command {
+        TopLevel::Play { ascii, no_color } => play(&config, &paths, ascii, no_color).await,
         TopLevel::Daemon(args) => match args.command {
             DaemonCommand::Start { foreground } => start(&config, &paths, foreground).await,
             DaemonCommand::Stop => stop(&config, &paths).await,
@@ -79,12 +87,42 @@ async fn run() -> Result<()> {
     }
 }
 
-async fn start(config: &Config, paths: &AppPaths, foreground: bool) -> Result<()> {
-    if connect_with_timeout(config.address, Duration::from_millis(400))
+async fn play(config: &Config, paths: &AppPaths, ascii: bool, no_color: bool) -> Result<()> {
+    match connect_with_timeout(config.address, Duration::from_millis(400)).await {
+        Ok(_) => {}
+        Err(error) => {
+            reject_incompatible_daemon(&error, config.address)?;
+            start(config, paths, false).await?;
+        }
+    }
+
+    let tui = resolve_sibling_binary("SUBSTRATE_TUI_BIN", TUI_BINARY)?;
+    let mut command = Command::new(&tui);
+    command
+        .arg("--config")
+        .arg(&paths.config_file)
+        .arg("--addr")
+        .arg(config.address.to_string());
+    if ascii {
+        command.arg("--ascii");
+    }
+    if no_color {
+        command.arg("--no-color");
+    }
+    let status = command
+        .status()
         .await
-        .is_ok()
-    {
-        bail!("mind daemon is already running at {}", config.address);
+        .with_context(|| format!("failed to launch {}", tui.display()))?;
+    if !status.success() {
+        bail!("game interface exited with {status}");
+    }
+    Ok(())
+}
+
+async fn start(config: &Config, paths: &AppPaths, foreground: bool) -> Result<()> {
+    match connect_with_timeout(config.address, Duration::from_millis(400)).await {
+        Ok(_) => bail!("mind daemon is already running at {}", config.address),
+        Err(error) => reject_incompatible_daemon(&error, config.address)?,
     }
     clear_stale_metadata(paths, config.address).await?;
 
@@ -152,15 +190,19 @@ async fn start(config: &Config, paths: &AppPaths, foreground: bool) -> Result<()
 }
 
 async fn stop(config: &Config, paths: &AppPaths) -> Result<()> {
-    let mut client = connect_with_timeout(config.address, Duration::from_secs(1))
+    let ping = request_shutdown_with_timeout(config.address, Duration::from_secs(1))
         .await
-        .context("mind daemon is not reachable")?;
-    client.shutdown().await.context("shutdown request failed")?;
-    drop(client);
+        .context("mind daemon is not reachable or did not identify itself")?;
+    if ping.protocol_version != PROTOCOL_VERSION {
+        eprintln!(
+            "stopping older mind daemon protocol {} (current client protocol {})",
+            ping.protocol_version, PROTOCOL_VERSION
+        );
+    }
 
     let deadline = time::Instant::now() + Duration::from_secs(5);
     while time::Instant::now() < deadline {
-        if connect_with_timeout(config.address, Duration::from_millis(150))
+        if probe_with_timeout(config.address, Duration::from_millis(150))
             .await
             .is_err()
         {
@@ -231,15 +273,24 @@ fn print_status(status: &StatusSnapshot, json: bool) -> Result<()> {
 
 async fn clear_stale_metadata(paths: &AppPaths, configured_address: SocketAddr) -> Result<()> {
     if let Some(metadata) = RuntimeMetadata::read(&paths.runtime_file)? {
-        if connect_with_timeout(metadata.address, Duration::from_millis(300))
-            .await
-            .is_ok()
-        {
+        if let Ok(ping) = probe_with_timeout(metadata.address, Duration::from_millis(300)).await {
             bail!(
-                "another mind daemon is running at {} (pid {})",
+                "another mind daemon is running at {} (pid {}, protocol {})",
                 metadata.address,
-                metadata.pid
+                metadata.pid,
+                ping.protocol_version
             );
+        }
+        if metadata.address != configured_address {
+            if let Ok(ping) =
+                probe_with_timeout(configured_address, Duration::from_millis(300)).await
+            {
+                bail!(
+                    "another mind daemon is running at {} (protocol {})",
+                    configured_address,
+                    ping.protocol_version
+                );
+            }
         }
         RuntimeMetadata::remove(&paths.runtime_file)?;
         if metadata.address != configured_address {
@@ -259,16 +310,51 @@ async fn connect_with_timeout(address: SocketAddr, duration: Duration) -> Result
         .map_err(Into::into)
 }
 
+async fn probe_with_timeout(
+    address: SocketAddr,
+    duration: Duration,
+) -> Result<mind_core::protocol::PingResult> {
+    time::timeout(duration, IpcClient::probe(address))
+        .await
+        .map_err(|_| anyhow!("connection to {address} timed out"))?
+        .map_err(Into::into)
+}
+
+async fn request_shutdown_with_timeout(
+    address: SocketAddr,
+    duration: Duration,
+) -> Result<mind_core::protocol::PingResult> {
+    time::timeout(duration, IpcClient::request_shutdown(address))
+        .await
+        .map_err(|_| anyhow!("connection to {address} timed out"))?
+        .map_err(Into::into)
+}
+
+fn reject_incompatible_daemon(error: &anyhow::Error, address: SocketAddr) -> Result<()> {
+    if let Some(IpcError::IncompatibleProtocol { client, daemon }) =
+        error.downcast_ref::<IpcError>()
+    {
+        bail!(
+            "an older mind daemon is running at {address} (daemon protocol {daemon}, client protocol {client}); run `./target/debug/mind-cli daemon stop`, then retry"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_daemon_binary() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("SUBSTRATE_DAEMON_BIN") {
+    resolve_sibling_binary("SUBSTRATE_DAEMON_BIN", DAEMON_BINARY)
+}
+
+fn resolve_sibling_binary(environment_key: &str, binary_name: &str) -> Result<PathBuf> {
+    if let Some(path) = env::var_os(environment_key) {
         return Ok(PathBuf::from(path));
     }
     let current = env::current_exe().context("failed to locate mind-cli executable")?;
-    let sibling = current.with_file_name(executable_name(DAEMON_BINARY));
+    let sibling = current.with_file_name(executable_name(binary_name));
     if sibling.is_file() {
         return Ok(sibling);
     }
-    Ok(PathBuf::from(executable_name(DAEMON_BINARY)))
+    Ok(PathBuf::from(executable_name(binary_name)))
 }
 
 fn executable_name(name: &str) -> String {
@@ -301,3 +387,23 @@ fn isolate_process(_command: &mut Command) {}
 
 #[allow(dead_code)]
 fn _assert_path_is_portable(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_daemon_error_explains_the_recovery_command() {
+        let error = anyhow!(IpcError::IncompatibleProtocol {
+            client: PROTOCOL_VERSION,
+            daemon: PROTOCOL_VERSION - 1,
+        });
+        let message = reject_incompatible_daemon(&error, "127.0.0.1:7776".parse().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("older mind daemon"));
+        assert!(message.contains("mind-cli daemon stop"));
+        assert!(message.contains("protocol 5"));
+        assert!(message.contains("protocol 6"));
+    }
+}

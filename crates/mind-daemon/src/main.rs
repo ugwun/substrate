@@ -26,7 +26,11 @@ async fn main() -> Result<()> {
         mcp_address: args.mcp_addr,
     })?;
     init_logging(args.background, &paths)?;
-    mind_daemon::run(config, paths).await
+    let result = mind_daemon::run(config, paths).await;
+    if let Err(error) = &result {
+        tracing::error!(error = %format!("{error:#}"), "mind daemon failed");
+    }
+    result
 }
 
 fn init_logging(background: bool, paths: &mind_core::config::AppPaths) -> Result<()> {

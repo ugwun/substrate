@@ -1,8 +1,8 @@
 use mind_core::{
     ipc::{IpcClient, IpcNotification},
     protocol::{
-        DiagnosticPulseResult, OnboardingCompletionResult, PlanetActionResult, PlanetSnapshot,
-        StatusSnapshot,
+        DiagnosticPulseResult, OnboardingCompletionResult, OperationalProfile, PlanetActionResult,
+        PlanetSnapshot, ResearchProject, StatusSnapshot,
     },
 };
 use std::{net::SocketAddr, time::Duration};
@@ -17,6 +17,13 @@ pub enum ConnectionCommand {
     RecallScout,
     DeployExtractor(String),
     ConstructRelay(String),
+    StartResearch(ResearchProject),
+    ActivateProfile(OperationalProfile),
+    QueueSurvey(String),
+    RemoveQueuedSurvey(String),
+    SetExtractionRoute(String),
+    ClearExtractionRoute,
+    AcknowledgeActivity(u64),
     Retry,
     Detach,
 }
@@ -27,6 +34,10 @@ pub enum PlanetActionKind {
     Recall,
     Extract,
     Construct,
+    Research,
+    Profile,
+    Automation,
+    Review,
 }
 
 #[derive(Debug)]
@@ -254,6 +265,64 @@ pub async fn run(
                                                 return;
                                             }
                                         }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::StartResearch(project)) => {
+                            match client.start_research(project).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Research, result)).await.is_err() { return; }
+                                    match client.planet().await {
+                                        Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::ActivateProfile(profile)) => {
+                            match client.activate_profile(profile).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Profile, result)).await.is_err() { return; }
+                                    match client.planet().await {
+                                        Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(command @ (ConnectionCommand::QueueSurvey(_)
+                            | ConnectionCommand::RemoveQueuedSurvey(_)
+                            | ConnectionCommand::SetExtractionRoute(_)
+                            | ConnectionCommand::ClearExtractionRoute)) => {
+                            let result = match command {
+                                ConnectionCommand::QueueSurvey(region_id) => client.queue_survey(region_id).await,
+                                ConnectionCommand::RemoveQueuedSurvey(region_id) => client.remove_queued_survey(region_id).await,
+                                ConnectionCommand::SetExtractionRoute(region_id) => client.set_extraction_route(region_id).await,
+                                ConnectionCommand::ClearExtractionRoute => client.clear_extraction_route().await,
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Automation, result)).await.is_err() { return; }
+                                    match client.planet().await {
+                                        Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::AcknowledgeActivity(through_activity_id)) => {
+                            match client.acknowledge_activity(through_activity_id).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Review, result)).await.is_err() { return; }
+                                    match client.planet().await {
+                                        Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
                                         Err(error) => break error.to_string(),
                                     }
                                 }

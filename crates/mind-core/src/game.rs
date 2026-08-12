@@ -1,10 +1,12 @@
 use crate::protocol::{
     ActiveConstructionSnapshot, ActiveExtractionSnapshot, ActiveMissionSnapshot,
-    AtmosphericSeverity, DepositSnapshot, ExtractionProbeSnapshot, ExtractorState, MissionReport,
+    ActiveResearchSnapshot, ActivityKind, ActivityRecord, AtmosphericSeverity, DepositSnapshot,
+    ExtractionProbeSnapshot, ExtractionRouteSnapshot, ExtractorState, MissionReport,
     MissionReportOutcome, ObjectiveSnapshot, OnboardingCompletionResult, OnboardingSnapshot,
-    PlanetActionResult, PlanetSnapshot, RegionKnowledge, RegionPosition, RegionSnapshot,
-    ResourceKind, ResourceStock, RiskLevel, ScoutSnapshot, ScoutState, SurveyConfidence,
-    TemperatureBand, TerrainClass,
+    OperationalProfile, OperationalProfileSnapshot, PlanetActionResult, PlanetSnapshot,
+    RegionKnowledge, RegionPosition, RegionSnapshot, ResearchOptionSnapshot, ResearchProject,
+    ResearchSnapshot, ResourceKind, ResourceStock, RiskLevel, ScoutSnapshot, ScoutState,
+    SurveyConfidence, SurveyQueueSnapshot, TemperatureBand, TerrainClass,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,14 +16,13 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use uuid::Uuid;
 
-const SAVE_SCHEMA_VERSION: u32 = 4;
-const MIGRATABLE_SCHEMA_VERSION: u32 = 3;
-const RESETTABLE_SCHEMA_VERSIONS: [u32; 2] = [1, 2];
-const WORLD_GENERATION_VERSION: u32 = 1;
-const LATITUDE_BANDS: u8 = 4;
-const LONGITUDE_SECTORS: u8 = 6;
+const SAVE_SCHEMA_VERSION: u32 = 5;
+const RESETTABLE_SCHEMA_VERSIONS: [u32; 4] = [1, 2, 3, 4];
+const WORLD_GENERATION_VERSION: u32 = 2;
+const LATITUDE_BANDS: u8 = 10;
+const LONGITUDE_SECTORS: u8 = 20;
 const REGION_COUNT: usize = (LATITUDE_BANDS as usize) * (LONGITUDE_SECTORS as usize);
-const CORE_LATITUDE_BAND: u8 = 1;
+const CORE_LATITUDE_BAND: u8 = 4;
 const CORE_LONGITUDE_SECTOR: u8 = 0;
 const SCOUT_RANGE_HOPS: u8 = 2;
 const TRAVEL_MS_PER_HOP: u64 = 15_000;
@@ -38,6 +39,10 @@ const RELAY_COST: ResourceStock = ResourceStock {
     conductive: 6,
     silicate: 6,
 };
+const RESEARCH_ANALYSIS_COST: u32 = 3;
+const RESEARCH_DURATION_MS: u64 = 120_000;
+const SURVEY_QUEUE_CAPACITY: usize = 8;
+const ACTIVITY_CAPACITY: usize = 64;
 
 pub const ONBOARDING_BAND_SLOTS: u8 = 12;
 
@@ -67,8 +72,22 @@ pub struct GameState {
     active_construction: Option<ConstructionState>,
     #[serde(default)]
     relay_region_id: Option<String>,
+    reach_milestone_complete: bool,
     #[serde(default)]
     alpha_complete: bool,
+    analysis_units: u32,
+    completed_research: Vec<ResearchProject>,
+    active_research: Option<ResearchState>,
+    operational_profile: OperationalProfile,
+    survey_queue: Vec<String>,
+    proven_extraction_region_ids: Vec<String>,
+    extraction_route_region_id: Option<String>,
+    extraction_route_paused_reason: Option<String>,
+    automated_survey_completed: bool,
+    automated_extraction_completed: bool,
+    activity_log: Vec<ActivityRecord>,
+    next_activity_id: u64,
+    acknowledged_activity_id: u64,
     #[serde(default)]
     random_state: u64,
     #[serde(skip)]
@@ -125,6 +144,7 @@ struct MissionState {
     travel_ms: u64,
     survey_required: bool,
     survey_completed: bool,
+    auto_return: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,12 +159,21 @@ struct ExtractionMissionState {
     risk: RiskLevel,
     will_fail: bool,
     cargo: Option<(ResourceKind, u32)>,
+    automated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ConstructionState {
     region_id: String,
+    remaining_ms: u64,
+    phase_total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ResearchState {
+    project: ResearchProject,
     remaining_ms: u64,
     phase_total_ms: u64,
 }
@@ -171,7 +200,6 @@ pub enum LoadDisposition {
     Missing,
     Current,
     PreviousReset,
-    PreviousMigrated,
 }
 
 #[derive(Debug)]
@@ -190,6 +218,9 @@ pub enum GameAdvanceEvent {
     ExtractorRebuilt,
     RelayActivated,
     AlphaMilestoneCompleted,
+    AlphaSliceCompleted,
+    ResearchCompleted,
+    AutomationPaused,
 }
 
 impl Default for GameState {
@@ -222,7 +253,21 @@ impl GameState {
             refining_remaining_ms: 0,
             active_construction: None,
             relay_region_id: None,
+            reach_milestone_complete: false,
             alpha_complete: false,
+            analysis_units: 0,
+            completed_research: Vec::new(),
+            active_research: None,
+            operational_profile: OperationalProfile::Balanced,
+            survey_queue: Vec::new(),
+            proven_extraction_region_ids: Vec::new(),
+            extraction_route_region_id: None,
+            extraction_route_paused_reason: None,
+            automated_survey_completed: false,
+            automated_extraction_completed: false,
+            activity_log: Vec::new(),
+            next_activity_id: 1,
+            acknowledged_activity_id: 0,
             random_state: seed ^ 0xA17A_5EED_D15C_0FFE,
             dirty: true,
             generation: 0,
@@ -240,7 +285,7 @@ impl GameState {
             }
             Err(error) => return Err(GameError::Io(error)),
         };
-        let mut value: Value = serde_json::from_slice(&bytes)?;
+        let value: Value = serde_json::from_slice(&bytes)?;
         let version: VersionEnvelope = serde_json::from_value(value.clone())?;
         if RESETTABLE_SCHEMA_VERSIONS.contains(&version.schema_version) {
             let mut state = Self::default();
@@ -251,29 +296,17 @@ impl GameState {
                 disposition: LoadDisposition::PreviousReset,
             });
         }
-        let migrated = version.schema_version == MIGRATABLE_SCHEMA_VERSION;
-        if migrated {
-            value["schema_version"] = Value::from(SAVE_SCHEMA_VERSION);
-        }
-        if version.schema_version != SAVE_SCHEMA_VERSION && !migrated {
+        if version.schema_version != SAVE_SCHEMA_VERSION {
             return Err(GameError::UnsupportedVersion(version.schema_version));
         }
         let envelope: SaveEnvelope = serde_json::from_value(value)?;
         let mut state = envelope.state;
-        if migrated {
-            state.initialize_alpha_fields();
-            state.save(path)?;
-        }
         state.validate()?;
         state.dirty = false;
         state.generation = 0;
         Ok(LoadedGame {
             state,
-            disposition: if migrated {
-                LoadDisposition::PreviousMigrated
-            } else {
-                LoadDisposition::Current
-            },
+            disposition: LoadDisposition::Current,
         })
     }
 
@@ -346,6 +379,8 @@ impl GameState {
             };
             PlanetSnapshot {
                 revision: self.state_revision,
+                latitude_bands: LATITUDE_BANDS,
+                longitude_sectors: LONGITUDE_SECTORS,
                 core_region_id: self.world.core_region_id.clone(),
                 regions: self
                     .world
@@ -368,6 +403,7 @@ impl GameState {
                         phase: mission.phase,
                         remaining_ms: mission.remaining_ms,
                         phase_total_ms: mission.phase_total_ms,
+                        automated: mission.auto_return,
                     }),
                 recent_reports: self.recent_reports.clone(),
                 extractor: ExtractionProbeSnapshot {
@@ -383,7 +419,8 @@ impl GameState {
                         remaining_ms: mission.remaining_ms,
                         phase_total_ms: mission.phase_total_ms,
                         risk: mission.risk,
-                        cargo_capacity: EXTRACTION_CAPACITY,
+                        cargo_capacity: self.extraction_capacity(),
+                        automated: mission.automated,
                     }
                 }),
                 raw_inventory: self.raw_inventory,
@@ -397,6 +434,24 @@ impl GameState {
                     }
                 }),
                 relay_region_id: self.relay_region_id.clone(),
+                research: self.research_snapshot(),
+                survey_queue: SurveyQueueSnapshot {
+                    unlocked: self.automation_unlocked(),
+                    capacity: SURVEY_QUEUE_CAPACITY,
+                    queued_region_ids: self.survey_queue.clone(),
+                },
+                extraction_route: ExtractionRouteSnapshot {
+                    unlocked: self.automation_unlocked(),
+                    region_id: self.extraction_route_region_id.clone(),
+                    paused_reason: self.extraction_route_paused_reason.clone(),
+                    proven_region_ids: self.proven_extraction_region_ids.clone(),
+                },
+                unreviewed_activity: self
+                    .activity_log
+                    .iter()
+                    .filter(|record| record.activity_id > self.acknowledged_activity_id)
+                    .cloned()
+                    .collect(),
                 objective: self.objective_snapshot(),
             }
         })
@@ -436,6 +491,7 @@ impl GameState {
             travel_ms,
             survey_required: region.knowledge < RegionKnowledge::Surveyed,
             survey_completed: region.knowledge >= RegionKnowledge::Surveyed,
+            auto_return: false,
         });
         self.changed();
         PlanetActionResult {
@@ -515,7 +571,7 @@ impl GameState {
             return self.action_rejected("extractor_unavailable");
         }
         let travel_ms = u64::from(hop_distance(&region.position)) * TRAVEL_MS_PER_HOP;
-        let risk = risk_for(region.atmospheric_severity);
+        let risk = self.effective_risk(region.atmospheric_severity);
         let will_fail = self.next_random_percent() < risk_percent(risk);
         let mission_id = self.next_mission_id;
         self.next_mission_id += 1;
@@ -529,6 +585,7 @@ impl GameState {
             risk,
             will_fail,
             cargo: None,
+            automated: false,
         });
         self.changed();
         self.action_accepted(Some(mission_id))
@@ -571,10 +628,196 @@ impl GameState {
         self.action_accepted(None)
     }
 
+    pub fn start_research(&mut self, project: ResearchProject) -> PlanetActionResult {
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
+        }
+        if !self.reach_milestone_complete {
+            return self.action_rejected("research_locked");
+        }
+        if self.active_research.is_some() {
+            return self.action_rejected("research_in_progress");
+        }
+        if self.completed_research.contains(&project) {
+            return self.action_rejected("research_completed");
+        }
+        if self.analysis_units < RESEARCH_ANALYSIS_COST {
+            return self.action_rejected("insufficient_analysis");
+        }
+        self.analysis_units -= RESEARCH_ANALYSIS_COST;
+        self.active_research = Some(ResearchState {
+            project,
+            remaining_ms: RESEARCH_DURATION_MS,
+            phase_total_ms: RESEARCH_DURATION_MS,
+        });
+        self.push_activity(
+            ActivityKind::Research,
+            None,
+            format!("Research started: {}.", research_title(project)),
+        );
+        self.changed();
+        self.action_accepted(None)
+    }
+
+    pub fn activate_profile(&mut self, profile: OperationalProfile) -> PlanetActionResult {
+        if !self.profile_unlocked(profile) {
+            return self.action_rejected("profile_locked");
+        }
+        if self.active_mission.is_some() || self.active_extraction.is_some() {
+            return self.action_rejected("field_operation_active");
+        }
+        if self.operational_profile != profile {
+            self.operational_profile = profile;
+            self.push_activity(
+                ActivityKind::Research,
+                None,
+                format!("Operational profile activated: {}.", profile_title(profile)),
+            );
+            self.changed();
+        }
+        self.action_accepted(None)
+    }
+
+    pub fn queue_survey(&mut self, region_id: &str) -> PlanetActionResult {
+        if !self.automation_unlocked() {
+            return self.action_rejected("automation_locked");
+        }
+        let Some(region) = self
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+        else {
+            return self.action_rejected("unknown_region");
+        };
+        if region.id == self.world.core_region_id
+            || region.knowledge >= RegionKnowledge::Surveyed
+            || !self.region_within_range(&region.position)
+        {
+            return self.action_rejected("survey_queue_ineligible");
+        }
+        if self.survey_queue.iter().any(|queued| queued == region_id)
+            || self
+                .active_mission
+                .as_ref()
+                .is_some_and(|mission| mission.target_region_id == region_id)
+        {
+            return self.action_rejected("survey_already_queued");
+        }
+        if self.survey_queue.len() >= SURVEY_QUEUE_CAPACITY {
+            return self.action_rejected("survey_queue_full");
+        }
+        self.survey_queue.push(region_id.to_owned());
+        self.push_activity(
+            ActivityKind::Automation,
+            Some(region_id.to_owned()),
+            format!("Automated survey queued for {}.", region.designation),
+        );
+        self.changed();
+        self.action_accepted(None)
+    }
+
+    pub fn remove_queued_survey(&mut self, region_id: &str) -> PlanetActionResult {
+        let Some(index) = self
+            .survey_queue
+            .iter()
+            .position(|queued| queued == region_id)
+        else {
+            return self.action_rejected("survey_not_queued");
+        };
+        self.survey_queue.remove(index);
+        let designation = self.region_designation(region_id);
+        self.push_activity(
+            ActivityKind::Automation,
+            Some(region_id.to_owned()),
+            format!("Queued survey removed from {designation}."),
+        );
+        self.changed();
+        self.action_accepted(None)
+    }
+
+    pub fn set_extraction_route(&mut self, region_id: &str) -> PlanetActionResult {
+        if !self.automation_unlocked() {
+            return self.action_rejected("automation_locked");
+        }
+        if !self
+            .proven_extraction_region_ids
+            .iter()
+            .any(|proven| proven == region_id)
+        {
+            return self.action_rejected("route_not_proven");
+        }
+        let Some(region) = self
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+        else {
+            return self.action_rejected("unknown_region");
+        };
+        if !self.region_within_range(&region.position)
+            || region
+                .deposit
+                .as_ref()
+                .is_none_or(|deposit| deposit.remaining == 0)
+        {
+            return self.action_rejected("route_unavailable");
+        }
+        self.extraction_route_region_id = Some(region_id.to_owned());
+        self.extraction_route_paused_reason = None;
+        self.push_activity(
+            ActivityKind::Automation,
+            Some(region_id.to_owned()),
+            format!(
+                "Proven extraction route activated at {}.",
+                region.designation
+            ),
+        );
+        self.changed();
+        self.action_accepted(None)
+    }
+
+    pub fn clear_extraction_route(&mut self) -> PlanetActionResult {
+        let Some(region_id) = self.extraction_route_region_id.take() else {
+            return self.action_rejected("no_extraction_route");
+        };
+        self.extraction_route_paused_reason = None;
+        let designation = self.region_designation(&region_id);
+        self.push_activity(
+            ActivityKind::Automation,
+            Some(region_id),
+            format!("Automated extraction route cleared from {designation}."),
+        );
+        self.changed();
+        self.action_accepted(None)
+    }
+
+    pub fn acknowledge_activity(&mut self, through_activity_id: u64) -> PlanetActionResult {
+        let latest = self
+            .activity_log
+            .last()
+            .map_or(self.acknowledged_activity_id, |record| record.activity_id);
+        let acknowledged = through_activity_id.min(latest);
+        if acknowledged > self.acknowledged_activity_id {
+            self.acknowledged_activity_id = acknowledged;
+            self.changed();
+        }
+        self.action_accepted(None)
+    }
+
     pub fn advance(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
+        if self.active_mission.is_none() {
+            self.dispatch_next_queued_survey();
+        }
+        if self.active_extraction.is_none()
+            && self.extractor_available
+            && self.extraction_route_paused_reason.is_none()
+        {
+            self.dispatch_extraction_route();
+        }
         let mut events = self.advance_scout(elapsed_ms);
         if events.contains(&GameAdvanceEvent::SurveyCompleted)
-            && !self.alpha_complete
+            && !self.reach_milestone_complete
             && self.relay_region_id.is_some()
             && self.active_mission.as_ref().is_some_and(|mission| {
                 self.world
@@ -584,29 +827,46 @@ impl GameState {
                     .is_some_and(|region| hop_distance(&region.position) > SCOUT_RANGE_HOPS)
             })
         {
-            self.alpha_complete = true;
+            self.reach_milestone_complete = true;
+            self.push_activity(
+                ActivityKind::Milestone,
+                None,
+                "Extended survey reach proven; research planning is now available.".into(),
+            );
             self.changed();
             events.push(GameAdvanceEvent::AlphaMilestoneCompleted);
         }
+        events.extend(self.advance_research(elapsed_ms));
         self.advance_refining(elapsed_ms);
-        events.extend(self.advance_extraction(elapsed_ms));
-        if let Some(mut construction) = self.active_construction.take() {
-            construction.remaining_ms = construction.remaining_ms.saturating_sub(elapsed_ms);
-            if construction.remaining_ms == 0 {
-                self.relay_region_id = Some(construction.region_id);
-                events.push(GameAdvanceEvent::RelayActivated);
-            } else {
-                self.active_construction = Some(construction);
-            }
-            self.changed();
-        }
         if !self.extractor_available && self.extractor_rebuild_remaining_ms > 0 {
             self.extractor_rebuild_remaining_ms = self
                 .extractor_rebuild_remaining_ms
                 .saturating_sub(elapsed_ms);
             if self.extractor_rebuild_remaining_ms == 0 {
                 self.extractor_available = true;
+                self.push_activity(
+                    ActivityKind::Recovery,
+                    None,
+                    "Replacement extractor completed at the core.".into(),
+                );
                 events.push(GameAdvanceEvent::ExtractorRebuilt);
+            }
+            self.changed();
+        }
+        events.extend(self.advance_extraction(elapsed_ms));
+        if let Some(mut construction) = self.active_construction.take() {
+            construction.remaining_ms = construction.remaining_ms.saturating_sub(elapsed_ms);
+            if construction.remaining_ms == 0 {
+                let designation = self.region_designation(&construction.region_id);
+                self.relay_region_id = Some(construction.region_id.clone());
+                self.push_activity(
+                    ActivityKind::Construction,
+                    Some(construction.region_id),
+                    format!("Range relay activated at {designation}."),
+                );
+                events.push(GameAdvanceEvent::RelayActivated);
+            } else {
+                self.active_construction = Some(construction);
             }
             self.changed();
         }
@@ -645,8 +905,8 @@ impl GameState {
                         }
                         if mission.survey_required {
                             mission.phase = ScoutState::Surveying;
-                            mission.remaining_ms = SURVEY_MS;
-                            mission.phase_total_ms = SURVEY_MS;
+                            mission.remaining_ms = self.survey_duration_ms();
+                            mission.phase_total_ms = self.survey_duration_ms();
                         } else {
                             region.knowledge = RegionKnowledge::Observed;
                             mission.phase = ScoutState::Holding;
@@ -663,12 +923,25 @@ impl GameState {
                         region.knowledge = RegionKnowledge::Observed;
                     }
                     mission.survey_completed = true;
-                    mission.phase = ScoutState::Holding;
+                    self.analysis_units = self.analysis_units.saturating_add(1);
                     self.push_report(MissionReport {
                         mission_id: mission.mission_id,
                         region_id: mission.target_region_id.clone(),
                         outcome: MissionReportOutcome::SurveyCompleted,
                     });
+                    let designation = self.region_designation(&mission.target_region_id);
+                    self.push_activity(
+                        ActivityKind::Survey,
+                        Some(mission.target_region_id.clone()),
+                        format!("Survey completed at {designation}; one analysis unit recorded."),
+                    );
+                    if mission.auto_return {
+                        mission.phase = ScoutState::Returning;
+                        mission.remaining_ms = mission.travel_ms;
+                        mission.phase_total_ms = mission.travel_ms;
+                    } else {
+                        mission.phase = ScoutState::Holding;
+                    }
                     events.push(GameAdvanceEvent::SurveyCompleted);
                 }
                 ScoutState::Returning => {
@@ -681,7 +954,13 @@ impl GameState {
                             MissionReportOutcome::Recalled
                         },
                     });
+                    if mission.auto_return && mission.survey_completed {
+                        self.automated_survey_completed = true;
+                    }
                     events.push(GameAdvanceEvent::ScoutReturned);
+                    if self.refresh_alpha_completion() {
+                        events.push(GameAdvanceEvent::AlphaSliceCompleted);
+                    }
                     self.changed();
                     return events;
                 }
@@ -720,11 +999,22 @@ impl GameState {
                         region_id: mission.target_region_id.clone(),
                         outcome: MissionReportOutcome::ExtractorLost,
                     });
+                    let designation = self.region_designation(&mission.target_region_id);
+                    self.push_activity(
+                        ActivityKind::Loss,
+                        Some(mission.target_region_id.clone()),
+                        format!("Extractor and cargo were lost near {designation}."),
+                    );
+                    if mission.automated {
+                        self.extraction_route_paused_reason = Some("probe_loss".into());
+                        events.push(GameAdvanceEvent::AutomationPaused);
+                    }
                     self.changed();
                     events.push(GameAdvanceEvent::ExtractorLost);
                     return events;
                 }
                 ExtractorState::Extracting => {
+                    let capacity = self.extraction_capacity();
                     if let Some(deposit) = self
                         .world
                         .regions
@@ -732,7 +1022,7 @@ impl GameState {
                         .find(|region| region.id == mission.target_region_id)
                         .and_then(|region| region.deposit.as_mut())
                     {
-                        let amount = deposit.remaining.min(EXTRACTION_CAPACITY);
+                        let amount = deposit.remaining.min(capacity);
                         deposit.remaining -= amount;
                         mission.cargo = Some((deposit.resource, amount));
                     }
@@ -743,14 +1033,37 @@ impl GameState {
                 ExtractorState::Returning => {
                     if let Some((resource, amount)) = mission.cargo {
                         add_stock(&mut self.raw_inventory, resource, amount);
+                        let designation = self.region_designation(&mission.target_region_id);
+                        self.push_activity(
+                            ActivityKind::Extraction,
+                            Some(mission.target_region_id.clone()),
+                            format!(
+                                "Extractor returned {amount} {} units from {designation}.",
+                                resource_label(resource)
+                            ),
+                        );
+                        if !self
+                            .proven_extraction_region_ids
+                            .iter()
+                            .any(|region_id| region_id == &mission.target_region_id)
+                        {
+                            self.proven_extraction_region_ids
+                                .push(mission.target_region_id.clone());
+                        }
                     }
                     self.push_report(MissionReport {
                         mission_id: mission.mission_id,
                         region_id: mission.target_region_id.clone(),
                         outcome: MissionReportOutcome::ExtractionCompleted,
                     });
+                    if mission.automated {
+                        self.automated_extraction_completed = true;
+                    }
                     self.changed();
                     events.push(GameAdvanceEvent::ExtractionCompleted);
+                    if self.refresh_alpha_completion() {
+                        events.push(GameAdvanceEvent::AlphaSliceCompleted);
+                    }
                     return events;
                 }
                 ExtractorState::Ready | ExtractorState::Rebuilding => break,
@@ -769,7 +1082,7 @@ impl GameState {
                 if first_stock_kind(self.raw_inventory).is_none() {
                     break;
                 }
-                self.refining_remaining_ms = REFINING_MS_PER_UNIT;
+                self.refining_remaining_ms = self.refining_ms_per_unit();
             }
             let consumed = elapsed.min(self.refining_remaining_ms);
             self.refining_remaining_ms -= consumed;
@@ -785,6 +1098,121 @@ impl GameState {
         if changed {
             self.changed();
         }
+    }
+
+    fn advance_research(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
+        let Some(mut research) = self.active_research.take() else {
+            return Vec::new();
+        };
+        research.remaining_ms = research.remaining_ms.saturating_sub(elapsed_ms);
+        if research.remaining_ms > 0 {
+            self.active_research = Some(research);
+            self.changed();
+            return Vec::new();
+        }
+        if !self.completed_research.contains(&research.project) {
+            self.completed_research.push(research.project);
+        }
+        self.push_activity(
+            ActivityKind::Research,
+            None,
+            format!("Research completed: {}.", research_title(research.project)),
+        );
+        self.changed();
+        vec![GameAdvanceEvent::ResearchCompleted]
+    }
+
+    fn dispatch_next_queued_survey(&mut self) {
+        while !self.survey_queue.is_empty() {
+            let region_id = self.survey_queue.remove(0);
+            let Some(region) = self
+                .world
+                .regions
+                .iter()
+                .find(|region| region.id == region_id)
+            else {
+                continue;
+            };
+            if region.knowledge >= RegionKnowledge::Surveyed
+                || !self.region_within_range(&region.position)
+            {
+                continue;
+            }
+            let travel_ms = u64::from(hop_distance(&region.position)) * TRAVEL_MS_PER_HOP;
+            let mission_id = self.next_mission_id;
+            self.next_mission_id += 1;
+            self.active_mission = Some(MissionState {
+                mission_id,
+                target_region_id: region_id,
+                phase: ScoutState::Outbound,
+                remaining_ms: travel_ms,
+                phase_total_ms: travel_ms,
+                travel_ms,
+                survey_required: true,
+                survey_completed: false,
+                auto_return: true,
+            });
+            self.changed();
+            return;
+        }
+    }
+
+    fn dispatch_extraction_route(&mut self) {
+        let Some(region_id) = self.extraction_route_region_id.clone() else {
+            return;
+        };
+        let Some(region) = self
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+        else {
+            self.pause_extraction_route("region_unavailable");
+            return;
+        };
+        if !self.region_within_range(&region.position) {
+            self.pause_extraction_route("region_out_of_range");
+            return;
+        }
+        if region
+            .deposit
+            .as_ref()
+            .is_none_or(|deposit| deposit.remaining == 0)
+        {
+            self.pause_extraction_route("deposit_depleted");
+            return;
+        }
+        let travel_ms = u64::from(hop_distance(&region.position)) * TRAVEL_MS_PER_HOP;
+        let risk = self.effective_risk(region.atmospheric_severity);
+        let will_fail = self.next_random_percent() < risk_percent(risk);
+        let mission_id = self.next_mission_id;
+        self.next_mission_id += 1;
+        self.active_extraction = Some(ExtractionMissionState {
+            mission_id,
+            target_region_id: region_id,
+            phase: ExtractorState::Outbound,
+            remaining_ms: travel_ms,
+            phase_total_ms: travel_ms,
+            travel_ms,
+            risk,
+            will_fail,
+            cargo: None,
+            automated: true,
+        });
+        self.changed();
+    }
+
+    fn pause_extraction_route(&mut self, reason: &str) {
+        if self.extraction_route_paused_reason.as_deref() == Some(reason) {
+            return;
+        }
+        self.extraction_route_paused_reason = Some(reason.to_owned());
+        self.push_activity(
+            ActivityKind::Automation,
+            self.extraction_route_region_id.clone(),
+            format!("Automated extraction paused: {}.", reason.replace('_', " ")),
+        );
+        self.changed();
     }
 
     pub fn state_revision(&self) -> u64 {
@@ -828,7 +1256,7 @@ impl GameState {
                 .map(|deposit| DepositSnapshot {
                     resource: deposit.resource,
                     remaining: deposit.remaining,
-                    risk: risk_for(region.atmospheric_severity),
+                    risk: self.effective_risk(region.atmospheric_severity),
                 }),
             relay: self.relay_region_id.as_deref() == Some(region.id.as_str()),
         }
@@ -850,10 +1278,45 @@ impl GameState {
     fn objective_snapshot(&self) -> ObjectiveSnapshot {
         if self.alpha_complete {
             return ObjectiveSnapshot {
-                title: "ALPHA REACH ESTABLISHED".into(),
-                guidance: "The first network extension is proven. Continue surveying freely."
-                    .into(),
+                title: "ALPHA OPERATIONS STABLE".into(),
+                guidance: "A specialization and an earned automated operation are proven. Continue developing the network.".into(),
                 complete: true,
+            };
+        }
+        if let Some(research) = &self.active_research {
+            return ObjectiveSnapshot {
+                title: "RESEARCH IN PROGRESS".into(),
+                guidance: format!(
+                    "{} is resolving. Field operations may continue.",
+                    research_title(research.project)
+                ),
+                complete: false,
+            };
+        }
+        if self.reach_milestone_complete && self.completed_research.is_empty() {
+            return ObjectiveSnapshot {
+                title: "CHOOSE A RESEARCH DIRECTION".into(),
+                guidance: "Open Research and commit analysis to reach, resilience, or throughput."
+                    .into(),
+                complete: false,
+            };
+        }
+        if self.reach_milestone_complete && self.operational_profile == OperationalProfile::Balanced
+        {
+            return ObjectiveSnapshot {
+                title: "ACTIVATE A SPECIALIZATION".into(),
+                guidance: "Open Research and activate the profile unlocked by completed work."
+                    .into(),
+                complete: false,
+            };
+        }
+        if self.reach_milestone_complete {
+            return ObjectiveSnapshot {
+                title: "PROVE EARNED AUTOMATION".into(),
+                guidance:
+                    "Queue an eligible survey or activate a previously proven extraction route."
+                        .into(),
+                complete: false,
             };
         }
         if self.relay_region_id.is_some() {
@@ -907,38 +1370,159 @@ impl GameState {
         }
     }
 
-    fn initialize_alpha_fields(&mut self) {
-        for region in &mut self.world.regions {
-            if region.id == self.world.core_region_id || region.deposit.is_some() {
-                continue;
-            }
-            let index = usize::from(region.position.latitude_band) * usize::from(LONGITUDE_SECTORS)
-                + usize::from(region.position.longitude_sector);
-            region.deposit = Some(DepositState {
-                resource: match index % 3 {
-                    0 => ResourceKind::Structural,
-                    1 => ResourceKind::Conductive,
-                    _ => ResourceKind::Silicate,
-                },
-                remaining: 12,
-            });
-        }
-        if self.random_state == 0 {
-            self.random_state = self.world.seed ^ 0xA17A_5EED_D15C_0FFE;
-        }
-        if self.active_extraction.is_none() && self.extractor_rebuild_remaining_ms == 0 {
-            self.extractor_available = true;
-        }
-    }
-
     fn region_within_range(&self, position: &RegionPosition) -> bool {
-        if hop_distance(position) <= SCOUT_RANGE_HOPS {
+        if hop_distance(position) <= self.scout_range_hops() {
             return true;
         }
         self.relay_region_id
             .as_ref()
             .and_then(|id| self.world.regions.iter().find(|region| &region.id == id))
-            .is_some_and(|relay| graph_distance(position, &relay.position) <= RELAY_RANGE_HOPS)
+            .is_some_and(|relay| {
+                graph_distance(position, &relay.position) <= self.relay_range_hops()
+            })
+    }
+
+    fn research_snapshot(&self) -> ResearchSnapshot {
+        let unlocked = self.reach_milestone_complete;
+        ResearchSnapshot {
+            unlocked,
+            analysis_units: self.analysis_units,
+            active: self
+                .active_research
+                .as_ref()
+                .map(|research| ActiveResearchSnapshot {
+                    project: research.project,
+                    remaining_ms: research.remaining_ms,
+                    phase_total_ms: research.phase_total_ms,
+                }),
+            options: research_projects()
+                .into_iter()
+                .map(|project| ResearchOptionSnapshot {
+                    project,
+                    title: research_title(project).into(),
+                    summary: research_summary(project).into(),
+                    analysis_cost: RESEARCH_ANALYSIS_COST,
+                    duration_ms: RESEARCH_DURATION_MS,
+                    available: unlocked
+                        && self.active_research.is_none()
+                        && self.analysis_units >= RESEARCH_ANALYSIS_COST
+                        && !self.completed_research.contains(&project),
+                    completed: self.completed_research.contains(&project),
+                })
+                .collect(),
+            profiles: operational_profiles()
+                .into_iter()
+                .map(|profile| OperationalProfileSnapshot {
+                    profile,
+                    title: profile_title(profile).into(),
+                    summary: profile_summary(profile).into(),
+                    unlocked: self.profile_unlocked(profile),
+                    active: self.operational_profile == profile,
+                })
+                .collect(),
+        }
+    }
+
+    fn automation_unlocked(&self) -> bool {
+        !self.completed_research.is_empty()
+    }
+
+    fn profile_unlocked(&self, profile: OperationalProfile) -> bool {
+        match profile {
+            OperationalProfile::Balanced => true,
+            OperationalProfile::Reach => self
+                .completed_research
+                .contains(&ResearchProject::ExtendedTelemetry),
+            OperationalProfile::Resilience => self
+                .completed_research
+                .contains(&ResearchProject::FieldHardening),
+            OperationalProfile::Throughput => self
+                .completed_research
+                .contains(&ResearchProject::ParallelProcessing),
+        }
+    }
+
+    fn scout_range_hops(&self) -> u8 {
+        SCOUT_RANGE_HOPS + u8::from(self.operational_profile == OperationalProfile::Reach)
+    }
+
+    fn relay_range_hops(&self) -> u8 {
+        RELAY_RANGE_HOPS + u8::from(self.operational_profile == OperationalProfile::Reach)
+    }
+
+    fn survey_duration_ms(&self) -> u64 {
+        if self.operational_profile == OperationalProfile::Reach {
+            20_000
+        } else {
+            SURVEY_MS
+        }
+    }
+
+    fn effective_risk(&self, severity: AtmosphericSeverity) -> RiskLevel {
+        let risk = risk_for(severity);
+        if self.operational_profile != OperationalProfile::Resilience {
+            return risk;
+        }
+        match risk {
+            RiskLevel::High => RiskLevel::Moderate,
+            RiskLevel::Moderate | RiskLevel::Low => RiskLevel::Low,
+        }
+    }
+
+    fn extraction_capacity(&self) -> u32 {
+        EXTRACTION_CAPACITY
+            + if self.operational_profile == OperationalProfile::Throughput {
+                2
+            } else {
+                0
+            }
+    }
+
+    fn refining_ms_per_unit(&self) -> u64 {
+        if self.operational_profile == OperationalProfile::Throughput {
+            3_000
+        } else {
+            REFINING_MS_PER_UNIT
+        }
+    }
+
+    fn refresh_alpha_completion(&mut self) -> bool {
+        if self.alpha_complete
+            || self.operational_profile == OperationalProfile::Balanced
+            || !(self.automated_survey_completed || self.automated_extraction_completed)
+        {
+            return false;
+        }
+        self.alpha_complete = true;
+        self.push_activity(
+            ActivityKind::Milestone,
+            None,
+            "First-session operations milestone completed.".into(),
+        );
+        self.changed();
+        true
+    }
+
+    fn region_designation(&self, region_id: &str) -> String {
+        self.world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+            .map_or_else(|| region_id.to_owned(), |region| region.designation.clone())
+    }
+
+    fn push_activity(&mut self, kind: ActivityKind, region_id: Option<String>, summary: String) {
+        let record = ActivityRecord {
+            activity_id: self.next_activity_id,
+            kind,
+            region_id,
+            summary,
+        };
+        self.next_activity_id = self.next_activity_id.saturating_add(1);
+        if self.activity_log.len() == ACTIVITY_CAPACITY {
+            self.activity_log.remove(0);
+        }
+        self.activity_log.push(record);
     }
 
     fn next_random_percent(&mut self) -> u32 {
@@ -996,7 +1580,7 @@ impl GameState {
             return Err(GameError::Invariant("unsupported world generation version"));
         }
         if self.world.regions.len() != REGION_COUNT {
-            return Err(GameError::Invariant("planet must contain 24 regions"));
+            return Err(GameError::Invariant("planet must contain 200 regions"));
         }
         for latitude_band in 0..LATITUDE_BANDS {
             for longitude_sector in 0..LONGITUDE_SECTORS {
@@ -1096,6 +1680,113 @@ impl GameState {
         if self.recent_reports.len() > REPORT_CAPACITY {
             return Err(GameError::Invariant("mission report capacity exceeded"));
         }
+        if self.completed_research.len() > research_projects().len()
+            || (!self.completed_research.is_empty() && !self.reach_milestone_complete)
+            || self.completed_research.iter().any(|project| {
+                self.completed_research
+                    .iter()
+                    .filter(|candidate| *candidate == project)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(GameError::Invariant("completed research is inconsistent"));
+        }
+        if self.active_research.as_ref().is_some_and(|research| {
+            !self.reach_milestone_complete
+                || research.remaining_ms == 0
+                || research.phase_total_ms != RESEARCH_DURATION_MS
+                || self.completed_research.contains(&research.project)
+        }) {
+            return Err(GameError::Invariant("active research is inconsistent"));
+        }
+        if !self.profile_unlocked(self.operational_profile) {
+            return Err(GameError::Invariant("active profile is locked"));
+        }
+        if self.survey_queue.len() > SURVEY_QUEUE_CAPACITY
+            || self.survey_queue.iter().any(|region_id| {
+                !self
+                    .world
+                    .regions
+                    .iter()
+                    .any(|region| &region.id == region_id)
+            })
+            || self.survey_queue.iter().any(|region_id| {
+                self.survey_queue
+                    .iter()
+                    .filter(|candidate| *candidate == region_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(GameError::Invariant("survey queue is inconsistent"));
+        }
+        if self.proven_extraction_region_ids.iter().any(|region_id| {
+            self.proven_extraction_region_ids
+                .iter()
+                .filter(|candidate| *candidate == region_id)
+                .count()
+                != 1
+                || !self.world.regions.iter().any(|region| {
+                    &region.id == region_id
+                        && region.knowledge >= RegionKnowledge::Surveyed
+                        && region.deposit.is_some()
+                })
+        }) {
+            return Err(GameError::Invariant(
+                "proven extraction routes are inconsistent",
+            ));
+        }
+        if self
+            .extraction_route_region_id
+            .as_ref()
+            .is_some_and(|region_id| {
+                !self
+                    .proven_extraction_region_ids
+                    .iter()
+                    .any(|proven| proven == region_id)
+            })
+            || (self.extraction_route_region_id.is_none()
+                && self.extraction_route_paused_reason.is_some())
+        {
+            return Err(GameError::Invariant(
+                "active extraction route is inconsistent",
+            ));
+        }
+        if self
+            .active_mission
+            .as_ref()
+            .is_some_and(|mission| mission.auto_return && !self.automation_unlocked())
+            || self.active_extraction.as_ref().is_some_and(|mission| {
+                mission.automated
+                    && (self.extraction_route_region_id.as_deref()
+                        != Some(mission.target_region_id.as_str())
+                        || !self.automation_unlocked())
+            })
+        {
+            return Err(GameError::Invariant("automated mission is inconsistent"));
+        }
+        if self.reach_milestone_complete && self.relay_region_id.is_none()
+            || self.alpha_complete
+                && (!self.reach_milestone_complete
+                    || self.operational_profile == OperationalProfile::Balanced
+                    || !(self.automated_survey_completed || self.automated_extraction_completed))
+        {
+            return Err(GameError::Invariant("alpha progression is inconsistent"));
+        }
+        if self.activity_log.len() > ACTIVITY_CAPACITY
+            || self
+                .activity_log
+                .windows(2)
+                .any(|records| records[0].activity_id >= records[1].activity_id)
+            || self
+                .activity_log
+                .last()
+                .is_some_and(|record| self.next_activity_id <= record.activity_id)
+            || self.acknowledged_activity_id >= self.next_activity_id
+        {
+            return Err(GameError::Invariant("activity log is inconsistent"));
+        }
         Ok(())
     }
 }
@@ -1117,9 +1808,28 @@ impl WorldState {
                 };
                 let core = latitude_band == CORE_LATITUDE_BAND
                     && longitude_sector == CORE_LONGITUDE_SECTOR;
+                let deposit_roll = random.next_u32();
+                let resource = match (latitude_band, longitude_sector) {
+                    (CORE_LATITUDE_BAND, 1) => ResourceKind::Structural,
+                    (CORE_LATITUDE_BAND, sector)
+                        if sector == LONGITUDE_SECTORS.saturating_sub(1) =>
+                    {
+                        ResourceKind::Conductive
+                    }
+                    (band, CORE_LONGITUDE_SECTOR)
+                        if band == CORE_LATITUDE_BAND.saturating_sub(1) =>
+                    {
+                        ResourceKind::Silicate
+                    }
+                    _ => match deposit_roll % 3 {
+                        0 => ResourceKind::Structural,
+                        1 => ResourceKind::Conductive,
+                        _ => ResourceKind::Silicate,
+                    },
+                };
                 regions.push(RegionState {
-                    id: format!("region_{:02}", index + 1),
-                    designation: format!("R-{:02}", index + 1),
+                    id: format!("region_{:03}", index + 1),
+                    designation: format!("R-{:03}", index + 1),
                     position: RegionPosition {
                         latitude_band,
                         longitude_sector,
@@ -1133,12 +1843,8 @@ impl WorldState {
                         RegionKnowledge::Unknown
                     },
                     deposit: (!core).then_some(DepositState {
-                        resource: match index % 3 {
-                            0 => ResourceKind::Structural,
-                            1 => ResourceKind::Conductive,
-                            _ => ResourceKind::Silicate,
-                        },
-                        remaining: 12,
+                        resource,
+                        remaining: 8 + ((deposit_roll / 3) % 5) * 4,
                     }),
                 });
             }
@@ -1186,6 +1892,73 @@ fn risk_percent(risk: RiskLevel) -> u32 {
         RiskLevel::Low => 5,
         RiskLevel::Moderate => 15,
         RiskLevel::High => 30,
+    }
+}
+
+fn research_projects() -> [ResearchProject; 3] {
+    [
+        ResearchProject::ExtendedTelemetry,
+        ResearchProject::FieldHardening,
+        ResearchProject::ParallelProcessing,
+    ]
+}
+
+fn research_title(project: ResearchProject) -> &'static str {
+    match project {
+        ResearchProject::ExtendedTelemetry => "Extended Telemetry",
+        ResearchProject::FieldHardening => "Field Hardening",
+        ResearchProject::ParallelProcessing => "Parallel Processing",
+    }
+}
+
+fn research_summary(project: ResearchProject) -> &'static str {
+    match project {
+        ResearchProject::ExtendedTelemetry => {
+            "Unlocks Reach profile: +1 operational hop and faster surveys."
+        }
+        ResearchProject::FieldHardening => {
+            "Unlocks Resilience profile: reduces published extraction risk by one tier."
+        }
+        ResearchProject::ParallelProcessing => {
+            "Unlocks Throughput profile: +2 cargo and faster refining."
+        }
+    }
+}
+
+fn operational_profiles() -> [OperationalProfile; 4] {
+    [
+        OperationalProfile::Balanced,
+        OperationalProfile::Reach,
+        OperationalProfile::Resilience,
+        OperationalProfile::Throughput,
+    ]
+}
+
+fn profile_title(profile: OperationalProfile) -> &'static str {
+    match profile {
+        OperationalProfile::Balanced => "Balanced",
+        OperationalProfile::Reach => "Reach",
+        OperationalProfile::Resilience => "Resilience",
+        OperationalProfile::Throughput => "Throughput",
+    }
+}
+
+fn profile_summary(profile: OperationalProfile) -> &'static str {
+    match profile {
+        OperationalProfile::Balanced => "Baseline survey, extraction, and refining behavior.",
+        OperationalProfile::Reach => "+1 operational hop; focused surveys resolve in 20 seconds.",
+        OperationalProfile::Resilience => "Published extraction risk is reduced by one tier.",
+        OperationalProfile::Throughput => {
+            "+2 extractor capacity; refining takes 3 seconds per unit."
+        }
+    }
+}
+
+fn resource_label(resource: ResourceKind) -> &'static str {
+    match resource {
+        ResourceKind::Structural => "structural",
+        ResourceKind::Conductive => "conductive",
+        ResourceKind::Silicate => "silicate",
     }
 }
 
@@ -1253,11 +2026,16 @@ fn generate_terrain(latitude_band: u8, roll: u32) -> TerrainClass {
 }
 
 fn generate_temperature(latitude_band: u8, roll: u32) -> TemperatureBand {
-    match latitude_band {
-        0 | 3 if roll < 70 => TemperatureBand::Frigid,
-        0 | 3 => TemperatureBand::Cold,
-        1 | 2 if roll < 15 => TemperatureBand::Cold,
-        1 | 2 if roll > 80 => TemperatureBand::Hot,
+    let equator_low = LATITUDE_BANDS / 2 - 1;
+    let equator_high = LATITUDE_BANDS / 2;
+    let distance_from_equator = latitude_band
+        .abs_diff(equator_low)
+        .min(latitude_band.abs_diff(equator_high));
+    match distance_from_equator {
+        4.. if roll < 70 => TemperatureBand::Frigid,
+        4.. => TemperatureBand::Cold,
+        3 if roll < 35 => TemperatureBand::Cold,
+        0..=1 if roll > 80 => TemperatureBand::Hot,
         _ => TemperatureBand::Temperate,
     }
 }
@@ -1305,7 +2083,9 @@ mod tests {
         awaken(&mut second);
         assert_eq!(first.world, second.world);
         let snapshot = first.planet_snapshot().unwrap();
-        assert_eq!(snapshot.regions.len(), 24);
+        assert_eq!(snapshot.latitude_bands, 10);
+        assert_eq!(snapshot.longitude_sectors, 20);
+        assert_eq!(snapshot.regions.len(), 200);
         assert_eq!(
             snapshot
                 .regions
@@ -1326,6 +2106,25 @@ mod tests {
         assert!(json.get("terrain").is_none());
         assert!(json.get("temperature").is_none());
         assert!(json.get("deposit").is_none());
+    }
+
+    #[test]
+    fn initial_reach_always_contains_materials_for_the_first_relay() {
+        for seed in 0..128 {
+            let state = GameState::with_seed(seed);
+            let mut available = ResourceStock::default();
+            for region in state
+                .world
+                .regions
+                .iter()
+                .filter(|region| !region.id.eq(&state.world.core_region_id))
+                .filter(|region| hop_distance(&region.position) <= SCOUT_RANGE_HOPS)
+            {
+                let deposit = region.deposit.as_ref().unwrap();
+                add_stock(&mut available, deposit.resource, deposit.remaining);
+            }
+            assert!(stock_contains(available, RELAY_COST), "seed {seed}");
+        }
     }
 
     #[test]
@@ -1420,7 +2219,7 @@ mod tests {
     fn two_hop_timing_and_rule_rejections_are_explicit() {
         let mut state = GameState::with_seed(11);
         assert_eq!(
-            state.deploy_scout("region_01").code.as_deref(),
+            state.deploy_scout("region_001").code.as_deref(),
             Some("onboarding_required")
         );
         awaken(&mut state);
@@ -1494,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn persists_schema_four_migrates_three_and_resets_older_saves() {
+    fn persists_schema_five_and_resets_previous_alpha_saves() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("game_state.json");
         let mut state = GameState::with_seed(13);
@@ -1505,50 +2304,23 @@ mod tests {
             LoadDisposition::Current
         );
 
-        let mut previous: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        previous["schema_version"] = Value::from(3);
-        let state = previous["state"].as_object_mut().unwrap();
-        for key in [
-            "active_extraction",
-            "extractor_available",
-            "extractor_rebuild_remaining_ms",
-            "raw_inventory",
-            "refined_inventory",
-            "refining_remaining_ms",
-            "active_construction",
-            "relay_region_id",
-            "alpha_complete",
-            "random_state",
-        ] {
-            state.remove(key);
+        for version in RESETTABLE_SCHEMA_VERSIONS {
+            let mut previous: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            previous["schema_version"] = Value::from(version);
+            fs::write(&path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+            let reset = GameState::load(&path).unwrap();
+            assert_eq!(reset.disposition, LoadDisposition::PreviousReset);
+            assert!(!reset.state.onboarding().complete);
+            let replacement: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(replacement["schema_version"], SAVE_SCHEMA_VERSION);
+            assert_eq!(
+                replacement["state"]["world"]["regions"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                REGION_COUNT
+            );
         }
-        for region in state["world"]["regions"].as_array_mut().unwrap() {
-            region.as_object_mut().unwrap().remove("deposit");
-        }
-        fs::write(&path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
-        let migrated = GameState::load(&path).unwrap();
-        assert_eq!(migrated.disposition, LoadDisposition::PreviousMigrated);
-        assert!(migrated
-            .state
-            .planet_snapshot()
-            .unwrap()
-            .regions
-            .iter()
-            .filter(|region| !region.core)
-            .all(|region| region.deposit.is_none()));
-        let migrated_file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(migrated_file["schema_version"], 4);
-
-        fs::write(
-            &path,
-            r#"{"schema_version":2,"saved_at":"2026-01-01T00:00:00Z","state":{"onboarding_complete":true,"state_revision":1}}"#,
-        )
-        .unwrap();
-        let reset = GameState::load(&path).unwrap();
-        assert_eq!(reset.disposition, LoadDisposition::PreviousReset);
-        assert!(!reset.state.onboarding().complete);
-        let replacement: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(replacement["schema_version"], 4);
     }
 
     #[test]
@@ -1640,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_extends_reach_and_distant_survey_completes_alpha() {
+    fn relay_extends_reach_and_distant_survey_unlocks_research() {
         let mut state = GameState::with_seed(22);
         awaken(&mut state);
         let relay_site = state
@@ -1668,6 +2440,301 @@ mod tests {
         let events = state
             .advance(u64::from(distant.hop_distance_from_core) * TRAVEL_MS_PER_HOP + SURVEY_MS);
         assert!(events.contains(&GameAdvanceEvent::AlphaMilestoneCompleted));
+        let snapshot = state.planet_snapshot().unwrap();
+        assert!(snapshot.research.unlocked);
+        assert!(!snapshot.objective.complete);
+        assert_eq!(snapshot.objective.title, "CHOOSE A RESEARCH DIRECTION");
+    }
+
+    #[test]
+    fn research_unlocks_a_distinct_profile_and_persists() {
+        let mut state = GameState::with_seed(33);
+        awaken(&mut state);
+        state.reach_milestone_complete = true;
+        state.relay_region_id = Some(
+            state
+                .world
+                .regions
+                .iter()
+                .find(|region| hop_distance(&region.position) == 2)
+                .unwrap()
+                .id
+                .clone(),
+        );
+        state.analysis_units = RESEARCH_ANALYSIS_COST;
+
+        assert!(state.start_research(ResearchProject::ExtendedTelemetry).ok);
+        assert_eq!(state.analysis_units, 0);
+        assert_eq!(
+            state.advance(RESEARCH_DURATION_MS),
+            vec![GameAdvanceEvent::ResearchCompleted]
+        );
+        assert!(state.activate_profile(OperationalProfile::Reach).ok);
+
+        let snapshot = state.planet_snapshot().unwrap();
+        assert!(snapshot.survey_queue.unlocked);
+        assert!(snapshot
+            .research
+            .profiles
+            .iter()
+            .any(|profile| profile.profile == OperationalProfile::Reach && profile.active));
+        assert!(snapshot
+            .regions
+            .iter()
+            .any(|region| { region.hop_distance_from_core == 3 && region.within_scout_range }));
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+        let restored = GameState::load(&path).unwrap().state;
+        assert!(restored
+            .completed_research
+            .contains(&ResearchProject::ExtendedTelemetry));
+        assert_eq!(restored.operational_profile, OperationalProfile::Reach);
+    }
+
+    #[test]
+    fn earned_survey_automation_returns_and_completes_the_slice() {
+        let mut state = GameState::with_seed(35);
+        awaken(&mut state);
+        state.reach_milestone_complete = true;
+        state
+            .completed_research
+            .push(ResearchProject::ExtendedTelemetry);
+        assert!(state.activate_profile(OperationalProfile::Reach).ok);
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| {
+                region.knowledge == RegionKnowledge::Unknown && region.hop_distance_from_core == 1
+            })
+            .unwrap();
+
+        assert!(state.queue_survey(&target.id).ok);
+        let events = state
+            .advance(u64::from(target.hop_distance_from_core) * TRAVEL_MS_PER_HOP * 2 + 20_000);
+        assert!(events.contains(&GameAdvanceEvent::SurveyCompleted));
+        assert!(events.contains(&GameAdvanceEvent::ScoutReturned));
+        assert!(events.contains(&GameAdvanceEvent::AlphaSliceCompleted));
+        let snapshot = state.planet_snapshot().unwrap();
+        assert_eq!(snapshot.scout.state, ScoutState::Ready);
+        assert!(snapshot.objective.complete);
+    }
+
+    #[test]
+    fn extraction_automation_requires_a_proven_route() {
+        let mut state = GameState::with_seed(37);
+        awaken(&mut state);
+        state.reach_milestone_complete = true;
+        state
+            .completed_research
+            .push(ResearchProject::FieldHardening);
+        assert!(state.activate_profile(OperationalProfile::Resilience).ok);
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 1)
+            .unwrap();
+
+        assert_eq!(
+            state.set_extraction_route(&target.id).code.as_deref(),
+            Some("route_not_proven")
+        );
+        assert!(state.deploy_scout(&target.id).ok);
+        state.advance(TRAVEL_MS_PER_HOP + SURVEY_MS);
+        assert!(state.recall_scout().ok);
+        state.advance(TRAVEL_MS_PER_HOP);
+        assert!(state.deploy_extractor(&target.id).ok);
+        state.active_extraction.as_mut().unwrap().will_fail = false;
+        state.advance(TRAVEL_MS_PER_HOP + EXTRACTION_MS + TRAVEL_MS_PER_HOP);
+        assert!(state.set_extraction_route(&target.id).ok);
+        state.advance(0);
+        let mission = state.active_extraction.as_mut().unwrap();
+        assert!(mission.automated);
+        mission.will_fail = false;
+        let events = state.advance(TRAVEL_MS_PER_HOP + EXTRACTION_MS + TRAVEL_MS_PER_HOP);
+        assert!(events.contains(&GameAdvanceEvent::ExtractionCompleted));
+        assert!(events.contains(&GameAdvanceEvent::AlphaSliceCompleted));
+    }
+
+    #[test]
+    fn a_fresh_world_can_complete_the_alpha_arc_without_low_value_grinding() {
+        let mut state = GameState::with_seed(51);
+        awaken(&mut state);
+        let mut elapsed_ms = 0_u64;
+        let mut sources = [None, None, None];
+        let reachable = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .filter(|region| region.within_scout_range && !region.core)
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+
+        for region_id in reachable {
+            let hops = state
+                .planet_snapshot()
+                .unwrap()
+                .regions
+                .iter()
+                .find(|region| region.id == region_id)
+                .unwrap()
+                .hop_distance_from_core;
+            assert!(state.deploy_scout(&region_id).ok);
+            state.advance(u64::from(hops) * TRAVEL_MS_PER_HOP);
+            state.advance(SURVEY_MS);
+            assert!(state.recall_scout().ok);
+            state.advance(u64::from(hops) * TRAVEL_MS_PER_HOP);
+            elapsed_ms += u64::from(hops) * TRAVEL_MS_PER_HOP * 2 + SURVEY_MS;
+            let region = state
+                .planet_snapshot()
+                .unwrap()
+                .regions
+                .into_iter()
+                .find(|region| region.id == region_id)
+                .unwrap();
+            if let Some(deposit) = region.deposit {
+                let index = match deposit.resource {
+                    ResourceKind::Structural => 0,
+                    ResourceKind::Conductive => 1,
+                    ResourceKind::Silicate => 2,
+                };
+                sources[index].get_or_insert(region.id);
+            }
+            if sources.iter().all(Option::is_some) && state.analysis_units >= 3 {
+                break;
+            }
+        }
+        assert!(sources.iter().all(Option::is_some));
+
+        for (index, required) in [8_u32, 6, 6].into_iter().enumerate() {
+            let region_id = sources[index].as_ref().unwrap();
+            let mut attempts = 0;
+            while match index {
+                0 => state.refined_inventory.structural,
+                1 => state.refined_inventory.conductive,
+                _ => state.refined_inventory.silicate,
+            } < required
+            {
+                attempts += 1;
+                assert!(attempts < 12, "bounded risk should not stall the alpha arc");
+                let hops = state
+                    .planet_snapshot()
+                    .unwrap()
+                    .regions
+                    .iter()
+                    .find(|region| &region.id == region_id)
+                    .unwrap()
+                    .hop_distance_from_core;
+                assert!(state.deploy_extractor(region_id).ok);
+                state.advance(u64::from(hops) * TRAVEL_MS_PER_HOP);
+                let events = state.advance(EXTRACTION_MS);
+                elapsed_ms += u64::from(hops) * TRAVEL_MS_PER_HOP + EXTRACTION_MS;
+                if events.contains(&GameAdvanceEvent::ExtractorLost) {
+                    state.advance(EXTRACTOR_REBUILD_MS);
+                    elapsed_ms += EXTRACTOR_REBUILD_MS;
+                    continue;
+                }
+                state.advance(u64::from(hops) * TRAVEL_MS_PER_HOP);
+                elapsed_ms += u64::from(hops) * TRAVEL_MS_PER_HOP;
+                state.advance(REFINING_MS_PER_UNIT * u64::from(EXTRACTION_CAPACITY));
+                elapsed_ms += REFINING_MS_PER_UNIT * u64::from(EXTRACTION_CAPACITY);
+            }
+        }
+        assert!(stock_contains(state.refined_inventory, RELAY_COST));
+
+        let relay_site = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| {
+                region.hop_distance_from_core == 2 && region.knowledge >= RegionKnowledge::Surveyed
+            })
+            .unwrap();
+        assert!(state.construct_relay(&relay_site.id).ok);
+        state.advance(RELAY_CONSTRUCTION_MS);
+        elapsed_ms += RELAY_CONSTRUCTION_MS;
+
+        let distant = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| {
+                region.hop_distance_from_core > SCOUT_RANGE_HOPS
+                    && region.within_scout_range
+                    && region.knowledge < RegionKnowledge::Surveyed
+            })
+            .unwrap();
+        let travel_ms = u64::from(distant.hop_distance_from_core) * TRAVEL_MS_PER_HOP;
+        assert!(state.deploy_scout(&distant.id).ok);
+        state.advance(travel_ms);
+        let events = state.advance(SURVEY_MS);
+        assert!(events.contains(&GameAdvanceEvent::AlphaMilestoneCompleted));
+        assert!(state.recall_scout().ok);
+        state.advance(travel_ms);
+        elapsed_ms += travel_ms * 2 + SURVEY_MS;
+
+        assert!(state.start_research(ResearchProject::ExtendedTelemetry).ok);
+        state.advance(RESEARCH_DURATION_MS);
+        elapsed_ms += RESEARCH_DURATION_MS;
+        assert!(state.activate_profile(OperationalProfile::Reach).ok);
+        let automated_target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| {
+                region.within_scout_range
+                    && !region.core
+                    && region.knowledge < RegionKnowledge::Surveyed
+            })
+            .unwrap();
+        assert!(state.queue_survey(&automated_target.id).ok);
+        let travel_ms = u64::from(automated_target.hop_distance_from_core) * TRAVEL_MS_PER_HOP;
+        state.advance(travel_ms);
+        state.advance(20_000);
+        let events = state.advance(travel_ms);
+        elapsed_ms += travel_ms * 2 + 20_000;
+
+        assert!(events.contains(&GameAdvanceEvent::AlphaSliceCompleted));
         assert!(state.planet_snapshot().unwrap().objective.complete);
+        assert!(elapsed_ms <= 45 * 60 * 1_000, "elapsed {elapsed_ms}ms");
+    }
+
+    #[test]
+    fn reviewed_activity_is_not_returned_again() {
+        let mut state = GameState::with_seed(39);
+        awaken(&mut state);
+        state.push_activity(
+            ActivityKind::Survey,
+            Some("region_082".into()),
+            "Survey completed at R-082.".into(),
+        );
+        let snapshot = state.planet_snapshot().unwrap();
+        let latest = snapshot.unreviewed_activity.last().unwrap().activity_id;
+        assert!(state.acknowledge_activity(latest).ok);
+        assert!(state
+            .planet_snapshot()
+            .unwrap()
+            .unreviewed_activity
+            .is_empty());
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+        assert!(GameState::load(&path)
+            .unwrap()
+            .state
+            .planet_snapshot()
+            .unwrap()
+            .unreviewed_activity
+            .is_empty());
     }
 }

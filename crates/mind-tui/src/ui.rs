@@ -61,8 +61,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
         match app.workspace {
             Workspace::Planet => render_planet(frame, area, app, options, theme, now),
             Workspace::Overview => render_overview(frame, area, app, options, theme, now),
+            Workspace::Research => render_research(frame, area, app, options, theme, now),
             Workspace::System => render_dashboard(frame, area, app, options, theme, now),
         }
+    }
+    if app.show_return_summary {
+        render_return_summary(frame, area, app, options, theme);
     }
     if app.show_help {
         render_help(frame, area, options, theme);
@@ -112,7 +116,7 @@ fn render_planet(
         return;
     };
 
-    if area.width >= 72 {
+    if area.width >= 100 {
         let columns = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(rows[1]);
         render_globe(frame, columns[0], app, planet, options, theme);
@@ -242,7 +246,7 @@ fn render_overview(
         );
         return;
     };
-    let columns = if area.width >= 72 {
+    let columns = if area.width >= 100 {
         Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[1])
     } else {
         Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[1])
@@ -250,9 +254,28 @@ fn render_overview(
 
     let mut activity = Vec::new();
     let mut row_index = 0;
+    let mut has_active_operation = false;
     let mut selected_line = 0;
     activity.push(section_line("ACTIVE OPERATIONS", theme));
+    if let Some(research) = &planet.research.active {
+        has_active_operation = true;
+        let title = planet
+            .research
+            .options
+            .iter()
+            .find(|option| option.project == research.project)
+            .map_or("Research", |option| option.title.as_str());
+        activity.push(Line::styled(
+            format!(
+                "  {title} // {}% // {}s remaining",
+                operation_progress(research.remaining_ms, research.phase_total_ms),
+                research.remaining_ms.div_ceil(1_000)
+            ),
+            Style::default().fg(theme.cyan_bright).bold(),
+        ));
+    }
     if let Some(mission) = &planet.active_mission {
+        has_active_operation = true;
         let target_designation = region_designation(planet, &mission.target_region_id);
         let progress = if mission.phase == ScoutState::Holding || mission.phase_total_ms == 0 {
             100
@@ -277,14 +300,16 @@ fn render_overview(
         ]));
         activity.push(Line::styled(
             format!(
-                "   {target_designation} // {progress}% // {}",
-                scout_remaining_text(mission)
+                "   {target_designation} // {progress}% // {}{}",
+                scout_remaining_text(mission),
+                if mission.automated { " // AUTO" } else { "" }
             ),
             Style::default().fg(theme.muted),
         ));
         row_index += 1;
     }
     if let Some(mission) = &planet.active_extraction {
+        has_active_operation = true;
         if app.overview_selection == row_index {
             selected_line = activity.len();
         }
@@ -305,10 +330,11 @@ fn render_overview(
         ]));
         activity.push(Line::styled(
             format!(
-                "   {} // {}% // {}s remaining",
+                "   {} // {}% // {}s remaining{}",
                 region_designation(planet, &mission.target_region_id),
                 operation_progress(mission.remaining_ms, mission.phase_total_ms),
-                mission.remaining_ms.div_ceil(1_000)
+                mission.remaining_ms.div_ceil(1_000),
+                if mission.automated { " // AUTO" } else { "" }
             ),
             Style::default().fg(theme.muted),
         ));
@@ -323,6 +349,7 @@ fn render_overview(
         row_index += 1;
     }
     if let Some(construction) = &planet.active_construction {
+        has_active_operation = true;
         if app.overview_selection == row_index {
             selected_line = activity.len();
         }
@@ -343,7 +370,7 @@ fn render_overview(
         ));
         row_index += 1;
     }
-    if row_index == 0 {
+    if !has_active_operation {
         activity.push(Line::styled(
             "No active field operations.",
             Style::default().fg(theme.muted),
@@ -442,6 +469,35 @@ fn render_overview(
             )
         },
     );
+    let active_profile = planet
+        .research
+        .profiles
+        .iter()
+        .find(|profile| profile.active)
+        .map_or("Balanced", |profile| profile.title.as_str());
+    let survey_automation = if planet.survey_queue.unlocked {
+        format!(
+            "{} / {} queued",
+            planet.survey_queue.queued_region_ids.len(),
+            planet.survey_queue.capacity
+        )
+    } else {
+        "locked // research required".into()
+    };
+    let extraction_automation = if !planet.extraction_route.unlocked {
+        "locked // research required".into()
+    } else if let Some(region_id) = &planet.extraction_route.region_id {
+        let status = planet
+            .extraction_route
+            .paused_reason
+            .as_ref()
+            .map_or("active".into(), |reason| {
+                format!("paused: {}", reason.replace('_', " "))
+            });
+        format!("{status} // {}", region_designation(planet, region_id))
+    } else {
+        "earned // no route active".into()
+    };
     let summary = Text::from(vec![
         section_line("MATERIAL STORES", theme),
         field_line(
@@ -490,6 +546,16 @@ fn render_overview(
         field_line("EXTRACTOR", extractor_status, theme),
         field_line("RELAY", relay_status, theme),
         Line::from(""),
+        section_line("RESEARCH & AUTOMATION", theme),
+        field_line("PROFILE", active_profile.to_owned(), theme),
+        field_line(
+            "ANALYSIS",
+            format!("{} available", planet.research.analysis_units),
+            theme,
+        ),
+        field_line("SURVEYS", survey_automation, theme),
+        field_line("EXTRACTION", extraction_automation, theme),
+        Line::from(""),
         section_line("FABRICATION", theme),
         Line::styled(construction_status, Style::default().fg(theme.text_strong)),
         Line::from(""),
@@ -501,6 +567,7 @@ fn render_overview(
     frame.render_widget(
         Paragraph::new(summary)
             .wrap(Wrap { trim: true })
+            .scroll((app.overview_status_scroll, 0))
             .style(theme.panel_style())
             .block(panel(
                 " PLANET STATUS ",
@@ -540,6 +607,10 @@ fn render_overview(
                 label: "select",
             },
             KeyHint {
+                key: "PGUP/DN",
+                label: "details",
+            },
+            KeyHint {
                 key: "TAB",
                 label: "workspace",
             },
@@ -554,6 +625,278 @@ fn render_overview(
         ]
     };
     render_workspace_footer(frame, rows[2], app, now, controls, theme);
+}
+
+fn render_research(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+    now: Instant,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(2),
+    ])
+    .split(area);
+    render_workspace_header(frame, rows[0], app, Workspace::Research, options, theme);
+    let Some(planet) = &app.planet else {
+        frame.render_widget(
+            Paragraph::new("Awaiting authoritative research state...")
+                .alignment(Alignment::Center)
+                .style(theme.panel_style())
+                .block(panel(" RESEARCH ", options, theme, PanelTone::Focused)),
+            rows[1],
+        );
+        return;
+    };
+    let research = &planet.research;
+    let mut lines = vec![field_line(
+        "ANALYSIS",
+        format!("{} units available", research.analysis_units),
+        theme,
+    )];
+    if !research.unlocked {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Research planning will become available after extended reach is proven.",
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        if let Some(active) = &research.active {
+            let title = research
+                .options
+                .iter()
+                .find(|option| option.project == active.project)
+                .map_or("Active research", |option| option.title.as_str());
+            lines.push(field_line(
+                "ACTIVE",
+                format!(
+                    "{title} // {}% // {}s",
+                    operation_progress(active.remaining_ms, active.phase_total_ms),
+                    active.remaining_ms.div_ceil(1_000)
+                ),
+                theme,
+            ));
+        }
+        lines.push(Line::raw(""));
+        lines.push(section_line("RESEARCH DIRECTIONS", theme));
+        for (index, option) in research.options.iter().enumerate() {
+            let marker = if index == app.research_selection {
+                ">"
+            } else {
+                " "
+            };
+            let state = if option.completed {
+                "COMPLETED"
+            } else if option.available {
+                "READY"
+            } else {
+                "LOCKED"
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{marker} {:<22}", option.title),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    format!(" {state:<9}"),
+                    Style::default().fg(if option.available {
+                        theme.amber
+                    } else {
+                        theme.muted
+                    }),
+                ),
+                Span::styled(
+                    format!(" {} analysis", option.analysis_cost),
+                    Style::default().fg(theme.faint),
+                ),
+            ]));
+            lines.push(Line::styled(
+                format!("    {}", option.summary),
+                Style::default().fg(theme.muted),
+            ));
+        }
+        lines.push(Line::raw(""));
+        lines.push(section_line("OPERATIONAL PROFILES", theme));
+        let offset = research.options.len();
+        let field_operation_active =
+            planet.active_mission.is_some() || planet.active_extraction.is_some();
+        for (index, profile) in research.profiles.iter().enumerate() {
+            let marker = if offset + index == app.research_selection {
+                ">"
+            } else {
+                " "
+            };
+            let state = if profile.active {
+                "ACTIVE"
+            } else if profile.unlocked && field_operation_active {
+                "WAIT"
+            } else if profile.unlocked {
+                "AVAILABLE"
+            } else {
+                "LOCKED"
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{marker} {:<16}", profile.title),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    format!(" {state:<9} "),
+                    Style::default().fg(if profile.active {
+                        theme.success
+                    } else if profile.unlocked {
+                        theme.cyan
+                    } else {
+                        theme.muted
+                    }),
+                ),
+                Span::styled(profile.summary.clone(), Style::default().fg(theme.muted)),
+            ]));
+        }
+        if field_operation_active {
+            lines.push(Line::styled(
+                "    Profiles can be changed when survey and extraction probes are not in flight.",
+                Style::default().fg(theme.muted),
+            ));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme.panel_style())
+            .block(panel(
+                " RESEARCH & SPECIALIZATION ",
+                options,
+                theme,
+                PanelTone::Focused,
+            )),
+        rows[1],
+    );
+    render_workspace_footer(
+        frame,
+        rows[2],
+        app,
+        now,
+        &[
+            KeyHint {
+                key: "UP/DOWN",
+                label: "select",
+            },
+            KeyHint {
+                key: "ENTER",
+                label: "commit / activate",
+            },
+            KeyHint {
+                key: "TAB",
+                label: "workspace",
+            },
+            KeyHint {
+                key: "Q",
+                label: "detach",
+            },
+        ],
+        theme,
+    );
+}
+
+fn render_return_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let Some(planet) = &app.planet else {
+        return;
+    };
+    let width = area.width.saturating_sub(8).clamp(36, 84);
+    let height = (planet.unreviewed_activity.len() as u16 + 13)
+        .min(area.height.saturating_sub(4))
+        .max(10);
+    let popup = centered_rect(width, height, area);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![
+        Line::styled(
+            "While the daemon remained active:",
+            Style::default().fg(theme.text).bold(),
+        ),
+        Line::raw(""),
+    ];
+    if planet.unreviewed_activity.is_empty() {
+        lines.push(Line::styled(
+            "No unreviewed operational changes.",
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        for record in planet
+            .unreviewed_activity
+            .iter()
+            .rev()
+            .take(height.saturating_sub(7) as usize)
+            .rev()
+        {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("#{:03} ", record.activity_id),
+                    Style::default().fg(theme.faint),
+                ),
+                Span::styled(record.summary.clone(), Style::default().fg(theme.text)),
+            ]));
+        }
+    }
+    let raw = planet.raw_inventory;
+    let refined = planet.refined_inventory;
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "STORES NOW  raw S {} / C {} / Si {} // refined S {} / C {} / Si {}",
+            raw.structural,
+            raw.conductive,
+            raw.silicate,
+            refined.structural,
+            refined.conductive,
+            refined.silicate
+        ),
+        Style::default().fg(theme.text),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "CURRENT  {} // {}",
+            planet.objective.title, planet.objective.guidance
+        ),
+        Style::default().fg(theme.amber),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "NEXT  Planet: inspect a reachable region and choose its local operation.",
+        Style::default().fg(theme.text),
+    ));
+    lines.push(Line::styled(
+        "      Overview: review active work, stores, and visible blockers.",
+        Style::default().fg(theme.text),
+    ));
+    if planet.research.unlocked {
+        lines.push(Line::styled(
+            "      Research: review analysis, active work, and available profiles.",
+            Style::default().fg(theme.text),
+        ));
+    }
+    lines.push(Line::styled(
+        "Enter / Esc  acknowledge and continue",
+        Style::default().fg(theme.cyan),
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(theme.raised_style())
+            .block(panel(" RETURN SUMMARY ", options, theme, PanelTone::Modal)),
+        popup,
+    );
 }
 
 fn overview_marker(selected: bool, options: RenderOptions, theme: Theme) -> Span<'static> {
@@ -628,6 +971,8 @@ fn render_workspace_header(
             Span::raw(" "),
             tab(Workspace::Overview, "OVERVIEW"),
             Span::raw(" "),
+            tab(Workspace::Research, "RESEARCH"),
+            Span::raw(" "),
             tab(Workspace::System, "SYSTEM"),
         ]),
         Line::from(vec![
@@ -674,6 +1019,11 @@ fn planet_store_header_line(
     };
     let raw = planet.raw_inventory;
     let refined = planet.refined_inventory;
+    let surveyed = planet
+        .regions
+        .iter()
+        .filter(|region| region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+        .count();
     let fabrication = planet.active_construction.as_ref().map_or_else(
         || {
             planet.relay_region_id.as_ref().map_or_else(
@@ -694,7 +1044,8 @@ fn planet_store_header_line(
             Span::styled(" STORES // ", Style::default().fg(theme.amber).bold()),
             Span::styled(
                 format!(
-                    "RAW {}/{}/{}  REF {}/{}/{}  FAB {fabrication}",
+                    "MAP {surveyed}/{}  RAW {}/{}/{}  REF {}/{}/{}  FAB {fabrication}",
+                    planet.regions.len(),
                     raw.structural,
                     raw.conductive,
                     raw.silicate,
@@ -707,6 +1058,11 @@ fn planet_store_header_line(
         ]);
     }
     Line::from(vec![
+        Span::styled(" MAP // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            format!("{surveyed} / {}", planet.regions.len()),
+            Style::default().fg(theme.text_strong),
+        ),
         Span::styled(" GATHERED // ", Style::default().fg(theme.amber).bold()),
         Span::styled(
             format!(
@@ -728,6 +1084,22 @@ fn planet_store_header_line(
             Style::default().fg(theme.amber).bold(),
         ),
         Span::styled(fabrication, Style::default().fg(theme.text_strong)),
+        Span::styled("   PROFILE // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            planet
+                .research
+                .profiles
+                .iter()
+                .find(|profile| profile.active)
+                .map_or("Balanced", |profile| profile.title.as_str())
+                .to_owned(),
+            Style::default().fg(theme.text_strong),
+        ),
+        Span::styled("   ANALYSIS // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            planet.research.analysis_units.to_string(),
+            Style::default().fg(theme.text_strong),
+        ),
     ])
 }
 
@@ -811,56 +1183,39 @@ fn render_region_inspector(
                 ]);
             }
 
-            let mut lines = vec![
-                designation_line(&region.designation, region.core, theme),
-                Line::from(""),
-                section_line("ACTIVE IN REGION", theme),
-            ];
-            lines.extend(local_operation_lines(planet, region, theme));
-            lines.extend([
-                Line::from(""),
-                section_line("REGION DATA", theme),
-                field_line("KNOWLEDGE", format!("{:?}", region.knowledge), theme),
-                field_line("TERRAIN", option_debug(region.terrain), theme),
-                field_line("TEMPERATURE", option_debug(region.temperature), theme),
-                field_line(
-                    "ATMOSPHERE",
-                    option_debug(region.atmospheric_severity),
-                    theme,
-                ),
-                field_line("CONFIDENCE", option_debug(region.confidence), theme),
-                field_line(
-                    "DISTANCE",
-                    format!("{} hop(s)", region.hop_distance_from_core),
-                    theme,
-                ),
-                field_line(
-                    "NETWORK",
-                    if region.within_scout_range || region.core {
-                        "reachable".into()
-                    } else {
-                        "beyond current reach".into()
-                    },
-                    theme,
-                ),
-            ]);
-            if let Some(deposit) = &region.deposit {
-                lines.push(field_line(
-                    "DEPOSIT",
-                    format!("{:?} // {} units", deposit.resource, deposit.remaining),
-                    theme,
-                ));
-                lines.push(field_line("LOSS RISK", risk_text(deposit.risk).to_owned(), theme));
-            } else if region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed {
-                lines.push(field_line("DEPOSIT", "none detected".into(), theme));
+            let mut lines = vec![designation_line(&region.designation, region.core, theme)];
+            if area.height < 14 && area.width < 60 {
+                lines.push(Line::from(""));
+                lines.extend(region_data_lines(region, theme));
+                lines.push(Line::from(""));
+                lines.push(section_line("ACTIVE IN REGION", theme));
+                lines.extend(local_operation_lines(planet, region, theme));
+                lines.push(Line::from(""));
+                lines.push(section_line("REGION OPERATIONS", theme));
+                lines.extend(region_action_lines(app, planet, region, theme));
+                lines.push(Line::from(""));
+                lines.push(section_line("LOCAL PRESENCE", theme));
+                lines.extend(region_presence_lines(planet, region, theme));
+            } else {
+                lines.push(Line::from(""));
+                lines.push(section_line("ACTIVE IN REGION", theme));
+                lines.extend(local_operation_lines(planet, region, theme));
+                if area.height >= 14 {
+                    lines.push(Line::from(""));
+                    lines.push(section_line("LOCAL PRESENCE", theme));
+                    lines.extend(region_presence_lines(planet, region, theme));
+                }
+                lines.push(Line::from(""));
+                lines.push(section_line("REGION OPERATIONS", theme));
+                lines.extend(region_action_lines(app, planet, region, theme));
+                lines.push(Line::from(""));
+                lines.extend(region_data_lines(region, theme));
+                if area.height < 14 {
+                    lines.push(Line::from(""));
+                    lines.push(section_line("LOCAL PRESENCE", theme));
+                    lines.extend(region_presence_lines(planet, region, theme));
+                }
             }
-
-            lines.push(Line::from(""));
-            lines.push(section_line("LOCAL PRESENCE", theme));
-            lines.extend(region_presence_lines(planet, region, theme));
-            lines.push(Line::from(""));
-            lines.push(section_line("REGION OPERATIONS", theme));
-            lines.extend(region_action_lines(app, planet, region, theme));
             Text::from(lines)
         },
     );
@@ -889,6 +1244,62 @@ fn render_region_inspector(
             )),
         area,
     );
+}
+
+fn region_data_lines(
+    region: &mind_core::protocol::RegionSnapshot,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        section_line("REGION DATA", theme),
+        field_line("KNOWLEDGE", format!("{:?}", region.knowledge), theme),
+        field_line(
+            "GRID",
+            format!(
+                "band {:02} / sector {:02}",
+                region.position.latitude_band + 1,
+                region.position.longitude_sector + 1
+            ),
+            theme,
+        ),
+        field_line("TERRAIN", option_debug(region.terrain), theme),
+        field_line("TEMPERATURE", option_debug(region.temperature), theme),
+        field_line(
+            "ATMOSPHERE",
+            option_debug(region.atmospheric_severity),
+            theme,
+        ),
+        field_line("CONFIDENCE", option_debug(region.confidence), theme),
+        field_line(
+            "DISTANCE",
+            format!("{} hop(s)", region.hop_distance_from_core),
+            theme,
+        ),
+        field_line(
+            "NETWORK",
+            if region.within_scout_range || region.core {
+                "reachable".into()
+            } else {
+                "beyond current reach".into()
+            },
+            theme,
+        ),
+    ];
+    if let Some(deposit) = &region.deposit {
+        lines.push(field_line(
+            "DEPOSIT",
+            format!("{:?} // {} units", deposit.resource, deposit.remaining),
+            theme,
+        ));
+        lines.push(field_line(
+            "LOSS RISK",
+            risk_text(deposit.risk).to_owned(),
+            theme,
+        ));
+    } else if region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed {
+        lines.push(field_line("DEPOSIT", "none detected".into(), theme));
+    }
+    lines
 }
 
 fn local_operation_lines(
@@ -920,6 +1331,15 @@ fn local_operation_lines(
             ),
             theme,
         ));
+        lines.push(field_line(
+            "CONTROL",
+            if mission.automated {
+                "queued automation".into()
+            } else {
+                "direct".into()
+            },
+            theme,
+        ));
     }
 
     if let Some(mission) = planet
@@ -937,12 +1357,29 @@ fn local_operation_lines(
         lines.push(field_line(
             "PROGRESS",
             format!(
-                "{}% // {}s // {} // cap {}",
+                "{}% // {}s remaining",
                 operation_progress(mission.remaining_ms, mission.phase_total_ms),
-                mission.remaining_ms.div_ceil(1_000),
-                risk_text(mission.risk),
-                mission.cargo_capacity
+                mission.remaining_ms.div_ceil(1_000)
             ),
+            theme,
+        ));
+        lines.push(field_line(
+            "EXPOSURE",
+            risk_text(mission.risk).to_owned(),
+            theme,
+        ));
+        lines.push(field_line(
+            "CAPACITY",
+            format!("{} units", mission.cargo_capacity),
+            theme,
+        ));
+        lines.push(field_line(
+            "CONTROL",
+            if mission.automated {
+                "proven route automation".into()
+            } else {
+                "direct".into()
+            },
             theme,
         ));
     }
@@ -1060,6 +1497,39 @@ fn region_presence_lines(
     if region.relay {
         lines.push(field_line("STRUCTURE", "active range relay".into(), theme));
     }
+    if let Some(position) = planet
+        .survey_queue
+        .queued_region_ids
+        .iter()
+        .position(|queued| queued == &region.id)
+    {
+        lines.push(field_line(
+            "SURVEY QUEUE",
+            format!(
+                "position {} of {}",
+                position + 1,
+                planet.survey_queue.queued_region_ids.len()
+            ),
+            theme,
+        ));
+    }
+    if planet.extraction_route.region_id.as_deref() == Some(region.id.as_str()) {
+        lines.push(field_line(
+            "AUTO ROUTE",
+            planet.extraction_route.paused_reason.as_ref().map_or_else(
+                || "active".into(),
+                |reason| format!("paused // {}", reason.replace('_', " ")),
+            ),
+            theme,
+        ));
+    } else if planet
+        .extraction_route
+        .proven_region_ids
+        .iter()
+        .any(|proven| proven == &region.id)
+    {
+        lines.push(field_line("AUTO ROUTE", "proven // inactive".into(), theme));
+    }
     if let Some(construction) = planet
         .active_construction
         .as_ref()
@@ -1135,6 +1605,22 @@ fn region_action_lines(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let primary = app.primary_region_action();
+    let automation = app.automation_action();
+    let automation_label = match automation.as_ref() {
+        Some(ContextAction::QueueSurvey(_)) => "queue survey",
+        Some(ContextAction::RemoveQueuedSurvey(_)) => "remove queued survey",
+        Some(ContextAction::SetExtractionRoute(_))
+            if planet.extraction_route.region_id.as_deref() == Some(region.id.as_str()) =>
+        {
+            "resume route"
+        }
+        Some(ContextAction::SetExtractionRoute(_)) => "activate route",
+        Some(ContextAction::ClearExtractionRoute) => "clear route",
+        _ => "automation",
+    };
+    let automation_identity = automation
+        .clone()
+        .unwrap_or_else(|| ContextAction::QueueSurvey(region.id.clone()));
     vec![
         region_action_line(
             "S",
@@ -1172,7 +1658,48 @@ fn region_action_lines(
             recall_block_reason(planet, region),
             theme,
         ),
+        region_action_line(
+            "A",
+            automation_label,
+            automation_identity,
+            automation,
+            None,
+            automation_block_reason(planet, region),
+            theme,
+        ),
     ]
+}
+
+fn automation_block_reason(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+) -> String {
+    if !planet.survey_queue.unlocked {
+        return "complete research to earn routine automation".into();
+    }
+    if !region.core
+        && region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed
+        && !region.within_scout_range
+    {
+        return "region is beyond current network reach".into();
+    }
+    if region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed {
+        return "survey is already active or queued".into();
+    }
+    if let Some(deposit) = &region.deposit {
+        if deposit.remaining == 0 {
+            return "deposit depleted".into();
+        }
+        if !planet
+            .extraction_route
+            .proven_region_ids
+            .iter()
+            .any(|proven| proven == &region.id)
+        {
+            return "complete one manual extraction to prove this route".into();
+        }
+    }
+    "no routine operation available here".into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1720,6 +2247,14 @@ fn render_dashboard(
                 EngineEventKind::RelayConstructionStarted => "BUILD",
                 EngineEventKind::RelayActivated => "RELAY",
                 EngineEventKind::AlphaMilestoneCompleted => "ALPHA",
+                EngineEventKind::AlphaSliceCompleted => "STABLE",
+                EngineEventKind::ResearchStarted => "R&D",
+                EngineEventKind::ResearchCompleted => "R&D+",
+                EngineEventKind::ProfileActivated => "PROFILE",
+                EngineEventKind::SurveyQueued => "QUEUE",
+                EngineEventKind::ExtractionRouteSet => "ROUTE",
+                EngineEventKind::AutomationPaused => "PAUSE",
+                EngineEventKind::ActivityReviewed => "REVIEW",
                 EngineEventKind::PersistenceDegraded => "SAVE!",
                 EngineEventKind::PersistenceRecovered => "SAVE",
                 EngineEventKind::ShutdownRequested => "STOP",
@@ -1736,6 +2271,8 @@ fn render_dashboard(
                 | EngineEventKind::ExtractorRebuilt
                 | EngineEventKind::RelayActivated
                 | EngineEventKind::AlphaMilestoneCompleted
+                | EngineEventKind::AlphaSliceCompleted
+                | EngineEventKind::ResearchCompleted
                 | EngineEventKind::PersistenceRecovered => theme.success,
                 _ => theme.cyan,
             };
@@ -1991,7 +2528,7 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, t
 fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
     let help_area = centered_rect(
         54.min(area.width.saturating_sub(2)),
-        24.min(area.height.saturating_sub(2)),
+        30.min(area.height.saturating_sub(2)),
         area,
     );
     let help = Text::from(vec![
@@ -2002,17 +2539,24 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme:
         key_line("? / ESC", "close help", theme),
         Line::from(""),
         section_line("PLANET", theme),
-        key_line("ARROWS", "navigate regions", theme),
+        key_line("ARROWS", "navigate one region", theme),
+        key_line("SHIFT + ARROWS", "jump across the 10 x 20 grid", theme),
         key_line("ENTER", "use the selected region's primary action", theme),
         key_line("S", "deploy survey scout", theme),
         key_line("X", "prepare extraction from a known deposit", theme),
         key_line("B", "prepare relay construction when funded", theme),
         key_line("R", "recall the scout assigned to this region", theme),
+        key_line("A", "queue or clear earned local automation", theme),
         key_line("PGUP / PGDN", "scroll the region inspector", theme),
         Line::from(""),
         section_line("OVERVIEW", theme),
         key_line("ARROWS", "select an operation or report", theme),
         key_line("ENTER", "inspect its region on the globe", theme),
+        key_line("PGUP / PGDN", "scroll planet-wide details", theme),
+        Line::from(""),
+        section_line("RESEARCH", theme),
+        key_line("UP / DOWN", "select research or a profile", theme),
+        key_line("ENTER", "commit research or activate a profile", theme),
         Line::styled(
             "Extraction can permanently lose its probe and cargo.",
             Style::default().fg(theme.warning),
@@ -2163,7 +2707,7 @@ mod tests {
 
     fn status(complete: bool) -> StatusSnapshot {
         StatusSnapshot {
-            protocol_version: 5,
+            protocol_version: mind_core::PROTOCOL_VERSION,
             daemon_version: "0.1.0".into(),
             pid: 1,
             health: HealthState::Ready,
@@ -2299,6 +2843,7 @@ mod tests {
         app.apply_snapshot(status(true), Instant::now());
         app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
         app.connected();
+        app.show_return_summary = false;
         app.workspace = Workspace::Overview;
         let overview = screen(
             &app,
@@ -2395,17 +2940,19 @@ mod tests {
         assert!(narrow.contains("REGION DATA"));
         assert!(narrow.contains("detach"));
 
-        app.region_panel_scroll = 14;
-        let scrolled = screen(
-            &app,
-            50,
-            28,
-            RenderOptions {
-                ascii: true,
-                no_color: true,
-            },
-        );
-        assert!(scrolled.contains("REGION OPERATIONS"));
+        assert!((0..=40).any(|scroll| {
+            app.region_panel_scroll = scroll;
+            screen(
+                &app,
+                50,
+                28,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            )
+            .contains("REGION OPERATIONS")
+        }));
     }
 
     #[test]
@@ -2493,6 +3040,7 @@ mod tests {
         app.apply_snapshot(status(true), Instant::now());
         app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
         app.connected();
+        app.show_return_summary = false;
         app.selected_region_id = Some(target.id.clone());
         let planet = screen(
             &app,
@@ -2511,7 +3059,8 @@ mod tests {
         assert!(planet.contains("Extractor 01 #"));
         assert!(planet.contains("PROGRESS"));
         assert!(planet.contains(expected_risk));
-        assert!(planet.contains("cap 4"));
+        assert!(planet.contains("CAPACITY"));
+        assert!(planet.contains("4 units"));
         assert!(planet.contains("LOCAL PRESENCE"));
         assert!(planet.matches("inbound").count() >= 2);
         assert!(planet.contains("recall scout"));
@@ -2598,5 +3147,74 @@ mod tests {
         );
         assert!(output.contains("Connection required"));
         assert!(!output.contains("Enter Awaken"));
+    }
+
+    #[test]
+    fn return_summary_reorients_with_visible_activity_stores_and_next_steps() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut planet = engine.planet().unwrap();
+        planet
+            .unreviewed_activity
+            .push(mind_core::protocol::ActivityRecord {
+                activity_id: 1,
+                kind: mind_core::protocol::ActivityKind::Survey,
+                region_id: Some("region_082".into()),
+                summary: "Survey completed at R-082; one analysis unit recorded.".into(),
+            });
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(planet, Instant::now());
+        app.connected();
+
+        let output = screen(
+            &app,
+            100,
+            36,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(output.contains("RETURN SUMMARY"));
+        assert!(output.contains("Survey completed at R-082"));
+        assert!(output.contains("STORES NOW"));
+        assert!(output.contains("CURRENT"));
+        assert!(output.contains("NEXT"));
+        assert!(output.contains("acknowledge and continue"));
+    }
+
+    #[test]
+    fn research_workspace_explains_permanent_choices_and_active_profile() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut planet = engine.planet().unwrap();
+        planet.research.unlocked = true;
+        planet.research.analysis_units = 2;
+        planet.research.options[0].completed = true;
+        planet.research.profiles[1].unlocked = true;
+        planet.research.profiles[1].active = true;
+        planet.research.profiles[0].active = false;
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(planet, Instant::now());
+        app.connected();
+        app.workspace = Workspace::Research;
+
+        let output = screen(
+            &app,
+            100,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(output.contains("RESEARCH & SPECIALIZATION"));
+        assert!(output.contains("Extended Telemetry"));
+        assert!(output.contains("COMPLETED"));
+        assert!(output.contains("Reach"));
+        assert!(output.contains("ACTIVE"));
+        assert!(output.contains("+1 operational hop"));
     }
 }

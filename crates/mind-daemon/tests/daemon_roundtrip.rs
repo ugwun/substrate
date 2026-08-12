@@ -1,7 +1,7 @@
 use mind_core::{
     config::{AppPaths, Config},
     ipc::{IpcClient, IpcNotification},
-    protocol::ScoutState,
+    protocol::{OperationalProfile, ResearchProject, ScoutState},
     runtime::RuntimeMetadata,
 };
 use std::{net::SocketAddr, time::Duration};
@@ -52,7 +52,7 @@ async fn serves_status_subscription_and_shutdown() {
         .is_ok());
     let initial = client.status().await.unwrap();
     assert_eq!(initial.tick_rate_hz, 100);
-    assert_eq!(initial.protocol_version, 5);
+    assert_eq!(initial.protocol_version, mind_core::PROTOCOL_VERSION);
     assert!(!initial.onboarding.complete);
     assert!(client.planet().await.is_err());
     assert!(client.subscribe_planet().await.is_err());
@@ -62,7 +62,9 @@ async fn serves_status_subscription_and_shutdown() {
     assert!(completed.ok);
     assert!(client.status().await.unwrap().onboarding.complete);
     let planet = client.planet().await.unwrap();
-    assert_eq!(planet.regions.len(), 24);
+    assert_eq!(planet.latitude_bands, 10);
+    assert_eq!(planet.longitude_sectors, 20);
+    assert_eq!(planet.regions.len(), 200);
     let target = planet
         .regions
         .iter()
@@ -90,6 +92,61 @@ async fn serves_status_subscription_and_shutdown() {
             .as_deref(),
         Some("survey_required")
     );
+    assert_eq!(
+        client
+            .start_research(ResearchProject::ExtendedTelemetry)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("research_locked")
+    );
+    assert_eq!(
+        client
+            .activate_profile(OperationalProfile::Reach)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("profile_locked")
+    );
+    assert_eq!(
+        client
+            .queue_survey(target.clone())
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("automation_locked")
+    );
+    assert_eq!(
+        client
+            .remove_queued_survey(target.clone())
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("survey_not_queued")
+    );
+    assert_eq!(
+        client
+            .set_extraction_route(target.clone())
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("automation_locked")
+    );
+    assert_eq!(
+        client
+            .clear_extraction_route()
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("no_extraction_route")
+    );
+    assert!(client.acknowledge_activity(0).await.unwrap().ok);
     assert!(client.deploy_scout(target).await.unwrap().ok);
     let pulse = client.trigger_diagnostic_pulse().await.unwrap();
     assert_eq!(pulse.pulse_id, 1);

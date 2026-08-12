@@ -124,6 +124,17 @@ async fn handle_key(
         return Ok(true);
     }
     app.record_input(std::time::Instant::now());
+    if app.show_return_summary {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+            if let Some(activity_id) = app.dismiss_return_summary() {
+                commands
+                    .send(ConnectionCommand::AcknowledgeActivity(activity_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+        }
+        return Ok(false);
+    }
     if app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') => app.show_help = false,
@@ -218,20 +229,56 @@ async fn handle_key(
                     .await
                     .context("connection worker stopped")?;
             }
+            Some(
+                ContextAction::QueueSurvey(_)
+                | ContextAction::RemoveQueuedSurvey(_)
+                | ContextAction::SetExtractionRoute(_)
+                | ContextAction::ClearExtractionRoute
+                | ContextAction::StartResearch(_)
+                | ContextAction::ActivateProfile(_),
+            ) => app.cancel_confirmation_action(),
             _ => app.cancel_confirmation_action(),
         },
         _ if app.pending_action.is_some() => {}
         KeyCode::Left if app.workspace == Workspace::Planet => {
-            app.move_selection(0, -1);
+            app.move_selection(
+                0,
+                if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                    -5
+                } else {
+                    -1
+                },
+            );
         }
         KeyCode::Right if app.workspace == Workspace::Planet => {
-            app.move_selection(0, 1);
+            app.move_selection(
+                0,
+                if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                    5
+                } else {
+                    1
+                },
+            );
         }
         KeyCode::Up if app.workspace == Workspace::Planet => {
-            app.move_selection(-1, 0);
+            app.move_selection(
+                if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                    -2
+                } else {
+                    -1
+                },
+                0,
+            );
         }
         KeyCode::Down if app.workspace == Workspace::Planet => {
-            app.move_selection(1, 0);
+            app.move_selection(
+                if key.modifiers.contains(event::KeyModifiers::SHIFT) {
+                    2
+                } else {
+                    1
+                },
+                0,
+            );
         }
         KeyCode::PageUp if app.workspace == Workspace::Planet => {
             app.scroll_region_panel(-6);
@@ -286,6 +333,30 @@ async fn handle_key(
                     .context("connection worker stopped")?;
             }
         }
+        KeyCode::Char('a') if app.workspace == Workspace::Planet => {
+            match app.automation_action() {
+                Some(ContextAction::QueueSurvey(region_id)) => {
+                    commands
+                        .send(ConnectionCommand::QueueSurvey(region_id))
+                        .await
+                }
+                Some(ContextAction::RemoveQueuedSurvey(region_id)) => {
+                    commands
+                        .send(ConnectionCommand::RemoveQueuedSurvey(region_id))
+                        .await
+                }
+                Some(ContextAction::SetExtractionRoute(region_id)) => {
+                    commands
+                        .send(ConnectionCommand::SetExtractionRoute(region_id))
+                        .await
+                }
+                Some(ContextAction::ClearExtractionRoute) => {
+                    commands.send(ConnectionCommand::ClearExtractionRoute).await
+                }
+                _ => Ok(()),
+            }
+            .context("connection worker stopped")?;
+        }
         KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Overview => {
             app.move_overview_selection(-1);
         }
@@ -294,6 +365,34 @@ async fn handle_key(
         }
         KeyCode::Enter if app.workspace == Workspace::Overview => {
             app.open_selected_overview_region();
+        }
+        KeyCode::PageUp if app.workspace == Workspace::Overview => {
+            app.scroll_overview_status(-6);
+        }
+        KeyCode::PageDown if app.workspace == Workspace::Overview => {
+            app.scroll_overview_status(6);
+        }
+        KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Research => {
+            app.move_research_selection(-1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::Research => {
+            app.move_research_selection(1);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Research => {
+            match app.selected_research_action() {
+                Some(ContextAction::StartResearch(project)) => {
+                    commands
+                        .send(ConnectionCommand::StartResearch(project))
+                        .await
+                }
+                Some(ContextAction::ActivateProfile(profile)) => {
+                    commands
+                        .send(ConnectionCommand::ActivateProfile(profile))
+                        .await
+                }
+                _ => Ok(()),
+            }
+            .context("connection worker stopped")?;
         }
         KeyCode::Char('d')
             if app.workspace == Workspace::System
@@ -444,5 +543,28 @@ mod tests {
         assert_eq!(app.workspace, Workspace::Planet);
         assert_eq!(app.selected_region_id.as_deref(), Some(target.id.as_str()));
         assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn shifted_arrows_jump_across_the_expanded_grid() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.connected();
+        let start = app.selected_region().unwrap().position.clone();
+        let (commands, _received) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+            &commands,
+        )
+        .await
+        .unwrap();
+        let selected = &app.selected_region().unwrap().position;
+        assert_eq!(selected.latitude_band, start.latitude_band);
+        assert_eq!(selected.longitude_sector, (start.longitude_sector + 5) % 20);
     }
 }

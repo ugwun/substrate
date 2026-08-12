@@ -71,14 +71,8 @@ impl MindEngine {
         );
         if disposition == LoadDisposition::PreviousReset {
             engine.record_event(
-                EngineEventKind::SaveMigrated,
-                "Previous save reset for the regional planet model",
-            );
-        }
-        if disposition == LoadDisposition::PreviousMigrated {
-            engine.record_event(
                 EngineEventKind::SaveReset,
-                "Save upgraded for the first expansion economy",
+                "Previous alpha save reset for the expanded planetary model",
             );
         }
         Ok(engine)
@@ -158,6 +152,18 @@ impl MindEngine {
                             GameAdvanceEvent::AlphaMilestoneCompleted => (
                                 EngineEventKind::AlphaMilestoneCompleted,
                                 "Extended reach proven by a completed survey",
+                            ),
+                            GameAdvanceEvent::AlphaSliceCompleted => (
+                                EngineEventKind::AlphaSliceCompleted,
+                                "Research specialization and earned automation proven",
+                            ),
+                            GameAdvanceEvent::ResearchCompleted => (
+                                EngineEventKind::ResearchCompleted,
+                                "Research completed; a new operational profile is available",
+                            ),
+                            GameAdvanceEvent::AutomationPaused => (
+                                EngineEventKind::AutomationPaused,
+                                "An automated operation paused and requires review",
                             ),
                         };
                         self.record_event(kind, message);
@@ -421,6 +427,103 @@ impl MindEngine {
             EngineEventKind::RelayConstructionStarted,
             "Regional relay construction started",
         );
+        result
+    }
+
+    pub fn start_research(&self, project: crate::protocol::ResearchProject) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.start_research(project),
+            EngineEventKind::ResearchStarted,
+            "Research direction committed",
+        )
+    }
+
+    pub fn activate_profile(
+        &self,
+        profile: crate::protocol::OperationalProfile,
+    ) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.activate_profile(profile),
+            EngineEventKind::ProfileActivated,
+            "Operational profile activated",
+        )
+    }
+
+    pub fn queue_survey(&self, region_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.queue_survey(region_id),
+            EngineEventKind::SurveyQueued,
+            "Automated survey queued",
+        )
+    }
+
+    pub fn remove_queued_survey(&self, region_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.remove_queued_survey(region_id),
+            EngineEventKind::SurveyQueued,
+            "Queued survey removed",
+        )
+    }
+
+    pub fn set_extraction_route(&self, region_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.set_extraction_route(region_id),
+            EngineEventKind::ExtractionRouteSet,
+            "Proven extraction route activated",
+        )
+    }
+
+    pub fn clear_extraction_route(&self) -> PlanetActionResult {
+        self.commit_planet_action(
+            GameState::clear_extraction_route,
+            EngineEventKind::ExtractionRouteSet,
+            "Automated extraction route cleared",
+        )
+    }
+
+    pub fn acknowledge_activity(&self, through_activity_id: u64) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.acknowledge_activity(through_activity_id),
+            EngineEventKind::ActivityReviewed,
+            "Return activity reviewed",
+        )
+    }
+
+    fn commit_planet_action(
+        &self,
+        operation: impl FnOnce(&mut GameState) -> PlanetActionResult,
+        event: EngineEventKind,
+        message: &'static str,
+    ) -> PlanetActionResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = state.clone();
+        let mut result = operation(&mut candidate);
+        if !result.ok {
+            return result;
+        }
+        if candidate.state_revision() == state.state_revision() {
+            return result;
+        }
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+        self.record_event(event, message);
         result
     }
 

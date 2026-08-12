@@ -8,10 +8,9 @@ use ratatui::{
 };
 use std::{
     borrow::Cow,
-    f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU},
+    f64::consts::{FRAC_PI_2, PI, TAU},
 };
 
-const LONGITUDE_STEP: f64 = PI / 3.0;
 const REGION_EDGE_WIDTH: f64 = 0.022;
 
 #[derive(Debug, Clone, Copy)]
@@ -204,7 +203,7 @@ fn sample_surface(
         normalize_angle(yaw + screen_x.atan2(depth.mul_add(cos_pitch, -screen_y * sin_pitch)));
     let region = region_at(planet, latitude, longitude)?;
     let selected = selected_id.is_some_and(|id| region.id == id);
-    let region_edge = near_region_edge(latitude, longitude, radius);
+    let region_edge = near_region_edge(planet, latitude, longitude, radius);
     let selected_edge = selected && region_edge;
 
     let light = normalized3((-0.38, 0.46, 0.80));
@@ -373,6 +372,7 @@ fn draw_region_markers(
     if let Some(core) = planet.regions.iter().find(|region| region.core) {
         place_marker(
             cells,
+            planet,
             core,
             "◇",
             "o",
@@ -387,6 +387,7 @@ fn draw_region_markers(
     if let Some(relay) = relay {
         place_marker(
             cells,
+            planet,
             relay,
             if (options.phase * 3.0).floor() as i64 % 2 == 0 {
                 "◈"
@@ -405,6 +406,7 @@ fn draw_region_markers(
     if let Some(target) = construction_target {
         place_marker(
             cells,
+            planet,
             target,
             if (options.phase * 4.0).floor() as i64 % 2 == 0 {
                 "✦"
@@ -423,6 +425,7 @@ fn draw_region_markers(
     if let Some(target) = extraction_target {
         place_marker(
             cells,
+            planet,
             target,
             "▣",
             "X",
@@ -437,6 +440,7 @@ fn draw_region_markers(
     if let Some(target) = target {
         place_marker(
             cells,
+            planet,
             target,
             if (options.phase * 2.0).floor() as i64 % 2 == 0 {
                 "◎"
@@ -455,6 +459,7 @@ fn draw_region_markers(
     if let Some(scout) = scout_region {
         place_marker(
             cells,
+            planet,
             scout,
             "●",
             "S",
@@ -469,6 +474,7 @@ fn draw_region_markers(
     if let Some(selected) = selected {
         place_marker(
             cells,
+            planet,
             selected,
             "◆",
             "@",
@@ -485,6 +491,7 @@ fn draw_region_markers(
 #[allow(clippy::too_many_arguments)]
 fn place_marker(
     cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
     region: &RegionSnapshot,
     unicode_symbol: &'static str,
     ascii_symbol: &'static str,
@@ -495,7 +502,7 @@ fn place_marker(
     center_y: f64,
     radius: f64,
 ) {
-    let (latitude, longitude) = region_center(region);
+    let (latitude, longitude) = region_center(planet, region);
     let Some(point) = project(latitude, longitude, options.yaw, options.pitch) else {
         return;
     };
@@ -568,7 +575,7 @@ fn draw_mission_path(
         return;
     };
     draw_route_between(
-        cells, start, end, options, center_x, center_y, radius, false,
+        cells, planet, start, end, options, center_x, center_y, radius, false,
     );
 }
 
@@ -601,7 +608,9 @@ fn draw_extraction_path(
     } else {
         (core, target)
     };
-    draw_route_between(cells, start, end, options, center_x, center_y, radius, true);
+    draw_route_between(
+        cells, planet, start, end, options, center_x, center_y, radius, true,
+    );
 }
 
 fn draw_construction_path(
@@ -622,7 +631,7 @@ fn draw_construction_path(
         return;
     };
     draw_route_between(
-        cells, core, target, options, center_x, center_y, radius, false,
+        cells, planet, core, target, options, center_x, center_y, radius, false,
     );
 }
 
@@ -641,7 +650,7 @@ fn draw_relay_pulse(
     else {
         return;
     };
-    let (latitude, longitude) = region_center(relay);
+    let (latitude, longitude) = region_center(planet, relay);
     let Some(point) = project(latitude, longitude, options.yaw, options.pitch) else {
         return;
     };
@@ -683,6 +692,7 @@ fn draw_relay_pulse(
 #[allow(clippy::too_many_arguments)]
 fn draw_route_between(
     cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
     start: &RegionSnapshot,
     end: &RegionSnapshot,
     options: GlobeRenderOptions,
@@ -691,8 +701,8 @@ fn draw_route_between(
     radius: f64,
     extraction: bool,
 ) {
-    let start_vector = sphere_vector(region_center(start));
-    let end_vector = sphere_vector(region_center(end));
+    let start_vector = sphere_vector(region_center(planet, start));
+    let end_vector = sphere_vector(region_center(planet, end));
     let pulse = options.phase.fract();
 
     for step in 0..=72 {
@@ -783,31 +793,39 @@ fn project(latitude: f64, longitude: f64, yaw: f64, pitch: f64) -> Option<Projec
 }
 
 fn region_at(planet: &PlanetSnapshot, latitude: f64, longitude: f64) -> Option<&RegionSnapshot> {
-    let latitude_band = (((FRAC_PI_2 - latitude) / FRAC_PI_4).floor() as i16).clamp(0, 3) as u8;
-    let longitude_sector =
-        ((normalize_angle(longitude) + LONGITUDE_STEP / 2.0) / LONGITUDE_STEP).floor() as u8 % 6;
+    let latitude_step = PI / f64::from(planet.latitude_bands);
+    let longitude_step = TAU / f64::from(planet.longitude_sectors);
+    let latitude_band = (((FRAC_PI_2 - latitude) / latitude_step).floor() as i16)
+        .clamp(0, i16::from(planet.latitude_bands.saturating_sub(1))) as u8;
+    let longitude_sector = ((normalize_angle(longitude) + longitude_step / 2.0) / longitude_step)
+        .floor() as u8
+        % planet.longitude_sectors;
     planet.regions.iter().find(|region| {
         region.position.latitude_band == latitude_band
             && region.position.longitude_sector == longitude_sector
     })
 }
 
-fn near_region_edge(latitude: f64, longitude: f64, radius: f64) -> bool {
-    let latitude_edge = [-FRAC_PI_4, 0.0, FRAC_PI_4]
-        .into_iter()
+fn near_region_edge(planet: &PlanetSnapshot, latitude: f64, longitude: f64, radius: f64) -> bool {
+    let latitude_step = PI / f64::from(planet.latitude_bands);
+    let longitude_step = TAU / f64::from(planet.longitude_sectors);
+    let latitude_edge = (1..planet.latitude_bands)
+        .map(|band| FRAC_PI_2 - f64::from(band) * latitude_step)
         .map(|edge| (latitude - edge).abs())
         .fold(f64::INFINITY, f64::min);
-    let sector_center = (normalize_angle(longitude) / LONGITUDE_STEP).round() * LONGITUDE_STEP;
+    let sector_center = (normalize_angle(longitude) / longitude_step).round() * longitude_step;
     let longitude_edge =
-        (normalize_signed_angle(longitude - sector_center).abs() - LONGITUDE_STEP / 2.0).abs()
+        (normalize_signed_angle(longitude - sector_center).abs() - longitude_step / 2.0).abs()
             * latitude.cos().abs().max(0.18);
     let threshold = REGION_EDGE_WIDTH.max(0.48 / radius);
     latitude_edge < threshold || longitude_edge < threshold
 }
 
-fn region_center(region: &RegionSnapshot) -> (f64, f64) {
-    let latitude = FRAC_PI_2 - (f64::from(region.position.latitude_band) + 0.5) * FRAC_PI_4;
-    let longitude = f64::from(region.position.longitude_sector) * LONGITUDE_STEP;
+fn region_center(planet: &PlanetSnapshot, region: &RegionSnapshot) -> (f64, f64) {
+    let latitude_step = PI / f64::from(planet.latitude_bands);
+    let longitude_step = TAU / f64::from(planet.longitude_sectors);
+    let latitude = FRAC_PI_2 - (f64::from(region.position.latitude_band) + 0.5) * latitude_step;
+    let longitude = f64::from(region.position.longitude_sector) * longitude_step;
     (latitude, longitude)
 }
 
@@ -944,7 +962,7 @@ mod tests {
             GlobeRenderOptions {
                 width: 58,
                 height: 24,
-                yaw: region_center(selected).1,
+                yaw: region_center(&planet, selected).1,
                 pitch: 0.0,
                 phase: 0.0,
                 ascii: false,
@@ -969,7 +987,7 @@ mod tests {
             GlobeRenderOptions {
                 width: 42,
                 height: 16,
-                yaw: region_center(selected).1,
+                yaw: region_center(&planet, selected).1,
                 pitch: 0.0,
                 phase: 0.0,
                 ascii: true,
@@ -990,9 +1008,9 @@ mod tests {
     fn selected_region_remains_correct_across_rotation() {
         let planet = planet();
         let selected = &planet.regions[13];
-        let (latitude, longitude) = region_center(selected);
-        let point = project(latitude, longitude, longitude, latitude * 0.35).unwrap();
-        assert!(point.depth > 0.8);
+        let (latitude, longitude) = region_center(&planet, selected);
+        let point = project(latitude, longitude, longitude, latitude).unwrap();
+        assert!(point.depth > 0.99);
     }
 
     #[test]
@@ -1013,7 +1031,7 @@ mod tests {
             GlobeRenderOptions {
                 width: 58,
                 height: 24,
-                yaw: region_center(target).1,
+                yaw: region_center(&planet, target).1,
                 pitch: 0.0,
                 phase: 0.5,
                 ascii: true,
@@ -1032,7 +1050,7 @@ mod tests {
             GlobeRenderOptions {
                 width: 58,
                 height: 24,
-                yaw: region_center(target).1,
+                yaw: region_center(&planet, target).1,
                 pitch: 0.0,
                 phase: 0.5,
                 ascii: false,

@@ -24,6 +24,13 @@ pub mod method {
     pub const RECALL_SCOUT: &str = "mind.recall_scout";
     pub const DEPLOY_EXTRACTOR: &str = "mind.deploy_extractor";
     pub const CONSTRUCT_RELAY: &str = "mind.construct_relay";
+    pub const START_RESEARCH: &str = "mind.start_research";
+    pub const ACTIVATE_PROFILE: &str = "mind.activate_profile";
+    pub const QUEUE_SURVEY: &str = "mind.queue_survey";
+    pub const REMOVE_QUEUED_SURVEY: &str = "mind.remove_queued_survey";
+    pub const SET_EXTRACTION_ROUTE: &str = "mind.set_extraction_route";
+    pub const CLEAR_EXTRACTION_ROUTE: &str = "mind.clear_extraction_route";
+    pub const ACKNOWLEDGE_ACTIVITY: &str = "mind.acknowledge_activity";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
     pub const PLANET_CHANGED: &str = "mind.planet_changed";
 }
@@ -80,6 +87,14 @@ pub enum EngineEventKind {
     RelayConstructionStarted,
     RelayActivated,
     AlphaMilestoneCompleted,
+    AlphaSliceCompleted,
+    ResearchStarted,
+    ResearchCompleted,
+    ProfileActivated,
+    SurveyQueued,
+    ExtractionRouteSet,
+    AutomationPaused,
+    ActivityReviewed,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
@@ -187,6 +202,36 @@ pub enum ExtractorState {
     Rebuilding,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchProject {
+    ExtendedTelemetry,
+    FieldHardening,
+    ParallelProcessing,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalProfile {
+    Balanced,
+    Reach,
+    Resilience,
+    Throughput,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Survey,
+    Extraction,
+    Loss,
+    Recovery,
+    Construction,
+    Research,
+    Automation,
+    Milestone,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct DepositSnapshot {
     pub resource: ResourceKind,
@@ -238,6 +283,7 @@ pub struct ActiveExtractionSnapshot {
     pub phase_total_ms: u64,
     pub risk: RiskLevel,
     pub cargo_capacity: u32,
+    pub automated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -255,6 +301,66 @@ pub struct ObjectiveSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ResearchOptionSnapshot {
+    pub project: ResearchProject,
+    pub title: String,
+    pub summary: String,
+    pub analysis_cost: u32,
+    pub duration_ms: u64,
+    pub available: bool,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActiveResearchSnapshot {
+    pub project: ResearchProject,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct OperationalProfileSnapshot {
+    pub profile: OperationalProfile,
+    pub title: String,
+    pub summary: String,
+    pub unlocked: bool,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ResearchSnapshot {
+    pub unlocked: bool,
+    pub analysis_units: u32,
+    pub active: Option<ActiveResearchSnapshot>,
+    pub options: Vec<ResearchOptionSnapshot>,
+    pub profiles: Vec<OperationalProfileSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SurveyQueueSnapshot {
+    pub unlocked: bool,
+    pub capacity: usize,
+    pub queued_region_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ExtractionRouteSnapshot {
+    pub unlocked: bool,
+    pub region_id: Option<String>,
+    pub paused_reason: Option<String>,
+    pub proven_region_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActivityRecord {
+    pub activity_id: u64,
+    pub kind: ActivityKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ScoutSnapshot {
     pub id: String,
     pub designation: String,
@@ -269,6 +375,7 @@ pub struct ActiveMissionSnapshot {
     pub phase: ScoutState,
     pub remaining_ms: u64,
     pub phase_total_ms: u64,
+    pub automated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -281,6 +388,8 @@ pub struct MissionReport {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PlanetSnapshot {
     pub revision: u64,
+    pub latitude_bands: u8,
+    pub longitude_sectors: u8,
     pub core_region_id: String,
     pub regions: Vec<RegionSnapshot>,
     pub scout: ScoutSnapshot,
@@ -293,6 +402,10 @@ pub struct PlanetSnapshot {
     pub refining_remaining_ms: u64,
     pub active_construction: Option<ActiveConstructionSnapshot>,
     pub relay_region_id: Option<String>,
+    pub research: ResearchSnapshot,
+    pub survey_queue: SurveyQueueSnapshot,
+    pub extraction_route: ExtractionRouteSnapshot,
+    pub unreviewed_activity: Vec<ActivityRecord>,
     pub objective: ObjectiveSnapshot,
 }
 
@@ -309,6 +422,26 @@ pub struct DeployExtractorParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConstructRelayParams {
     pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StartResearchParams {
+    pub project: ResearchProject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActivateProfileParams {
+    pub profile: OperationalProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct RegionAutomationParams {
+    pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AcknowledgeActivityParams {
+    pub through_activity_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -489,7 +622,7 @@ mod tests {
         let params = StatusNotification {
             subscription_id: Uuid::nil(),
             status: StatusSnapshot {
-                protocol_version: 5,
+                protocol_version: crate::PROTOCOL_VERSION,
                 daemon_version: "0.1.0".into(),
                 pid: 1,
                 health: HealthState::Ready,

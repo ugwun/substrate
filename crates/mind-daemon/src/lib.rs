@@ -3,10 +3,11 @@ use mind_core::{
     config::{AppPaths, Config},
     engine::MindEngine,
     protocol::{
-        self, failure, method, notification, success, CompleteOnboardingParams,
-        ConstructRelayParams, DeployExtractorParams, DeployScoutParams, PlanetNotification,
-        RpcRequest, StatusNotification, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION,
-        MAX_FRAME_BYTES,
+        self, failure, method, notification, success, AcknowledgeActivityParams,
+        ActivateProfileParams, CompleteOnboardingParams, ConstructRelayParams,
+        DeployExtractorParams, DeployScoutParams, PlanetNotification, RegionAutomationParams,
+        RpcRequest, StartResearchParams, StatusNotification, SubscribeResult, UnsubscribeParams,
+        JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
 };
@@ -393,6 +394,79 @@ async fn dispatch_frame(
                 ),
                 None => (
                     failure(request.id, -32602, "invalid relay construction parameters"),
+                    false,
+                ),
+            }
+        }
+        method::START_RESEARCH => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<StartResearchParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.start_research(params.project)),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid research parameters"),
+                    false,
+                ),
+            }
+        }
+        method::ACTIVATE_PROFILE => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<ActivateProfileParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.activate_profile(params.profile)),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid profile parameters"),
+                    false,
+                ),
+            }
+        }
+        method::QUEUE_SURVEY | method::REMOVE_QUEUED_SURVEY | method::SET_EXTRACTION_ROUTE => {
+            let method_name = request.method.clone();
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<RegionAutomationParams>(value).ok());
+            match params {
+                Some(params) => {
+                    let result = match method_name.as_str() {
+                        method::QUEUE_SURVEY => engine.queue_survey(&params.region_id),
+                        method::REMOVE_QUEUED_SURVEY => {
+                            engine.remove_queued_survey(&params.region_id)
+                        }
+                        _ => engine.set_extraction_route(&params.region_id),
+                    };
+                    (success(request.id, result), false)
+                }
+                None => (
+                    failure(request.id, -32602, "invalid automation parameters"),
+                    false,
+                ),
+            }
+        }
+        method::CLEAR_EXTRACTION_ROUTE => {
+            (success(request.id, engine.clear_extraction_route()), false)
+        }
+        method::ACKNOWLEDGE_ACTIVITY => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<AcknowledgeActivityParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(
+                        request.id,
+                        engine.acknowledge_activity(params.through_activity_id),
+                    ),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid activity acknowledgement"),
                     false,
                 ),
             }

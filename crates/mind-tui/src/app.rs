@@ -1,7 +1,8 @@
 use crate::connection::PlanetActionKind;
 use mind_core::protocol::{
-    DiagnosticPulseResult, EngineEvent, OnboardingCompletionResult, PlanetActionResult,
-    PlanetSnapshot, RegionSnapshot, ScoutState, StatusSnapshot,
+    DiagnosticPulseResult, EngineEvent, OnboardingCompletionResult, OperationalProfile,
+    PlanetActionResult, PlanetSnapshot, RegionSnapshot, ResearchProject, ScoutState,
+    StatusSnapshot,
 };
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
@@ -30,6 +31,7 @@ pub enum OnboardingView {
 pub enum Workspace {
     Planet,
     Overview,
+    Research,
     System,
 }
 
@@ -39,6 +41,12 @@ pub enum ContextAction {
     Recall,
     Extract(String),
     ConstructRelay(String),
+    QueueSurvey(String),
+    RemoveQueuedSurvey(String),
+    SetExtractionRoute(String),
+    ClearExtractionRoute,
+    StartResearch(ResearchProject),
+    ActivateProfile(OperationalProfile),
 }
 
 #[derive(Debug)]
@@ -60,6 +68,9 @@ pub struct App {
     pub selected_region_id: Option<String>,
     pub region_panel_scroll: u16,
     pub overview_selection: usize,
+    pub overview_status_scroll: u16,
+    pub research_selection: usize,
+    pub show_return_summary: bool,
     pub pending_action: Option<ContextAction>,
     pub globe_yaw: f64,
     pub globe_pitch: f64,
@@ -92,6 +103,9 @@ impl Default for App {
             selected_region_id: None,
             region_panel_scroll: 0,
             overview_selection: 0,
+            overview_status_scroll: 0,
+            research_selection: 0,
+            show_return_summary: false,
             pending_action: None,
             globe_yaw: 0.0,
             globe_pitch: 0.0,
@@ -162,6 +176,7 @@ impl App {
     }
 
     pub fn apply_planet(&mut self, planet: PlanetSnapshot, received_at: Instant) {
+        let initial_planet = self.planet.is_none();
         let selected_is_valid = self
             .selected_region_id
             .as_ref()
@@ -171,6 +186,14 @@ impl App {
             self.selected_region_id = Some(planet.core_region_id.clone());
         }
         self.planet = Some(planet);
+        if initial_planet
+            && self
+                .planet
+                .as_ref()
+                .is_some_and(|planet| !planet.unreviewed_activity.is_empty())
+        {
+            self.show_return_summary = true;
+        }
         self.clamp_overview_selection();
         if selection_changed {
             self.region_panel_scroll = 0;
@@ -215,11 +238,13 @@ impl App {
     pub fn cycle_workspace(&mut self, reverse: bool) {
         self.workspace = match (self.workspace, reverse) {
             (Workspace::Planet, false) => Workspace::Overview,
-            (Workspace::Overview, false) => Workspace::System,
+            (Workspace::Overview, false) => Workspace::Research,
+            (Workspace::Research, false) => Workspace::System,
             (Workspace::System, false) => Workspace::Planet,
             (Workspace::Planet, true) => Workspace::System,
             (Workspace::Overview, true) => Workspace::Planet,
-            (Workspace::System, true) => Workspace::Overview,
+            (Workspace::Research, true) => Workspace::Overview,
+            (Workspace::System, true) => Workspace::Research,
         };
         self.pending_action = None;
         self.notice = None;
@@ -230,9 +255,21 @@ impl App {
             return;
         };
         let latitude = (i16::from(current.position.latitude_band) + i16::from(latitude_delta))
-            .clamp(0, 3) as u8;
+            .clamp(
+                0,
+                i16::from(
+                    self.planet
+                        .as_ref()
+                        .map_or(1, |planet| planet.latitude_bands)
+                        .saturating_sub(1),
+                ),
+            ) as u8;
         let longitude = (i16::from(current.position.longitude_sector) + i16::from(longitude_delta))
-            .rem_euclid(6) as u8;
+            .rem_euclid(i16::from(
+                self.planet
+                    .as_ref()
+                    .map_or(1, |planet| planet.longitude_sectors),
+            )) as u8;
         if let Some(region) = self.planet.as_ref().and_then(|planet| {
             planet.regions.iter().find(|region| {
                 region.position.latitude_band == latitude
@@ -341,6 +378,10 @@ impl App {
                 PlanetActionKind::Recall => "SCOUT RECALL INITIATED".into(),
                 PlanetActionKind::Extract => "EXTRACTOR DEPLOYED".into(),
                 PlanetActionKind::Construct => "RELAY CONSTRUCTION STARTED".into(),
+                PlanetActionKind::Research => "RESEARCH COMMITTED".into(),
+                PlanetActionKind::Profile => "OPERATIONAL PROFILE ACTIVATED".into(),
+                PlanetActionKind::Automation => "AUTOMATION UPDATED".into(),
+                PlanetActionKind::Review => "ACTIVITY REVIEWED".into(),
             }
         } else {
             format!(
@@ -382,6 +423,103 @@ impl App {
         }
         self.overview_selection = (self.overview_selection as isize + isize::from(delta))
             .clamp(0, count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn scroll_overview_status(&mut self, amount: i16) {
+        self.overview_status_scroll = if amount.is_negative() {
+            self.overview_status_scroll
+                .saturating_sub(amount.unsigned_abs())
+        } else {
+            self.overview_status_scroll
+                .saturating_add(amount as u16)
+                .min(64)
+        };
+    }
+
+    pub fn move_research_selection(&mut self, delta: i8) {
+        let count = self.research_entry_count();
+        if count == 0 {
+            self.research_selection = 0;
+            return;
+        }
+        self.research_selection = (self.research_selection as isize + isize::from(delta))
+            .clamp(0, count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn selected_research_action(&self) -> Option<ContextAction> {
+        let research = &self.planet.as_ref()?.research;
+        if self.workspace != Workspace::Research || !research.unlocked {
+            return None;
+        }
+        if self.research_selection < research.options.len() {
+            let option = &research.options[self.research_selection];
+            return option
+                .available
+                .then_some(ContextAction::StartResearch(option.project));
+        }
+        let profile = research
+            .profiles
+            .get(self.research_selection - research.options.len())?;
+        let field_operation_active = self.planet.as_ref().is_some_and(|planet| {
+            planet.active_mission.is_some() || planet.active_extraction.is_some()
+        });
+        (profile.unlocked && !profile.active && !field_operation_active)
+            .then_some(ContextAction::ActivateProfile(profile.profile))
+    }
+
+    pub fn automation_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        if self.workspace != Workspace::Planet || !planet.survey_queue.unlocked {
+            return None;
+        }
+        if planet
+            .survey_queue
+            .queued_region_ids
+            .iter()
+            .any(|queued| queued == &region.id)
+        {
+            return Some(ContextAction::RemoveQueuedSurvey(region.id.clone()));
+        }
+        if !region.core
+            && region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed
+            && region.within_scout_range
+        {
+            return Some(ContextAction::QueueSurvey(region.id.clone()));
+        }
+        if planet.extraction_route.region_id.as_deref() == Some(region.id.as_str()) {
+            if planet.extraction_route.paused_reason.as_deref() == Some("probe_loss")
+                && region.within_scout_range
+                && region
+                    .deposit
+                    .as_ref()
+                    .is_some_and(|deposit| deposit.remaining > 0)
+            {
+                return Some(ContextAction::SetExtractionRoute(region.id.clone()));
+            }
+            return Some(ContextAction::ClearExtractionRoute);
+        }
+        planet
+            .extraction_route
+            .proven_region_ids
+            .iter()
+            .any(|proven| proven == &region.id)
+            .then(|| ContextAction::SetExtractionRoute(region.id.clone()))
+    }
+
+    pub fn dismiss_return_summary(&mut self) -> Option<u64> {
+        self.show_return_summary = false;
+        self.planet
+            .as_ref()?
+            .unreviewed_activity
+            .last()
+            .map(|record| record.activity_id)
+    }
+
+    fn research_entry_count(&self) -> usize {
+        self.planet.as_ref().map_or(0, |planet| {
+            planet.research.options.len() + planet.research.profiles.len()
+        })
     }
 
     pub fn open_selected_overview_region(&mut self) {
@@ -536,14 +674,20 @@ impl App {
     }
 
     fn focus_selected_region(&mut self, immediate: bool) {
+        let Some(planet) = self.planet.as_ref() else {
+            return;
+        };
+        let latitude_bands = planet.latitude_bands;
+        let longitude_sectors = planet.longitude_sectors;
         let Some(region) = self.selected_region() else {
             return;
         };
         let longitude_sector = region.position.longitude_sector;
         let latitude_band = region.position.latitude_band;
-        self.globe_target_yaw = f64::from(longitude_sector) * std::f64::consts::PI / 3.0;
+        self.globe_target_yaw =
+            f64::from(longitude_sector) * std::f64::consts::TAU / f64::from(longitude_sectors);
         let latitude = std::f64::consts::FRAC_PI_2
-            - (f64::from(latitude_band) + 0.5) * std::f64::consts::FRAC_PI_4;
+            - (f64::from(latitude_band) + 0.5) * std::f64::consts::PI / f64::from(latitude_bands);
         self.globe_target_pitch = (latitude * 0.38).clamp(-0.45, 0.45);
         if immediate {
             self.globe_yaw = self.globe_target_yaw;
@@ -675,6 +819,6 @@ mod tests {
         app.cycle_workspace(true);
         assert_eq!(app.workspace, Workspace::System);
         app.cycle_workspace(true);
-        assert_eq!(app.workspace, Workspace::Overview);
+        assert_eq!(app.workspace, Workspace::Research);
     }
 }

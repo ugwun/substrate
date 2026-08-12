@@ -15,6 +15,8 @@ description: Maintain Substrate workspace architecture, configuration, and engin
 - Use `PathBuf` and platform-native directories for every filesystem location.
 - Preserve configuration precedence as CLI, environment, file, then defaults, and validate the merged result.
 - Bind IPC and MCP only to loopback, bind both before readiness, and treat runtime metadata as advisory until a versioned handshake succeeds.
+- Keep `mind-tui` attach-only. Let `mind-cli play` provide the low-friction composition: reuse a reachable daemon or start it through managed startup, launch the adjacent TUI, and leave the daemon running when the TUI exits.
+- Treat an older daemon on the configured endpoint as live rather than absent. Report the protocol conflict before spawning, and permit graceful cross-revision shutdown only after the endpoint answers the stable Substrate ping handshake.
 
 ## Product direction
 

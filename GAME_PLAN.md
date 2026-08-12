@@ -73,6 +73,22 @@ expeditions and production; restarting it does not grant offline catch-up. An at
 client should clearly summarize anything that happened while the daemon continued to
 run unattended.
 
+### First playable-session target
+
+The first 60–90 minutes should form a complete learning arc rather than a tutorial that
+ends before the systems connect. A fresh player should awaken, survey several nearby
+regions, compare honest extraction risks, establish all three material flows, recover
+from or understand probe loss, construct the first relay, prove extended reach, choose
+one research direction, activate its operational profile, and use one earned automated
+routine. The exact duration is a playtest target, not a wait requirement: informed play
+may finish sooner, while setbacks must create recovery choices without a softlock.
+
+The interface should keep an immediate operation, a near-term infrastructure goal, and
+the current chapter objective legible at the same time. Research must create a genuine
+choice among capabilities rather than a mandatory ordering. Automation is unlocked only
+after the player has performed the underlying loop and should remove repetition while
+leaving priorities, destinations, reserves, and risk under player control.
+
 ## 3. Planet and Exploration
 
 ### The globe
@@ -265,7 +281,8 @@ actions require a clear confirmation that names what will be lost.
 
 - **Planet:** globe, compact stores and fabrication status, and a persistent
   selected-region inspector that prioritizes complete local operation progress; all
-  region-specific deployments, recalls, extraction, and construction originate here.
+  region-specific deployments, recalls, extraction, construction, and earned routine
+  automation originate here.
 - **Overview:** deeper planet-wide materials, energy, fleet, active operations,
   construction, routes, bottlenecks, and reports, with navigation back to associated
   regions.
@@ -467,10 +484,11 @@ the repository no longer presents circuit assembly as the product direction.
 
 ### Phase 1: Globe and first expeditions
 
-**Status: implemented.** The first survey slice implements a 24-region globe, staged
+**Status: implemented.** The first survey slice implements a 200-region 10-by-20 globe, staged
 fog knowledge, one protected local-range scout, daemon-timed travel and surveying,
 hold and recall, mission reports, and durable terrain and environmental discoveries.
-Broader mission preparation and additional scout roles remain planned.
+Single-region and fast grid navigation keep the larger surface traversable. Broader
+mission preparation and additional scout roles remain planned.
 
 - Add the regional world model, fog states, rotating globe, keyboard navigation, and
   region details.
@@ -482,11 +500,12 @@ watch its progress, and permanently reveal useful planetary information.
 
 ### Phase 2: Geological economy
 
-**Status: in progress.** The first alpha slice implements deterministic hidden deposits,
+**Status: in progress.** The first alpha slice implements deterministic variable hidden deposits,
 three refined material families, one risky four-unit extraction probe, permanent probe
 and cargo loss with guaranteed rebuilding, automatic core refining, and one constructed
-relay that extends survey reach. Energy, hauling, loadouts, route automation, and general
-construction remain planned.
+relay that extends survey reach. A completed manual extraction proves a region for one
+repeatable extraction route, and completed research earns a bounded survey queue. Energy,
+hauling, loadouts, multiple routes, and general construction remain planned.
 
 - Add varied deposits, geological confidence, local energy, extraction, cargo,
   transport, refining, and construction materials.
@@ -497,6 +516,12 @@ construction remain planned.
 build and improve probes without typed commands or repetitive cargo handling.
 
 ### Phase 3: Research, hazards, and loss
+
+**Status: in progress.** The alpha now turns completed surveys into permanent analysis,
+offers reach, resilience, and throughput research directions, and lets the player activate
+the corresponding operational profile. Research and routine automation progress while the
+daemon runs and remain visible after reattachment. Environmental requirements, damage,
+rescue, and salvage remain planned.
 
 - Add research choices, probe specialization, environmental requirements, damage,
   rescue, salvage, and permanent unit loss.
