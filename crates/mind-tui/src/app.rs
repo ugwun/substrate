@@ -6,7 +6,7 @@ use mind_core::protocol::{
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
 const EVENT_CACHE_CAPACITY: usize = 256;
-const IDLE_DELAY: Duration = Duration::from_secs(5);
+const IDLE_DELAY: Duration = Duration::from_secs(30);
 const IDLE_ROTATION_SPEED: f64 = 0.085;
 const CAMERA_RESPONSE: f64 = 7.5;
 const MAX_FRAME_DELTA: Duration = Duration::from_millis(250);
@@ -29,7 +29,7 @@ pub enum OnboardingView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
     Planet,
-    Operations,
+    Overview,
     System,
 }
 
@@ -37,6 +37,8 @@ pub enum Workspace {
 pub enum ContextAction {
     Deploy(String),
     Recall,
+    Extract(String),
+    ConstructRelay(String),
 }
 
 #[derive(Debug)]
@@ -56,7 +58,9 @@ pub struct App {
     pub onboarding_view: OnboardingView,
     pub workspace: Workspace,
     pub selected_region_id: Option<String>,
-    pub detail_open: bool,
+    pub region_panel_scroll: u16,
+    pub overview_selection: usize,
+    pub pending_action: Option<ContextAction>,
     pub globe_yaw: f64,
     pub globe_pitch: f64,
     pub globe_phase: f64,
@@ -86,7 +90,9 @@ impl Default for App {
             onboarding_view: OnboardingView::Adjusting,
             workspace: Workspace::Planet,
             selected_region_id: None,
-            detail_open: false,
+            region_panel_scroll: 0,
+            overview_selection: 0,
+            pending_action: None,
             globe_yaw: 0.0,
             globe_pitch: 0.0,
             globe_phase: 0.0,
@@ -165,7 +171,9 @@ impl App {
             self.selected_region_id = Some(planet.core_region_id.clone());
         }
         self.planet = Some(planet);
+        self.clamp_overview_selection();
         if selection_changed {
+            self.region_panel_scroll = 0;
             self.focus_selected_region(true);
         }
         self.last_update = Some(received_at);
@@ -188,8 +196,8 @@ impl App {
             .as_secs_f64();
         self.last_animation_frame = now;
         if self.workspace != Workspace::Planet
-            || self.detail_open
             || self.show_help
+            || self.pending_action.is_some()
             || !matches!(self.connection, ConnectionState::Connected)
         {
             return;
@@ -206,14 +214,14 @@ impl App {
 
     pub fn cycle_workspace(&mut self, reverse: bool) {
         self.workspace = match (self.workspace, reverse) {
-            (Workspace::Planet, false) => Workspace::Operations,
-            (Workspace::Operations, false) => Workspace::System,
+            (Workspace::Planet, false) => Workspace::Overview,
+            (Workspace::Overview, false) => Workspace::System,
             (Workspace::System, false) => Workspace::Planet,
             (Workspace::Planet, true) => Workspace::System,
-            (Workspace::Operations, true) => Workspace::Planet,
-            (Workspace::System, true) => Workspace::Operations,
+            (Workspace::Overview, true) => Workspace::Planet,
+            (Workspace::System, true) => Workspace::Overview,
         };
-        self.detail_open = false;
+        self.pending_action = None;
         self.notice = None;
     }
 
@@ -234,6 +242,7 @@ impl App {
             self.selected_region_id = Some(region.id.clone());
             self.focus_selected_region(false);
         }
+        self.region_panel_scroll = 0;
         self.notice = None;
     }
 
@@ -246,43 +255,92 @@ impl App {
             .find(|region| &region.id == selected)
     }
 
-    pub fn open_detail(&mut self) {
-        self.detail_open = true;
-        self.notice = None;
-    }
-
-    pub fn close_detail(&mut self) {
-        self.detail_open = false;
-        self.notice = None;
-    }
-
-    pub fn context_action(&self) -> Option<ContextAction> {
+    pub fn primary_region_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
-        match self.workspace {
-            Workspace::Planet if self.detail_open => {
-                let region = self.selected_region()?;
-                (planet.scout.state == ScoutState::Ready
-                    && region.within_scout_range
-                    && !region.core)
-                    .then(|| ContextAction::Deploy(region.id.clone()))
-            }
-            Workspace::Operations
-                if matches!(
-                    planet.scout.state,
-                    ScoutState::Outbound | ScoutState::Surveying | ScoutState::Holding
-                ) =>
-            {
-                Some(ContextAction::Recall)
-            }
-            _ => None,
+        if self.workspace != Workspace::Planet {
+            return None;
+        }
+        let region = self.selected_region()?;
+        if self.scout_recall_action().is_some() {
+            Some(ContextAction::Recall)
+        } else if region
+            .deposit
+            .as_ref()
+            .is_some_and(|deposit| deposit.remaining > 0)
+            && planet.extractor.state == mind_core::protocol::ExtractorState::Ready
+            && region.within_scout_range
+        {
+            Some(ContextAction::Extract(region.id.clone()))
+        } else if planet.scout.state == ScoutState::Ready
+            && region.within_scout_range
+            && !region.core
+        {
+            Some(ContextAction::Deploy(region.id.clone()))
+        } else {
+            self.construction_action()
         }
     }
 
+    pub fn scout_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        (self.workspace == Workspace::Planet
+            && planet.scout.state == ScoutState::Ready
+            && region.within_scout_range
+            && !region.core)
+            .then(|| ContextAction::Deploy(region.id.clone()))
+    }
+
+    pub fn extraction_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        (self.workspace == Workspace::Planet
+            && planet.extractor.state == mind_core::protocol::ExtractorState::Ready
+            && region.within_scout_range
+            && region
+                .deposit
+                .as_ref()
+                .is_some_and(|deposit| deposit.remaining > 0))
+        .then(|| ContextAction::Extract(region.id.clone()))
+    }
+
+    pub fn construction_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        let stock = planet.refined_inventory;
+        (self.workspace == Workspace::Planet
+            && !region.core
+            && region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed
+            && region.within_scout_range
+            && planet.relay_region_id.is_none()
+            && planet.active_construction.is_none()
+            && stock.structural >= 8
+            && stock.conductive >= 6
+            && stock.silicate >= 6)
+            .then(|| ContextAction::ConstructRelay(region.id.clone()))
+    }
+
+    pub fn scout_recall_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        let mission = planet.active_mission.as_ref()?;
+        (self.workspace == Workspace::Planet
+            && mission.target_region_id == region.id
+            && matches!(
+                mission.phase,
+                ScoutState::Outbound | ScoutState::Surveying | ScoutState::Holding
+            ))
+        .then_some(ContextAction::Recall)
+    }
+
     pub fn planet_action_completed(&mut self, kind: PlanetActionKind, result: PlanetActionResult) {
+        self.pending_action = None;
         self.notice = Some(if result.ok {
             match kind {
                 PlanetActionKind::Deploy => "SCOUT DEPLOYED".into(),
                 PlanetActionKind::Recall => "SCOUT RECALL INITIATED".into(),
+                PlanetActionKind::Extract => "EXTRACTOR DEPLOYED".into(),
+                PlanetActionKind::Construct => "RELAY CONSTRUCTION STARTED".into(),
             }
         } else {
             format!(
@@ -290,9 +348,80 @@ impl App {
                 result.code.as_deref().unwrap_or("unknown_error")
             )
         });
-        if result.ok {
-            self.detail_open = false;
+    }
+
+    pub fn request_confirmation(&mut self, action: ContextAction) -> bool {
+        if self.pending_action.as_ref() == Some(&action) {
+            true
+        } else {
+            self.pending_action = Some(action);
+            false
         }
+    }
+
+    pub fn cancel_confirmation_action(&mut self) {
+        self.pending_action = None;
+    }
+
+    pub fn scroll_region_panel(&mut self, amount: i16) {
+        self.region_panel_scroll = if amount.is_negative() {
+            self.region_panel_scroll
+                .saturating_sub(amount.unsigned_abs())
+        } else {
+            self.region_panel_scroll
+                .saturating_add(amount as u16)
+                .min(96)
+        };
+    }
+
+    pub fn move_overview_selection(&mut self, delta: i8) {
+        let count = self.overview_region_targets().len();
+        if count == 0 {
+            self.overview_selection = 0;
+            return;
+        }
+        self.overview_selection = (self.overview_selection as isize + isize::from(delta))
+            .clamp(0, count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn open_selected_overview_region(&mut self) {
+        let Some(region_id) = self
+            .overview_region_targets()
+            .get(self.overview_selection)
+            .map(|region_id| (*region_id).to_owned())
+        else {
+            return;
+        };
+        self.workspace = Workspace::Planet;
+        self.selected_region_id = Some(region_id);
+        self.region_panel_scroll = 0;
+        self.pending_action = None;
+        self.notice = None;
+        self.focus_selected_region(false);
+    }
+
+    pub fn overview_region_targets(&self) -> Vec<&str> {
+        let Some(planet) = &self.planet else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        if let Some(mission) = &planet.active_mission {
+            targets.push(mission.target_region_id.as_str());
+        }
+        if let Some(mission) = &planet.active_extraction {
+            targets.push(mission.target_region_id.as_str());
+        }
+        if let Some(construction) = &planet.active_construction {
+            targets.push(construction.region_id.as_str());
+        }
+        targets.extend(
+            planet
+                .recent_reports
+                .iter()
+                .rev()
+                .map(|report| report.region_id.as_str()),
+        );
+        targets
     }
 
     pub fn select_previous_band(&mut self) {
@@ -400,6 +529,12 @@ impl App {
         self.event_scroll = self.event_scroll.min(self.max_scroll());
     }
 
+    fn clamp_overview_selection(&mut self) {
+        self.overview_selection = self
+            .overview_selection
+            .min(self.overview_region_targets().len().saturating_sub(1));
+    }
+
     fn focus_selected_region(&mut self, immediate: bool) {
         let Some(region) = self.selected_region() else {
             return;
@@ -470,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn globe_recenters_after_input_then_rotates_without_changing_selection() {
+    fn globe_waits_thirty_seconds_then_rotates_without_changing_selection() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
         let start = Instant::now();
@@ -491,9 +626,55 @@ mod tests {
                 < angle_distance(initial_yaw, app.globe_target_yaw)
         );
 
+        app.globe_yaw = app.globe_target_yaw;
+        app.last_animation_frame = start + Duration::from_millis(200);
         let focused_yaw = app.globe_yaw;
+        app.advance_globe_animation(start + IDLE_DELAY - Duration::from_millis(1));
+        assert_eq!(app.globe_yaw, focused_yaw);
         app.advance_globe_animation(start + IDLE_DELAY + Duration::from_secs(1));
         assert_ne!(app.globe_yaw, focused_yaw);
         assert_eq!(app.selected_region_id, selected);
+
+        app.record_input(start + IDLE_DELAY + Duration::from_secs(1));
+        let rotating_yaw = app.globe_yaw;
+        app.advance_globe_animation(start + IDLE_DELAY + Duration::from_millis(1_200));
+        assert!(
+            angle_distance(app.globe_yaw, app.globe_target_yaw)
+                < angle_distance(rotating_yaw, app.globe_target_yaw)
+        );
+
+        app.pending_action = Some(ContextAction::Recall);
+        let confirmation_yaw = app.globe_yaw;
+        app.advance_globe_animation(start + IDLE_DELAY * 3);
+        assert_eq!(app.globe_yaw, confirmation_yaw);
+    }
+
+    #[test]
+    fn workspace_cycle_and_overview_selection_stay_bounded() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let target = engine
+            .planet()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.within_scout_range && !region.core)
+            .unwrap();
+        engine.deploy_scout(&target.id);
+
+        let mut app = App::default();
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.cycle_workspace(false);
+        assert_eq!(app.workspace, Workspace::Overview);
+        app.move_overview_selection(1);
+        assert_eq!(app.overview_selection, 0);
+        app.open_selected_overview_region();
+        assert_eq!(app.workspace, Workspace::Planet);
+        assert_eq!(app.selected_region_id.as_deref(), Some(target.id.as_str()));
+
+        app.cycle_workspace(true);
+        assert_eq!(app.workspace, Workspace::System);
+        app.cycle_workspace(true);
+        assert_eq!(app.workspace, Workspace::Overview);
     }
 }

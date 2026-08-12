@@ -256,27 +256,33 @@ the player's curiosity without stating what a discovery will mean in advance.
 ## 9. Terminal Interface
 
 The target TUI is keyboard-first. Mouse support may be added later, but no core action
-may require it. Arrow keys move focus or rotate the globe, Enter opens or confirms,
-Esc moves back, Tab changes panel, and visible single-key actions handle frequent
-operations. Every screen provides contextual help, and destructive actions require a
-clear confirmation that names what will be lost.
+may require it. Arrow keys move selection, Enter invokes or confirms the contextual
+primary action, Esc cancels, Tab changes workspace, and visible single-key actions
+handle frequent operations. Every screen provides contextual help, and destructive
+actions require a clear confirmation that names what will be lost.
 
 ### Primary workspaces
 
-- **Planet:** globe, regions, coverage, routes, probes, bases, and alerts.
-- **Operations:** active and proposed expeditions, loadouts, risk, cargo, and events.
-- **Industry:** extraction, energy, refining, transport, construction, and bottlenecks.
+- **Planet:** globe, compact stores and fabrication status, and a persistent
+  selected-region inspector that prioritizes complete local operation progress; all
+  region-specific deployments, recalls, extraction, and construction originate here.
+- **Overview:** deeper planet-wide materials, energy, fleet, active operations,
+  construction, routes, bottlenecks, and reports, with navigation back to associated
+  regions.
+- **System:** connection, daemon telemetry, diagnostics, and engine events.
 - **Research:** available directions, requirements, active work, and completed knowledge.
 - **Archive:** discoveries, recovered evidence, interpretations, and major history.
 
-These workspaces are conceptual navigation destinations, not a commitment to specific
-function keys. Common status information—connection, simulation state, energy health,
-urgent alerts, and current objective—should remain visible across them.
+Overview is an aggregate inspection surface, not a duplicate command surface. Common
+status information—connection, simulation state, energy health, urgent alerts, and
+current objective—should remain visible across workspaces.
 
 ### Presentation requirements
 
 - Animate rotation, signals, paths, scans, and production sparingly enough to remain
   legible and efficient.
+- Start automatic globe rotation after 30 seconds without player input, stop it on the
+  next input, and never let it change region selection or authoritative state.
 - Use restrained cyan and amber styling with semantic success, warning, and failure
   states; never rely on color alone.
 - Support Unicode by default and preserve an equivalent `--ascii` representation.
@@ -461,10 +467,10 @@ the repository no longer presents circuit assembly as the product direction.
 
 ### Phase 1: Globe and first expeditions
 
-**Status: in progress.** The first survey slice implements a 24-region globe, staged
-fog knowledge, one local-range scout, daemon-timed travel and surveying, hold and
-recall, mission reports, and durable terrain and environmental discoveries. Broader
-mission preparation and additional scout roles remain planned.
+**Status: implemented.** The first survey slice implements a 24-region globe, staged
+fog knowledge, one protected local-range scout, daemon-timed travel and surveying,
+hold and recall, mission reports, and durable terrain and environmental discoveries.
+Broader mission preparation and additional scout roles remain planned.
 
 - Add the regional world model, fog states, rotating globe, keyboard navigation, and
   region details.
@@ -475,6 +481,12 @@ mission preparation and additional scout roles remain planned.
 watch its progress, and permanently reveal useful planetary information.
 
 ### Phase 2: Geological economy
+
+**Status: in progress.** The first alpha slice implements deterministic hidden deposits,
+three refined material families, one risky four-unit extraction probe, permanent probe
+and cargo loss with guaranteed rebuilding, automatic core refining, and one constructed
+relay that extends survey reach. Energy, hauling, loadouts, route automation, and general
+construction remain planned.
 
 - Add varied deposits, geological confidence, local energy, extraction, cargo,
   transport, refining, and construction materials.

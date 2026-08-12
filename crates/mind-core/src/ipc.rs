@@ -1,9 +1,10 @@
 use crate::{
     protocol::{
-        self, decode_result, method, CompleteOnboardingParams, DeployScoutParams,
-        DiagnosticPulseResult, OnboardingCompletionResult, PingResult, PlanetActionResult,
-        PlanetNotification, PlanetSnapshot, ProtocolError, RpcIncoming, StatusNotification,
-        StatusSnapshot, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, decode_result, method, CompleteOnboardingParams, ConstructRelayParams,
+        DeployExtractorParams, DeployScoutParams, DiagnosticPulseResult,
+        OnboardingCompletionResult, PingResult, PlanetActionResult, PlanetNotification,
+        PlanetSnapshot, ProtocolError, RpcIncoming, StatusNotification, StatusSnapshot,
+        SubscribeResult, UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
 };
@@ -27,7 +28,7 @@ pub struct IpcClient {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcNotification {
     Status(StatusNotification),
-    Planet(PlanetNotification),
+    Planet(Box<PlanetNotification>),
 }
 
 impl IpcClient {
@@ -112,6 +113,26 @@ impl IpcClient {
         self.call(method::RECALL_SCOUT, None).await
     }
 
+    pub async fn deploy_extractor(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(DeployExtractorParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::DEPLOY_EXTRACTOR, Some(params)).await
+    }
+
+    pub async fn construct_relay(
+        &mut self,
+        region_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(ConstructRelayParams {
+            region_id: region_id.into(),
+        })?;
+        self.call(method::CONSTRUCT_RELAY, Some(params)).await
+    }
+
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {
         loop {
             if let IpcNotification::Status(status) = self.next_notification().await? {
@@ -166,9 +187,9 @@ impl IpcClient {
             method::STATUS_CHANGED => Ok(Some(IpcNotification::Status(serde_json::from_value(
                 params,
             )?))),
-            method::PLANET_CHANGED => Ok(Some(IpcNotification::Planet(serde_json::from_value(
-                params,
-            )?))),
+            method::PLANET_CHANGED => Ok(Some(IpcNotification::Planet(Box::new(
+                serde_json::from_value(params)?,
+            )))),
             _ => Ok(None),
         }
     }

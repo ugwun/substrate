@@ -270,7 +270,7 @@ mod tests {
                 .await
                 .map_err(anyhow::Error::msg)?
                 .protocol_version,
-            4
+            5
         );
         assert_eq!(
             server

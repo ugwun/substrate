@@ -90,7 +90,7 @@ async fn run_dashboard(
                         app.apply_snapshot(snapshot, std::time::Instant::now());
                     }
                     Some(ConnectionUpdate::Planet(planet)) => {
-                        app.apply_planet(planet, std::time::Instant::now());
+                        app.apply_planet(*planet, std::time::Instant::now());
                     }
                     Some(ConnectionUpdate::Disconnected(error)) => app.disconnected(error),
                     Some(ConnectionUpdate::DiagnosticCompleted(result)) => {
@@ -204,37 +204,96 @@ async fn handle_key(
         }
         KeyCode::Tab => app.cycle_workspace(key.modifiers.contains(event::KeyModifiers::SHIFT)),
         KeyCode::BackTab => app.cycle_workspace(true),
-        KeyCode::Esc if app.detail_open => app.close_detail(),
-        KeyCode::Left if app.workspace == Workspace::Planet && !app.detail_open => {
+        KeyCode::Esc if app.pending_action.is_some() => app.cancel_confirmation_action(),
+        KeyCode::Enter if app.pending_action.is_some() => match app.pending_action.clone() {
+            Some(ContextAction::Extract(region_id)) => {
+                commands
+                    .send(ConnectionCommand::DeployExtractor(region_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::ConstructRelay(region_id)) => {
+                commands
+                    .send(ConnectionCommand::ConstructRelay(region_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            _ => app.cancel_confirmation_action(),
+        },
+        _ if app.pending_action.is_some() => {}
+        KeyCode::Left if app.workspace == Workspace::Planet => {
             app.move_selection(0, -1);
         }
-        KeyCode::Right if app.workspace == Workspace::Planet && !app.detail_open => {
+        KeyCode::Right if app.workspace == Workspace::Planet => {
             app.move_selection(0, 1);
         }
-        KeyCode::Up if app.workspace == Workspace::Planet && !app.detail_open => {
+        KeyCode::Up if app.workspace == Workspace::Planet => {
             app.move_selection(-1, 0);
         }
-        KeyCode::Down if app.workspace == Workspace::Planet && !app.detail_open => {
+        KeyCode::Down if app.workspace == Workspace::Planet => {
             app.move_selection(1, 0);
         }
-        KeyCode::Enter if app.workspace == Workspace::Planet && !app.detail_open => {
-            app.open_detail();
+        KeyCode::PageUp if app.workspace == Workspace::Planet => {
+            app.scroll_region_panel(-6);
         }
-        KeyCode::Enter if app.workspace == Workspace::Planet && app.detail_open => {
-            if let Some(ContextAction::Deploy(region_id)) = app.context_action() {
+        KeyCode::PageDown if app.workspace == Workspace::Planet => {
+            app.scroll_region_panel(6);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Planet => match app.primary_region_action() {
+            Some(ContextAction::Deploy(region_id)) => {
+                commands
+                    .send(ConnectionCommand::DeployScout(region_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::Recall) => {
+                commands
+                    .send(ConnectionCommand::RecallScout)
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::Extract(region_id)) => {
+                app.request_confirmation(ContextAction::Extract(region_id));
+            }
+            Some(ContextAction::ConstructRelay(region_id)) => {
+                app.request_confirmation(ContextAction::ConstructRelay(region_id));
+            }
+            _ => {}
+        },
+        KeyCode::Char('s') if app.workspace == Workspace::Planet => {
+            if let Some(ContextAction::Deploy(region_id)) = app.scout_action() {
                 commands
                     .send(ConnectionCommand::DeployScout(region_id))
                     .await
                     .context("connection worker stopped")?;
             }
         }
-        KeyCode::Enter if app.workspace == Workspace::Operations => {
-            if matches!(app.context_action(), Some(ContextAction::Recall)) {
+        KeyCode::Char('x') if app.workspace == Workspace::Planet => {
+            if let Some(ContextAction::Extract(region_id)) = app.extraction_action() {
+                app.request_confirmation(ContextAction::Extract(region_id));
+            }
+        }
+        KeyCode::Char('b') if app.workspace == Workspace::Planet => {
+            if let Some(ContextAction::ConstructRelay(region_id)) = app.construction_action() {
+                app.request_confirmation(ContextAction::ConstructRelay(region_id));
+            }
+        }
+        KeyCode::Char('r') if app.workspace == Workspace::Planet => {
+            if matches!(app.scout_recall_action(), Some(ContextAction::Recall)) {
                 commands
                     .send(ConnectionCommand::RecallScout)
                     .await
                     .context("connection worker stopped")?;
             }
+        }
+        KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Overview => {
+            app.move_overview_selection(-1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::Overview => {
+            app.move_overview_selection(1);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Overview => {
+            app.open_selected_overview_region();
         }
         KeyCode::Char('d')
             if app.workspace == Workspace::System
@@ -318,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planet_and_operations_enter_keys_send_typed_actions() {
+    async fn planet_region_keys_send_typed_actions() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
         let mut app = App::default();
@@ -336,14 +395,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(app.detail_open);
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &commands,
-        )
-        .await
-        .unwrap();
         assert!(matches!(
             received.recv().await,
             Some(ConnectionCommand::DeployScout(region)) if region == target
@@ -351,10 +402,9 @@ mod tests {
 
         engine.deploy_scout(&target);
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
-        app.workspace = Workspace::Operations;
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
             &commands,
         )
         .await
@@ -363,5 +413,36 @@ mod tests {
             received.recv().await,
             Some(ConnectionCommand::RecallScout)
         ));
+    }
+
+    #[tokio::test]
+    async fn overview_enter_returns_to_the_selected_operation_region() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let target = engine
+            .planet()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.within_scout_range && !region.core)
+            .unwrap();
+        engine.deploy_scout(&target.id);
+
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.workspace = Workspace::Overview;
+        let (commands, mut received) = mpsc::channel(1);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(app.workspace, Workspace::Planet);
+        assert_eq!(app.selected_region_id.as_deref(), Some(target.id.as_str()));
+        assert!(received.try_recv().is_err());
     }
 }

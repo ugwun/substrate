@@ -4,7 +4,7 @@ Substrate is an atmospheric terminal game about an awakening machine intelligenc
 
 ![Animated Substrate terminal gameplay showing the rotating regional globe, region inspection, and scout deployment](docs/assets/substrate-terminal-demo.gif)
 
-The repository currently implements the Phase 0 foundation and the first playable Phase 1 survey slice: daemon-owned state, durable graphical onboarding, a lit orthographic regional globe with smooth idle rotation, fog and survey knowledge, one timed scout deployment, diagnostic telemetry, native MCP access, managed daemon lifecycle, and an attach-only Ratatui interface with the Solarized-derived Substrate Dark theme.
+The repository currently implements a first playable alpha: graphical onboarding; a lit, smoothly rotating regional globe; fog and surveys; deterministic geological deposits; concurrent survey and extraction probes; permanent extraction loss with guaranteed rebuilding; automatic refining; construction of a range-extending relay; and a persistent milestone reached by surveying beyond the core's original range. All progression remains daemon-owned and is presented through the attach-only Substrate Dark TUI.
 
 ## Prerequisites
 
@@ -45,7 +45,7 @@ The IPC listener defaults to `127.0.0.1:7776`. The MCP Streamable HTTP endpoint 
 
 Both listeners only accept loopback addresses. Authoritative game state is atomically persisted as `game_state.json` beneath the platform-local Substrate data directory. Simulation time advances only while the daemon runs.
 
-The current game uses save schema 3. Schema-1 and schema-2 saves are intentionally replaced with fresh graphical onboarding, a newly generated 24-region planet, and one starter scout; malformed and future-version saves still stop startup with an error.
+The current game uses save schema 4. Schema-3 regional saves migrate deterministically into the alpha economy; schema-1 and schema-2 saves are intentionally replaced with fresh graphical onboarding. Malformed and future-version saves still stop startup with an error.
 
 ## Terminal interface
 
@@ -58,25 +58,30 @@ Global controls:
 - `q` or Ctrl-C: detach without stopping the daemon
 - `r`: reconnect immediately while disconnected
 - `?`: show help
-- `Tab` or Shift-Tab: cycle Planet, Operations, and System workspaces
+- `Tab` or Shift-Tab: cycle Planet, Overview, and System workspaces
 
 Planet controls:
 
 - arrow keys: navigate the regional globe
-- Enter: open region details and deploy the scout when available
-- Esc: close region details
+- Enter: use the selected region's primary available action
+- `s`: deploy the protected survey scout
+- `x`: prepare a risky extraction from a surveyed deposit
+- `b`: prepare relay construction at a surveyed site once materials are ready
+- `r`: recall the scout when its active operation belongs to the selected region
+- Page Up/Page Down: scroll the persistent region inspector
+- Esc: cancel an extraction or construction confirmation
 
-The selected region eases into view after navigation. When left idle, the globe rotates without changing the selected region or authoritative world state.
+The selected region eases into view after navigation. After 30 seconds without keyboard input, the globe begins rotating without changing the selected region or authoritative world state; the next input immediately takes control.
 
-Operations uses Enter to recall an outbound, surveying, or holding scout. System retains `d` for a diagnostic pulse, arrow keys or `j`/`k` for event scrolling, Page Up/Page Down and Home/End for event navigation, and `f` for follow mode.
+Planet's always-visible inspector puts active work in the selected region first. It shows mission identifiers, phases, progress, remaining time, extraction exposure and capacity, local construction, core processing or rebuilding, the latest local report, discovered facts, local structures and probes, available actions, and a separate explanation for each blocked action. A persistent header line summarizes gathered and refined stores plus current fabrication. Risky extraction and material-consuming construction require confirmation in the inspector while the globe remains visible. Overview provides the deeper planet-wide breakdown: per-material raw and refined quantities, processing, fleet and network status, every active field operation, risk and capacity, construction, and recent reports. Use arrows to select an Overview entry and Enter to return to its region on Planet; Overview never dispatches regional commands. System retains `d` for a diagnostic pulse, arrow keys or `j`/`k` for event scrolling, Page Up/Page Down and Home/End for event navigation, and `f` for follow mode.
 
-The starting scout can reach regions up to two graph hops from the core. Arrival permanently detects broad terrain; completing the focused survey records temperature and atmospheric severity, then leaves the scout holding the region under continuous observation. Recall returns the scout to the core without erasing surveyed knowledge. Mission time advances only while the daemon runs.
+The starting scout can initially reach regions up to two graph hops from the core. Arrival permanently detects broad terrain; completing a focused survey records conditions, deposits, and honest extraction risk. The extraction probe carries four units and may be permanently lost with its cargo at the displayed 5%, 15%, or 30% risk; the core then rebuilds it in 60 seconds so progression cannot softlock. Returned material refines automatically. A relay costs 8 structural, 6 conductive, and 6 silicate units, takes 90 seconds to construct, and extends reach by two hops. Mission and production time advances only while the daemon runs.
 
 Unicode and the Substrate Dark truecolor theme are enabled by default. Its deep blue-black canvas, layered teal surfaces, restrained cyan focus, amber actions, and explicit semantic states remain consistent across onboarding and every workspace. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color without removing the symbol, border, text, or modifier hierarchy.
 
 ## IPC contract
 
-IPC protocol version 4 uses newline-delimited JSON-RPC 2.0 over loopback TCP. In addition to lifecycle, status, onboarding, and diagnostics, it provides separate revisioned planet query/subscription methods and typed scout deployment and recall. Planet DTOs omit undiscovered terrain and conditions. `mind-core` provides the shared DTOs and reusable client.
+IPC protocol version 5 uses newline-delimited JSON-RPC 2.0 over loopback TCP. In addition to lifecycle, status, onboarding, and diagnostics, it provides separate revisioned planet query/subscription methods and typed scout deployment, recall, extraction, and relay-construction operations. Planet DTOs omit undiscovered terrain, deposits, and accepted random outcomes. `mind-core` provides the shared DTOs and reusable client.
 
 ## MCP access
 
@@ -111,6 +116,6 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-daemon`: simulation loop, local JSON-RPC server, persistence checkpoints, and embedded MCP HTTP lifecycle
 - `mind-cli`: managed daemon lifecycle and status inspection
 - `mind-mcp`: shared MCP tools, embedded HTTP service, and stdio bridge
-- `mind-tui`: attach-only graphical onboarding and Planet, Operations, and System workspaces
+- `mind-tui`: attach-only graphical onboarding and Planet, Overview, and System workspaces
 
 See [`GAME_PLAN.md`](GAME_PLAN.md) for the public game vision and future roadmap. [`AGENTS.md`](AGENTS.md) defines repository conventions.

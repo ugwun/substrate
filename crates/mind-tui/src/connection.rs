@@ -15,6 +15,8 @@ pub enum ConnectionCommand {
     CompleteOnboarding([u8; 3]),
     DeployScout(String),
     RecallScout,
+    DeployExtractor(String),
+    ConstructRelay(String),
     Retry,
     Detach,
 }
@@ -23,6 +25,8 @@ pub enum ConnectionCommand {
 pub enum PlanetActionKind {
     Deploy,
     Recall,
+    Extract,
+    Construct,
 }
 
 #[derive(Debug)]
@@ -30,7 +34,7 @@ pub enum ConnectionUpdate {
     Connecting,
     Connected,
     Snapshot(StatusSnapshot),
-    Planet(PlanetSnapshot),
+    Planet(Box<PlanetSnapshot>),
     Disconnected(String),
     DiagnosticCompleted(DiagnosticPulseResult),
     DiagnosticFailed(String),
@@ -135,7 +139,7 @@ pub async fn run(
                         Ok(IpcNotification::Planet(notification))
                             if Some(notification.subscription_id) == planet_subscription =>
                         {
-                            if updates.send(ConnectionUpdate::Planet(notification.planet)).await.is_err() {
+                            if updates.send(ConnectionUpdate::Planet(Box::new(notification.planet))).await.is_err() {
                                 return;
                             }
                         }
@@ -192,7 +196,7 @@ pub async fn run(
                                     }
                                     match client.planet().await {
                                         Ok(planet) => {
-                                            if updates.send(ConnectionUpdate::Planet(planet)).await.is_err() {
+                                            if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() {
                                                 return;
                                             }
                                         }
@@ -210,7 +214,43 @@ pub async fn run(
                                     }
                                     match client.planet().await {
                                         Ok(planet) => {
-                                            if updates.send(ConnectionUpdate::Planet(planet)).await.is_err() {
+                                            if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::DeployExtractor(region_id)) => {
+                            match client.deploy_extractor(region_id).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Extract, result)).await.is_err() {
+                                        return;
+                                    }
+                                    match client.planet().await {
+                                        Ok(planet) => {
+                                            if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::ConstructRelay(region_id)) => {
+                            match client.construct_relay(region_id).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Construct, result)).await.is_err() {
+                                        return;
+                                    }
+                                    match client.planet().await {
+                                        Ok(planet) => {
+                                            if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() {
                                                 return;
                                             }
                                         }
@@ -255,7 +295,7 @@ async fn attach_planet(
         .map_err(|error| error.to_string())?;
     let planet = client.planet().await.map_err(|error| error.to_string())?;
     updates
-        .send(ConnectionUpdate::Planet(planet))
+        .send(ConnectionUpdate::Planet(Box::new(planet)))
         .await
         .map_err(|_| "TUI update channel closed".to_owned())?;
     Ok(subscription_id)

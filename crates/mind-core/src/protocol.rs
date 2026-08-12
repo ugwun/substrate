@@ -22,6 +22,8 @@ pub mod method {
     pub const UNSUBSCRIBE_PLANET: &str = "mind.unsubscribe_planet";
     pub const DEPLOY_SCOUT: &str = "mind.deploy_scout";
     pub const RECALL_SCOUT: &str = "mind.recall_scout";
+    pub const DEPLOY_EXTRACTOR: &str = "mind.deploy_extractor";
+    pub const CONSTRUCT_RELAY: &str = "mind.construct_relay";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
     pub const PLANET_CHANGED: &str = "mind.planet_changed";
 }
@@ -65,11 +67,19 @@ pub enum EngineEventKind {
     DiagnosticPulse,
     OnboardingCompleted,
     SaveReset,
+    SaveMigrated,
     ScoutDeployed,
     RegionDetected,
     SurveyCompleted,
     ScoutRecallRequested,
     ScoutReturned,
+    ExtractorDeployed,
+    ExtractionCompleted,
+    ExtractorLost,
+    ExtractorRebuilt,
+    RelayConstructionStarted,
+    RelayActivated,
+    AlphaMilestoneCompleted,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
@@ -138,6 +148,50 @@ pub enum MissionReportOutcome {
     SurveyCompleted,
     Recalled,
     Returned,
+    ExtractionCompleted,
+    ExtractorLost,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    Structural,
+    Conductive,
+    Silicate,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ResourceStock {
+    pub structural: u32,
+    pub conductive: u32,
+    pub silicate: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Moderate,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractorState {
+    Ready,
+    Outbound,
+    Extracting,
+    Returning,
+    Rebuilding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DepositSnapshot {
+    pub resource: ResourceKind,
+    pub remaining: u32,
+    pub risk: RiskLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -163,6 +217,41 @@ pub struct RegionSnapshot {
     pub confidence: Option<SurveyConfidence>,
     pub hop_distance_from_core: u8,
     pub within_scout_range: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit: Option<DepositSnapshot>,
+    pub relay: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ExtractionProbeSnapshot {
+    pub designation: String,
+    pub state: ExtractorState,
+    pub rebuild_remaining_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActiveExtractionSnapshot {
+    pub mission_id: u64,
+    pub target_region_id: String,
+    pub phase: ExtractorState,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+    pub risk: RiskLevel,
+    pub cargo_capacity: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActiveConstructionSnapshot {
+    pub region_id: String,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ObjectiveSnapshot {
+    pub title: String,
+    pub guidance: String,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -197,10 +286,28 @@ pub struct PlanetSnapshot {
     pub scout: ScoutSnapshot,
     pub active_mission: Option<ActiveMissionSnapshot>,
     pub recent_reports: Vec<MissionReport>,
+    pub extractor: ExtractionProbeSnapshot,
+    pub active_extraction: Option<ActiveExtractionSnapshot>,
+    pub raw_inventory: ResourceStock,
+    pub refined_inventory: ResourceStock,
+    pub refining_remaining_ms: u64,
+    pub active_construction: Option<ActiveConstructionSnapshot>,
+    pub relay_region_id: Option<String>,
+    pub objective: ObjectiveSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct DeployScoutParams {
+    pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DeployExtractorParams {
+    pub region_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConstructRelayParams {
     pub region_id: String,
 }
 
@@ -382,7 +489,7 @@ mod tests {
         let params = StatusNotification {
             subscription_id: Uuid::nil(),
             status: StatusSnapshot {
-                protocol_version: 4,
+                protocol_version: 5,
                 daemon_version: "0.1.0".into(),
                 pid: 1,
                 health: HealthState::Ready,

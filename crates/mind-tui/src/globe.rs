@@ -148,6 +148,9 @@ pub fn render(
         .collect::<Vec<_>>();
 
     draw_mission_path(&mut cells, planet, options, center_x, center_y, radius);
+    draw_extraction_path(&mut cells, planet, options, center_x, center_y, radius);
+    draw_construction_path(&mut cells, planet, options, center_x, center_y, radius);
+    draw_relay_pulse(&mut cells, planet, options, center_x, center_y, radius);
     draw_region_markers(
         &mut cells,
         planet,
@@ -354,6 +357,18 @@ fn draw_region_markers(
         .active_mission
         .as_ref()
         .and_then(|mission| find_region(planet, &mission.target_region_id));
+    let extraction_target = planet
+        .active_extraction
+        .as_ref()
+        .and_then(|mission| find_region(planet, &mission.target_region_id));
+    let construction_target = planet
+        .active_construction
+        .as_ref()
+        .and_then(|construction| find_region(planet, &construction.region_id));
+    let relay = planet
+        .relay_region_id
+        .as_ref()
+        .and_then(|id| find_region(planet, id));
 
     if let Some(core) = planet.regions.iter().find(|region| region.core) {
         place_marker(
@@ -362,6 +377,56 @@ fn draw_region_markers(
             "◇",
             "o",
             options.theme.blue,
+            false,
+            options,
+            center_x,
+            center_y,
+            radius,
+        );
+    }
+    if let Some(relay) = relay {
+        place_marker(
+            cells,
+            relay,
+            if (options.phase * 3.0).floor() as i64 % 2 == 0 {
+                "◈"
+            } else {
+                "◇"
+            },
+            "R",
+            options.theme.success,
+            false,
+            options,
+            center_x,
+            center_y,
+            radius,
+        );
+    }
+    if let Some(target) = construction_target {
+        place_marker(
+            cells,
+            target,
+            if (options.phase * 4.0).floor() as i64 % 2 == 0 {
+                "✦"
+            } else {
+                "·"
+            },
+            "B",
+            options.theme.amber,
+            false,
+            options,
+            center_x,
+            center_y,
+            radius,
+        );
+    }
+    if let Some(target) = extraction_target {
+        place_marker(
+            cells,
+            target,
+            "▣",
+            "X",
+            options.theme.warning,
             false,
             options,
             center_x,
@@ -502,6 +567,130 @@ fn draw_mission_path(
     let (Some(start), Some(end)) = endpoints else {
         return;
     };
+    draw_route_between(
+        cells, start, end, options, center_x, center_y, radius, false,
+    );
+}
+
+fn draw_extraction_path(
+    cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
+    options: GlobeRenderOptions,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+) {
+    let Some(mission) = &planet.active_extraction else {
+        return;
+    };
+    if !matches!(
+        mission.phase,
+        mind_core::protocol::ExtractorState::Outbound
+            | mind_core::protocol::ExtractorState::Returning
+    ) {
+        return;
+    }
+    let Some(core) = planet.regions.iter().find(|region| region.core) else {
+        return;
+    };
+    let Some(target) = find_region(planet, &mission.target_region_id) else {
+        return;
+    };
+    let (start, end) = if mission.phase == mind_core::protocol::ExtractorState::Returning {
+        (target, core)
+    } else {
+        (core, target)
+    };
+    draw_route_between(cells, start, end, options, center_x, center_y, radius, true);
+}
+
+fn draw_construction_path(
+    cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
+    options: GlobeRenderOptions,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+) {
+    let Some(construction) = &planet.active_construction else {
+        return;
+    };
+    let Some(core) = planet.regions.iter().find(|region| region.core) else {
+        return;
+    };
+    let Some(target) = find_region(planet, &construction.region_id) else {
+        return;
+    };
+    draw_route_between(
+        cells, core, target, options, center_x, center_y, radius, false,
+    );
+}
+
+fn draw_relay_pulse(
+    cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
+    options: GlobeRenderOptions,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+) {
+    let Some(relay) = planet
+        .relay_region_id
+        .as_ref()
+        .and_then(|id| find_region(planet, id))
+    else {
+        return;
+    };
+    let (latitude, longitude) = region_center(relay);
+    let Some(point) = project(latitude, longitude, options.yaw, options.pitch) else {
+        return;
+    };
+    let origin_x = (center_x + point.x * radius).round() as isize;
+    let origin_y = ((center_y - point.y * radius).round() as isize).div_euclid(2);
+    let ring = 1 + (options.phase.fract() * 4.0).floor() as isize;
+    let offsets = [
+        (-ring, 0),
+        (ring, 0),
+        (0, -ring),
+        (0, ring),
+        (-ring, -ring / 2),
+        (ring, ring / 2),
+        (-ring, ring / 2),
+        (ring, -ring / 2),
+    ];
+    for (offset_x, offset_y) in offsets {
+        let x = origin_x + offset_x;
+        let y = origin_y + offset_y;
+        if y < 0 || y as usize >= cells.len() || x < 0 || x as usize >= cells[0].len() {
+            continue;
+        }
+        let cell = &mut cells[y as usize][x as usize];
+        *cell = Cell {
+            symbol: Cow::Borrowed(if options.ascii { "." } else { "·" }),
+            style: overlay_style(
+                cell,
+                if options.no_color {
+                    Color::Reset
+                } else {
+                    options.theme.cyan
+                },
+                false,
+            ),
+        };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_route_between(
+    cells: &mut [Vec<Cell>],
+    start: &RegionSnapshot,
+    end: &RegionSnapshot,
+    options: GlobeRenderOptions,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    extraction: bool,
+) {
     let start_vector = sphere_vector(region_center(start));
     let end_vector = sphere_vector(region_center(end));
     let pulse = options.phase.fract();
@@ -528,13 +717,23 @@ fn draw_mission_path(
             } else if is_pulse {
                 options.theme.amber
             } else {
-                options.theme.cyan
+                if extraction {
+                    options.theme.warning
+                } else {
+                    options.theme.cyan
+                }
             };
             let cell = &mut cells[y as usize][x as usize];
             if options.ascii || options.no_color {
                 let style = overlay_style(cell, foreground, is_pulse);
                 *cell = Cell {
-                    symbol: Cow::Borrowed(if is_pulse { "*" } else { "~" }),
+                    symbol: Cow::Borrowed(if is_pulse {
+                        "*"
+                    } else if extraction {
+                        ":"
+                    } else {
+                        "~"
+                    }),
                     style,
                 };
             } else {

@@ -71,8 +71,14 @@ impl MindEngine {
         );
         if disposition == LoadDisposition::PreviousReset {
             engine.record_event(
-                EngineEventKind::SaveReset,
+                EngineEventKind::SaveMigrated,
                 "Previous save reset for the regional planet model",
+            );
+        }
+        if disposition == LoadDisposition::PreviousMigrated {
+            engine.record_event(
+                EngineEventKind::SaveReset,
+                "Save upgraded for the first expansion economy",
             );
         }
         Ok(engine)
@@ -132,6 +138,26 @@ impl MindEngine {
                             GameAdvanceEvent::ScoutReturned => (
                                 EngineEventKind::ScoutReturned,
                                 "Scout returned to the core",
+                            ),
+                            GameAdvanceEvent::ExtractionCompleted => (
+                                EngineEventKind::ExtractionCompleted,
+                                "Extractor returned material to the core",
+                            ),
+                            GameAdvanceEvent::ExtractorLost => (
+                                EngineEventKind::ExtractorLost,
+                                "Extractor and cargo lost; core rebuild initiated",
+                            ),
+                            GameAdvanceEvent::ExtractorRebuilt => (
+                                EngineEventKind::ExtractorRebuilt,
+                                "Core completed a replacement extractor",
+                            ),
+                            GameAdvanceEvent::RelayActivated => (
+                                EngineEventKind::RelayActivated,
+                                "Regional relay activated; operational reach expanded",
+                            ),
+                            GameAdvanceEvent::AlphaMilestoneCompleted => (
+                                EngineEventKind::AlphaMilestoneCompleted,
+                                "Extended reach proven by a completed survey",
                             ),
                         };
                         self.record_event(kind, message);
@@ -328,6 +354,72 @@ impl MindEngine {
         self.record_event(
             EngineEventKind::ScoutRecallRequested,
             "Scout recall requested",
+        );
+        result
+    }
+
+    pub fn deploy_extractor(&self, region_id: &str) -> PlanetActionResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = state.clone();
+        let mut result = candidate.deploy_extractor(region_id);
+        if !result.ok {
+            return result;
+        }
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+        self.record_event(
+            EngineEventKind::ExtractorDeployed,
+            "Extraction deployment launched",
+        );
+        result
+    }
+
+    pub fn construct_relay(&self, region_id: &str) -> PlanetActionResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = state.clone();
+        let mut result = candidate.construct_relay(region_id);
+        if !result.ok {
+            return result;
+        }
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                result.ok = false;
+                result.code = Some("persistence_failed".into());
+                return result;
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+        self.record_event(
+            EngineEventKind::RelayConstructionStarted,
+            "Regional relay construction started",
         );
         result
     }

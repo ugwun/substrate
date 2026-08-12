@@ -8,4 +8,4 @@ pub mod protocol;
 pub mod runtime;
 
 pub const DAEMON_BINARY: &str = "mind-daemon";
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;

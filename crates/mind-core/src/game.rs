@@ -1,7 +1,9 @@
 use crate::protocol::{
-    ActiveMissionSnapshot, AtmosphericSeverity, MissionReport, MissionReportOutcome,
-    OnboardingCompletionResult, OnboardingSnapshot, PlanetActionResult, PlanetSnapshot,
-    RegionKnowledge, RegionPosition, RegionSnapshot, ScoutSnapshot, ScoutState, SurveyConfidence,
+    ActiveConstructionSnapshot, ActiveExtractionSnapshot, ActiveMissionSnapshot,
+    AtmosphericSeverity, DepositSnapshot, ExtractionProbeSnapshot, ExtractorState, MissionReport,
+    MissionReportOutcome, ObjectiveSnapshot, OnboardingCompletionResult, OnboardingSnapshot,
+    PlanetActionResult, PlanetSnapshot, RegionKnowledge, RegionPosition, RegionSnapshot,
+    ResourceKind, ResourceStock, RiskLevel, ScoutSnapshot, ScoutState, SurveyConfidence,
     TemperatureBand, TerrainClass,
 };
 use chrono::{DateTime, Utc};
@@ -12,7 +14,8 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use uuid::Uuid;
 
-const SAVE_SCHEMA_VERSION: u32 = 3;
+const SAVE_SCHEMA_VERSION: u32 = 4;
+const MIGRATABLE_SCHEMA_VERSION: u32 = 3;
 const RESETTABLE_SCHEMA_VERSIONS: [u32; 2] = [1, 2];
 const WORLD_GENERATION_VERSION: u32 = 1;
 const LATITUDE_BANDS: u8 = 4;
@@ -24,6 +27,17 @@ const SCOUT_RANGE_HOPS: u8 = 2;
 const TRAVEL_MS_PER_HOP: u64 = 15_000;
 const SURVEY_MS: u64 = 30_000;
 const REPORT_CAPACITY: usize = 64;
+const EXTRACTION_MS: u64 = 30_000;
+const EXTRACTOR_REBUILD_MS: u64 = 60_000;
+const EXTRACTION_CAPACITY: u32 = 4;
+const REFINING_MS_PER_UNIT: u64 = 5_000;
+const RELAY_CONSTRUCTION_MS: u64 = 90_000;
+const RELAY_RANGE_HOPS: u8 = 2;
+const RELAY_COST: ResourceStock = ResourceStock {
+    structural: 8,
+    conductive: 6,
+    silicate: 6,
+};
 
 pub const ONBOARDING_BAND_SLOTS: u8 = 12;
 
@@ -37,6 +51,26 @@ pub struct GameState {
     active_mission: Option<MissionState>,
     recent_reports: Vec<MissionReport>,
     next_mission_id: u64,
+    #[serde(default)]
+    active_extraction: Option<ExtractionMissionState>,
+    #[serde(default = "extractor_available_default")]
+    extractor_available: bool,
+    #[serde(default)]
+    extractor_rebuild_remaining_ms: u64,
+    #[serde(default)]
+    raw_inventory: ResourceStock,
+    #[serde(default)]
+    refined_inventory: ResourceStock,
+    #[serde(default)]
+    refining_remaining_ms: u64,
+    #[serde(default)]
+    active_construction: Option<ConstructionState>,
+    #[serde(default)]
+    relay_region_id: Option<String>,
+    #[serde(default)]
+    alpha_complete: bool,
+    #[serde(default)]
+    random_state: u64,
     #[serde(skip)]
     dirty: bool,
     #[serde(skip)]
@@ -62,6 +96,15 @@ struct RegionState {
     temperature: TemperatureBand,
     atmospheric_severity: AtmosphericSeverity,
     knowledge: RegionKnowledge,
+    #[serde(default)]
+    deposit: Option<DepositState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DepositState {
+    resource: ResourceKind,
+    remaining: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +127,32 @@ struct MissionState {
     survey_completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ExtractionMissionState {
+    mission_id: u64,
+    target_region_id: String,
+    phase: ExtractorState,
+    remaining_ms: u64,
+    phase_total_ms: u64,
+    travel_ms: u64,
+    risk: RiskLevel,
+    will_fail: bool,
+    cargo: Option<(ResourceKind, u32)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ConstructionState {
+    region_id: String,
+    remaining_ms: u64,
+    phase_total_ms: u64,
+}
+
+fn extractor_available_default() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveEnvelope {
@@ -102,6 +171,7 @@ pub enum LoadDisposition {
     Missing,
     Current,
     PreviousReset,
+    PreviousMigrated,
 }
 
 #[derive(Debug)]
@@ -115,6 +185,11 @@ pub enum GameAdvanceEvent {
     RegionDetected,
     SurveyCompleted,
     ScoutReturned,
+    ExtractionCompleted,
+    ExtractorLost,
+    ExtractorRebuilt,
+    RelayActivated,
+    AlphaMilestoneCompleted,
 }
 
 impl Default for GameState {
@@ -139,6 +214,16 @@ impl GameState {
             active_mission: None,
             recent_reports: Vec::new(),
             next_mission_id: 1,
+            active_extraction: None,
+            extractor_available: true,
+            extractor_rebuild_remaining_ms: 0,
+            raw_inventory: ResourceStock::default(),
+            refined_inventory: ResourceStock::default(),
+            refining_remaining_ms: 0,
+            active_construction: None,
+            relay_region_id: None,
+            alpha_complete: false,
+            random_state: seed ^ 0xA17A_5EED_D15C_0FFE,
             dirty: true,
             generation: 0,
         }
@@ -155,7 +240,7 @@ impl GameState {
             }
             Err(error) => return Err(GameError::Io(error)),
         };
-        let value: Value = serde_json::from_slice(&bytes)?;
+        let mut value: Value = serde_json::from_slice(&bytes)?;
         let version: VersionEnvelope = serde_json::from_value(value.clone())?;
         if RESETTABLE_SCHEMA_VERSIONS.contains(&version.schema_version) {
             let mut state = Self::default();
@@ -166,17 +251,29 @@ impl GameState {
                 disposition: LoadDisposition::PreviousReset,
             });
         }
-        if version.schema_version != SAVE_SCHEMA_VERSION {
+        let migrated = version.schema_version == MIGRATABLE_SCHEMA_VERSION;
+        if migrated {
+            value["schema_version"] = Value::from(SAVE_SCHEMA_VERSION);
+        }
+        if version.schema_version != SAVE_SCHEMA_VERSION && !migrated {
             return Err(GameError::UnsupportedVersion(version.schema_version));
         }
         let envelope: SaveEnvelope = serde_json::from_value(value)?;
         let mut state = envelope.state;
+        if migrated {
+            state.initialize_alpha_fields();
+            state.save(path)?;
+        }
         state.validate()?;
         state.dirty = false;
         state.generation = 0;
         Ok(LoadedGame {
             state,
-            disposition: LoadDisposition::Current,
+            disposition: if migrated {
+                LoadDisposition::PreviousMigrated
+            } else {
+                LoadDisposition::Current
+            },
         })
     }
 
@@ -273,6 +370,34 @@ impl GameState {
                         phase_total_ms: mission.phase_total_ms,
                     }),
                 recent_reports: self.recent_reports.clone(),
+                extractor: ExtractionProbeSnapshot {
+                    designation: "Extractor 01".into(),
+                    state: self.extractor_state(),
+                    rebuild_remaining_ms: self.extractor_rebuild_remaining_ms,
+                },
+                active_extraction: self.active_extraction.as_ref().map(|mission| {
+                    ActiveExtractionSnapshot {
+                        mission_id: mission.mission_id,
+                        target_region_id: mission.target_region_id.clone(),
+                        phase: mission.phase,
+                        remaining_ms: mission.remaining_ms,
+                        phase_total_ms: mission.phase_total_ms,
+                        risk: mission.risk,
+                        cargo_capacity: EXTRACTION_CAPACITY,
+                    }
+                }),
+                raw_inventory: self.raw_inventory,
+                refined_inventory: self.refined_inventory,
+                refining_remaining_ms: self.refining_remaining_ms,
+                active_construction: self.active_construction.as_ref().map(|construction| {
+                    ActiveConstructionSnapshot {
+                        region_id: construction.region_id.clone(),
+                        remaining_ms: construction.remaining_ms,
+                        phase_total_ms: construction.phase_total_ms,
+                    }
+                }),
+                relay_region_id: self.relay_region_id.clone(),
+                objective: self.objective_snapshot(),
             }
         })
     }
@@ -293,7 +418,7 @@ impl GameState {
             return self.action_rejected("region_out_of_range");
         }
         let distance = hop_distance(&region.position);
-        if distance > SCOUT_RANGE_HOPS {
+        if !self.region_within_range(&region.position) {
             return self.action_rejected("region_out_of_range");
         }
         if self.active_mission.is_some() {
@@ -362,7 +487,133 @@ impl GameState {
         }
     }
 
+    pub fn deploy_extractor(&mut self, region_id: &str) -> PlanetActionResult {
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
+        }
+        let Some(region) = self
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+        else {
+            return self.action_rejected("unknown_region");
+        };
+        if region.knowledge < RegionKnowledge::Surveyed {
+            return self.action_rejected("survey_required");
+        }
+        if !self.region_within_range(&region.position) {
+            return self.action_rejected("region_out_of_range");
+        }
+        let Some(deposit) = region.deposit.as_ref() else {
+            return self.action_rejected("no_deposit");
+        };
+        if deposit.remaining == 0 {
+            return self.action_rejected("deposit_depleted");
+        }
+        if !self.extractor_available || self.active_extraction.is_some() {
+            return self.action_rejected("extractor_unavailable");
+        }
+        let travel_ms = u64::from(hop_distance(&region.position)) * TRAVEL_MS_PER_HOP;
+        let risk = risk_for(region.atmospheric_severity);
+        let will_fail = self.next_random_percent() < risk_percent(risk);
+        let mission_id = self.next_mission_id;
+        self.next_mission_id += 1;
+        self.active_extraction = Some(ExtractionMissionState {
+            mission_id,
+            target_region_id: region_id.to_owned(),
+            phase: ExtractorState::Outbound,
+            remaining_ms: travel_ms,
+            phase_total_ms: travel_ms,
+            travel_ms,
+            risk,
+            will_fail,
+            cargo: None,
+        });
+        self.changed();
+        self.action_accepted(Some(mission_id))
+    }
+
+    pub fn construct_relay(&mut self, region_id: &str) -> PlanetActionResult {
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
+        }
+        let Some(region) = self
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == region_id)
+        else {
+            return self.action_rejected("unknown_region");
+        };
+        if region.id == self.world.core_region_id {
+            return self.action_rejected("invalid_relay_site");
+        }
+        if region.knowledge < RegionKnowledge::Surveyed {
+            return self.action_rejected("survey_required");
+        }
+        if !self.region_within_range(&region.position) {
+            return self.action_rejected("region_out_of_range");
+        }
+        if self.relay_region_id.is_some() || self.active_construction.is_some() {
+            return self.action_rejected("relay_already_committed");
+        }
+        if !stock_contains(self.refined_inventory, RELAY_COST) {
+            return self.action_rejected("insufficient_materials");
+        }
+        subtract_stock(&mut self.refined_inventory, RELAY_COST);
+        self.active_construction = Some(ConstructionState {
+            region_id: region_id.to_owned(),
+            remaining_ms: RELAY_CONSTRUCTION_MS,
+            phase_total_ms: RELAY_CONSTRUCTION_MS,
+        });
+        self.changed();
+        self.action_accepted(None)
+    }
+
     pub fn advance(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
+        let mut events = self.advance_scout(elapsed_ms);
+        if events.contains(&GameAdvanceEvent::SurveyCompleted)
+            && !self.alpha_complete
+            && self.relay_region_id.is_some()
+            && self.active_mission.as_ref().is_some_and(|mission| {
+                self.world
+                    .regions
+                    .iter()
+                    .find(|region| region.id == mission.target_region_id)
+                    .is_some_and(|region| hop_distance(&region.position) > SCOUT_RANGE_HOPS)
+            })
+        {
+            self.alpha_complete = true;
+            self.changed();
+            events.push(GameAdvanceEvent::AlphaMilestoneCompleted);
+        }
+        self.advance_refining(elapsed_ms);
+        events.extend(self.advance_extraction(elapsed_ms));
+        if let Some(mut construction) = self.active_construction.take() {
+            construction.remaining_ms = construction.remaining_ms.saturating_sub(elapsed_ms);
+            if construction.remaining_ms == 0 {
+                self.relay_region_id = Some(construction.region_id);
+                events.push(GameAdvanceEvent::RelayActivated);
+            } else {
+                self.active_construction = Some(construction);
+            }
+            self.changed();
+        }
+        if !self.extractor_available && self.extractor_rebuild_remaining_ms > 0 {
+            self.extractor_rebuild_remaining_ms = self
+                .extractor_rebuild_remaining_ms
+                .saturating_sub(elapsed_ms);
+            if self.extractor_rebuild_remaining_ms == 0 {
+                self.extractor_available = true;
+                events.push(GameAdvanceEvent::ExtractorRebuilt);
+            }
+            self.changed();
+        }
+        events
+    }
+
+    fn advance_scout(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
         let Some(mut mission) = self.active_mission.take() else {
             return Vec::new();
         };
@@ -442,6 +693,100 @@ impl GameState {
         events
     }
 
+    fn advance_extraction(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
+        let Some(mut mission) = self.active_extraction.take() else {
+            return Vec::new();
+        };
+        let mut elapsed = elapsed_ms;
+        let mut events = Vec::new();
+        while elapsed > 0 {
+            let consumed = elapsed.min(mission.remaining_ms);
+            mission.remaining_ms -= consumed;
+            elapsed -= consumed;
+            if mission.remaining_ms > 0 {
+                break;
+            }
+            match mission.phase {
+                ExtractorState::Outbound => {
+                    mission.phase = ExtractorState::Extracting;
+                    mission.remaining_ms = EXTRACTION_MS;
+                    mission.phase_total_ms = EXTRACTION_MS;
+                }
+                ExtractorState::Extracting if mission.will_fail => {
+                    self.extractor_available = false;
+                    self.extractor_rebuild_remaining_ms = EXTRACTOR_REBUILD_MS;
+                    self.push_report(MissionReport {
+                        mission_id: mission.mission_id,
+                        region_id: mission.target_region_id.clone(),
+                        outcome: MissionReportOutcome::ExtractorLost,
+                    });
+                    self.changed();
+                    events.push(GameAdvanceEvent::ExtractorLost);
+                    return events;
+                }
+                ExtractorState::Extracting => {
+                    if let Some(deposit) = self
+                        .world
+                        .regions
+                        .iter_mut()
+                        .find(|region| region.id == mission.target_region_id)
+                        .and_then(|region| region.deposit.as_mut())
+                    {
+                        let amount = deposit.remaining.min(EXTRACTION_CAPACITY);
+                        deposit.remaining -= amount;
+                        mission.cargo = Some((deposit.resource, amount));
+                    }
+                    mission.phase = ExtractorState::Returning;
+                    mission.remaining_ms = mission.travel_ms;
+                    mission.phase_total_ms = mission.travel_ms;
+                }
+                ExtractorState::Returning => {
+                    if let Some((resource, amount)) = mission.cargo {
+                        add_stock(&mut self.raw_inventory, resource, amount);
+                    }
+                    self.push_report(MissionReport {
+                        mission_id: mission.mission_id,
+                        region_id: mission.target_region_id.clone(),
+                        outcome: MissionReportOutcome::ExtractionCompleted,
+                    });
+                    self.changed();
+                    events.push(GameAdvanceEvent::ExtractionCompleted);
+                    return events;
+                }
+                ExtractorState::Ready | ExtractorState::Rebuilding => break,
+            }
+        }
+        self.active_extraction = Some(mission);
+        self.changed();
+        events
+    }
+
+    fn advance_refining(&mut self, elapsed_ms: u64) {
+        let mut elapsed = elapsed_ms;
+        let mut changed = false;
+        while elapsed > 0 {
+            if self.refining_remaining_ms == 0 {
+                if first_stock_kind(self.raw_inventory).is_none() {
+                    break;
+                }
+                self.refining_remaining_ms = REFINING_MS_PER_UNIT;
+            }
+            let consumed = elapsed.min(self.refining_remaining_ms);
+            self.refining_remaining_ms -= consumed;
+            elapsed -= consumed;
+            changed = true;
+            if self.refining_remaining_ms == 0 {
+                if let Some(resource) = first_stock_kind(self.raw_inventory) {
+                    remove_one(&mut self.raw_inventory, resource);
+                    add_stock(&mut self.refined_inventory, resource, 1);
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+    }
+
     pub fn state_revision(&self) -> u64 {
         self.state_revision
     }
@@ -476,8 +821,131 @@ impl GameState {
             },
             hop_distance_from_core: hop_distance(&region.position),
             within_scout_range: region.id != self.world.core_region_id
-                && hop_distance(&region.position) <= SCOUT_RANGE_HOPS,
+                && self.region_within_range(&region.position),
+            deposit: surveyed
+                .then_some(region.deposit.as_ref())
+                .flatten()
+                .map(|deposit| DepositSnapshot {
+                    resource: deposit.resource,
+                    remaining: deposit.remaining,
+                    risk: risk_for(region.atmospheric_severity),
+                }),
+            relay: self.relay_region_id.as_deref() == Some(region.id.as_str()),
         }
+    }
+
+    fn extractor_state(&self) -> ExtractorState {
+        self.active_extraction.as_ref().map_or_else(
+            || {
+                if self.extractor_available {
+                    ExtractorState::Ready
+                } else {
+                    ExtractorState::Rebuilding
+                }
+            },
+            |mission| mission.phase,
+        )
+    }
+
+    fn objective_snapshot(&self) -> ObjectiveSnapshot {
+        if self.alpha_complete {
+            return ObjectiveSnapshot {
+                title: "ALPHA REACH ESTABLISHED".into(),
+                guidance: "The first network extension is proven. Continue surveying freely."
+                    .into(),
+                complete: true,
+            };
+        }
+        if self.relay_region_id.is_some() {
+            return ObjectiveSnapshot {
+                title: "PROVE EXTENDED REACH".into(),
+                guidance: "Survey a region that lies beyond the core's original two-hop range."
+                    .into(),
+                complete: false,
+            };
+        }
+        if self.active_construction.is_some() {
+            return ObjectiveSnapshot {
+                title: "RELAY CONSTRUCTION".into(),
+                guidance: "Construction is autonomous. Exploration and extraction may continue."
+                    .into(),
+                complete: false,
+            };
+        }
+        if stock_contains(self.refined_inventory, RELAY_COST) {
+            return ObjectiveSnapshot {
+                title: "ESTABLISH A RELAY".into(),
+                guidance: "Open a surveyed reachable region and press B to begin construction."
+                    .into(),
+                complete: false,
+            };
+        }
+        if self.world.regions.iter().any(|region| {
+            region.knowledge >= RegionKnowledge::Surveyed
+                && region
+                    .deposit
+                    .as_ref()
+                    .is_some_and(|deposit| deposit.remaining > 0)
+        }) {
+            return ObjectiveSnapshot {
+                title: "GATHER RELAY MATERIALS".into(),
+                guidance: format!(
+                    "Extract and refine S {}/8  C {}/6  Si {}/6.",
+                    self.refined_inventory.structural,
+                    self.refined_inventory.conductive,
+                    self.refined_inventory.silicate
+                ),
+                complete: false,
+            };
+        }
+        ObjectiveSnapshot {
+            title: "RESOLVE LOCAL GEOLOGY".into(),
+            guidance:
+                "Survey nearby regions to locate structural, conductive, and silicate deposits."
+                    .into(),
+            complete: false,
+        }
+    }
+
+    fn initialize_alpha_fields(&mut self) {
+        for region in &mut self.world.regions {
+            if region.id == self.world.core_region_id || region.deposit.is_some() {
+                continue;
+            }
+            let index = usize::from(region.position.latitude_band) * usize::from(LONGITUDE_SECTORS)
+                + usize::from(region.position.longitude_sector);
+            region.deposit = Some(DepositState {
+                resource: match index % 3 {
+                    0 => ResourceKind::Structural,
+                    1 => ResourceKind::Conductive,
+                    _ => ResourceKind::Silicate,
+                },
+                remaining: 12,
+            });
+        }
+        if self.random_state == 0 {
+            self.random_state = self.world.seed ^ 0xA17A_5EED_D15C_0FFE;
+        }
+        if self.active_extraction.is_none() && self.extractor_rebuild_remaining_ms == 0 {
+            self.extractor_available = true;
+        }
+    }
+
+    fn region_within_range(&self, position: &RegionPosition) -> bool {
+        if hop_distance(position) <= SCOUT_RANGE_HOPS {
+            return true;
+        }
+        self.relay_region_id
+            .as_ref()
+            .and_then(|id| self.world.regions.iter().find(|region| &region.id == id))
+            .is_some_and(|relay| graph_distance(position, &relay.position) <= RELAY_RANGE_HOPS)
+    }
+
+    fn next_random_percent(&mut self) -> u32 {
+        let mut random = SplitMix64(self.random_state);
+        let value = random.next_u32() % 100;
+        self.random_state = random.0;
+        value
     }
 
     fn changed(&mut self) {
@@ -511,6 +979,15 @@ impl GameState {
                 .active_mission
                 .as_ref()
                 .map(|mission| mission.mission_id),
+        }
+    }
+
+    fn action_accepted(&self, mission_id: Option<u64>) -> PlanetActionResult {
+        PlanetActionResult {
+            ok: true,
+            code: None,
+            revision: self.state_revision,
+            mission_id,
         }
     }
 
@@ -561,6 +1038,61 @@ impl GameState {
                 return Err(GameError::Invariant("active mission is inconsistent"));
             }
         }
+        if let Some(mission) = &self.active_extraction {
+            if !self.extractor_available
+                || !self
+                    .world
+                    .regions
+                    .iter()
+                    .any(|region| region.id == mission.target_region_id)
+                || !matches!(
+                    mission.phase,
+                    ExtractorState::Outbound
+                        | ExtractorState::Extracting
+                        | ExtractorState::Returning
+                )
+                || mission.remaining_ms == 0
+                || mission.travel_ms == 0
+            {
+                return Err(GameError::Invariant("active extraction is inconsistent"));
+            }
+        }
+        if !self.extractor_available && self.extractor_rebuild_remaining_ms == 0 {
+            return Err(GameError::Invariant(
+                "unavailable extractor must be rebuilding",
+            ));
+        }
+        if self.extractor_available && self.extractor_rebuild_remaining_ms > 0 {
+            return Err(GameError::Invariant(
+                "available extractor cannot be rebuilding",
+            ));
+        }
+        if let Some(region_id) = &self.relay_region_id {
+            if region_id == &self.world.core_region_id
+                || !self
+                    .world
+                    .regions
+                    .iter()
+                    .any(|region| &region.id == region_id)
+            {
+                return Err(GameError::Invariant("relay region is inconsistent"));
+            }
+        }
+        if let Some(construction) = &self.active_construction {
+            if self.relay_region_id.is_some()
+                || construction.remaining_ms == 0
+                || !self
+                    .world
+                    .regions
+                    .iter()
+                    .any(|region| region.id == construction.region_id)
+            {
+                return Err(GameError::Invariant("relay construction is inconsistent"));
+            }
+        }
+        if self.random_state == 0 {
+            return Err(GameError::Invariant("random state must be initialized"));
+        }
         if self.recent_reports.len() > REPORT_CAPACITY {
             return Err(GameError::Invariant("mission report capacity exceeded"));
         }
@@ -600,6 +1132,14 @@ impl WorldState {
                     } else {
                         RegionKnowledge::Unknown
                     },
+                    deposit: (!core).then_some(DepositState {
+                        resource: match index % 3 {
+                            0 => ResourceKind::Structural,
+                            1 => ResourceKind::Conductive,
+                            _ => ResourceKind::Silicate,
+                        },
+                        remaining: 12,
+                    }),
                 });
             }
         }
@@ -625,6 +1165,77 @@ fn hop_distance(position: &RegionPosition) -> u8 {
     let latitude = position.latitude_band.abs_diff(CORE_LATITUDE_BAND);
     let longitude = position.longitude_sector.abs_diff(CORE_LONGITUDE_SECTOR);
     latitude + longitude.min(LONGITUDE_SECTORS - longitude)
+}
+
+fn graph_distance(first: &RegionPosition, second: &RegionPosition) -> u8 {
+    let latitude = first.latitude_band.abs_diff(second.latitude_band);
+    let longitude = first.longitude_sector.abs_diff(second.longitude_sector);
+    latitude + longitude.min(LONGITUDE_SECTORS - longitude)
+}
+
+fn risk_for(severity: AtmosphericSeverity) -> RiskLevel {
+    match severity {
+        AtmosphericSeverity::Stable => RiskLevel::Low,
+        AtmosphericSeverity::Variable => RiskLevel::Moderate,
+        AtmosphericSeverity::Severe => RiskLevel::High,
+    }
+}
+
+fn risk_percent(risk: RiskLevel) -> u32 {
+    match risk {
+        RiskLevel::Low => 5,
+        RiskLevel::Moderate => 15,
+        RiskLevel::High => 30,
+    }
+}
+
+fn stock_contains(stock: ResourceStock, required: ResourceStock) -> bool {
+    stock.structural >= required.structural
+        && stock.conductive >= required.conductive
+        && stock.silicate >= required.silicate
+}
+
+fn subtract_stock(stock: &mut ResourceStock, amount: ResourceStock) {
+    stock.structural -= amount.structural;
+    stock.conductive -= amount.conductive;
+    stock.silicate -= amount.silicate;
+}
+
+fn add_stock(stock: &mut ResourceStock, resource: ResourceKind, amount: u32) {
+    match resource {
+        ResourceKind::Structural => stock.structural += amount,
+        ResourceKind::Conductive => stock.conductive += amount,
+        ResourceKind::Silicate => stock.silicate += amount,
+    }
+}
+
+#[cfg(test)]
+fn stock_amount(stock: ResourceStock, resource: ResourceKind) -> u32 {
+    match resource {
+        ResourceKind::Structural => stock.structural,
+        ResourceKind::Conductive => stock.conductive,
+        ResourceKind::Silicate => stock.silicate,
+    }
+}
+
+fn remove_one(stock: &mut ResourceStock, resource: ResourceKind) {
+    match resource {
+        ResourceKind::Structural => stock.structural -= 1,
+        ResourceKind::Conductive => stock.conductive -= 1,
+        ResourceKind::Silicate => stock.silicate -= 1,
+    }
+}
+
+fn first_stock_kind(stock: ResourceStock) -> Option<ResourceKind> {
+    if stock.structural > 0 {
+        Some(ResourceKind::Structural)
+    } else if stock.conductive > 0 {
+        Some(ResourceKind::Conductive)
+    } else if stock.silicate > 0 {
+        Some(ResourceKind::Silicate)
+    } else {
+        None
+    }
 }
 
 fn generate_terrain(latitude_band: u8, roll: u32) -> TerrainClass {
@@ -710,9 +1321,11 @@ mod tests {
             .unwrap();
         assert!(unknown.terrain.is_none());
         assert!(unknown.temperature.is_none());
+        assert!(unknown.deposit.is_none());
         let json = serde_json::to_value(unknown).unwrap();
         assert!(json.get("terrain").is_none());
         assert!(json.get("temperature").is_none());
+        assert!(json.get("deposit").is_none());
     }
 
     #[test]
@@ -881,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn persists_schema_three_and_resets_previous_saves() {
+    fn persists_schema_four_migrates_three_and_resets_older_saves() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("game_state.json");
         let mut state = GameState::with_seed(13);
@@ -892,6 +1505,40 @@ mod tests {
             LoadDisposition::Current
         );
 
+        let mut previous: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        previous["schema_version"] = Value::from(3);
+        let state = previous["state"].as_object_mut().unwrap();
+        for key in [
+            "active_extraction",
+            "extractor_available",
+            "extractor_rebuild_remaining_ms",
+            "raw_inventory",
+            "refined_inventory",
+            "refining_remaining_ms",
+            "active_construction",
+            "relay_region_id",
+            "alpha_complete",
+            "random_state",
+        ] {
+            state.remove(key);
+        }
+        for region in state["world"]["regions"].as_array_mut().unwrap() {
+            region.as_object_mut().unwrap().remove("deposit");
+        }
+        fs::write(&path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+        let migrated = GameState::load(&path).unwrap();
+        assert_eq!(migrated.disposition, LoadDisposition::PreviousMigrated);
+        assert!(migrated
+            .state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .iter()
+            .filter(|region| !region.core)
+            .all(|region| region.deposit.is_none()));
+        let migrated_file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(migrated_file["schema_version"], 4);
+
         fs::write(
             &path,
             r#"{"schema_version":2,"saved_at":"2026-01-01T00:00:00Z","state":{"onboarding_complete":true,"state_revision":1}}"#,
@@ -901,6 +1548,126 @@ mod tests {
         assert_eq!(reset.disposition, LoadDisposition::PreviousReset);
         assert!(!reset.state.onboarding().complete);
         let replacement: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(replacement["schema_version"], 3);
+        assert_eq!(replacement["schema_version"], 4);
+    }
+
+    #[test]
+    fn extraction_loss_is_fixed_at_acceptance_and_rebuilds_without_softlock() {
+        let mut state = GameState::with_seed(21);
+        awaken(&mut state);
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 1)
+            .unwrap();
+        assert!(state.deploy_scout(&target.id).ok);
+        state.advance(45_000);
+        assert!(state.deploy_extractor(&target.id).ok);
+        state.active_extraction.as_mut().unwrap().will_fail = true;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+        let restored = GameState::load(&path).unwrap().state;
+        assert!(restored.active_extraction.unwrap().will_fail);
+        let events = state.advance(45_000);
+        assert!(events.contains(&GameAdvanceEvent::ExtractorLost));
+        let snapshot = state.planet_snapshot().unwrap();
+        assert_eq!(snapshot.extractor.state, ExtractorState::Rebuilding);
+        assert!(
+            state.deploy_extractor(&target.id).code.as_deref() == Some("extractor_unavailable")
+        );
+        let events = state.advance(EXTRACTOR_REBUILD_MS);
+        assert!(events.contains(&GameAdvanceEvent::ExtractorRebuilt));
+        assert_eq!(
+            state.planet_snapshot().unwrap().extractor.state,
+            ExtractorState::Ready
+        );
+    }
+
+    #[test]
+    fn successful_extraction_conserves_material_through_refining() {
+        let mut state = GameState::with_seed(31);
+        awaken(&mut state);
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 1)
+            .unwrap();
+        assert!(state.deploy_scout(&target.id).ok);
+        state.advance(45_000);
+        let before = state
+            .world
+            .regions
+            .iter()
+            .find(|region| region.id == target.id)
+            .unwrap()
+            .deposit
+            .clone()
+            .unwrap();
+        assert!(state.deploy_extractor(&target.id).ok);
+        state.active_extraction.as_mut().unwrap().will_fail = false;
+        state.advance(15_000);
+        state.advance(EXTRACTION_MS);
+        let events = state.advance(15_000);
+        assert!(events.contains(&GameAdvanceEvent::ExtractionCompleted));
+        assert_eq!(
+            stock_amount(state.raw_inventory, before.resource),
+            EXTRACTION_CAPACITY
+        );
+        assert_eq!(
+            state
+                .world
+                .regions
+                .iter()
+                .find(|region| region.id == target.id)
+                .unwrap()
+                .deposit
+                .as_ref()
+                .unwrap()
+                .remaining,
+            before.remaining - EXTRACTION_CAPACITY
+        );
+        state.advance(REFINING_MS_PER_UNIT * u64::from(EXTRACTION_CAPACITY));
+        assert_eq!(stock_amount(state.raw_inventory, before.resource), 0);
+        assert_eq!(
+            stock_amount(state.refined_inventory, before.resource),
+            EXTRACTION_CAPACITY
+        );
+    }
+
+    #[test]
+    fn relay_extends_reach_and_distant_survey_completes_alpha() {
+        let mut state = GameState::with_seed(22);
+        awaken(&mut state);
+        let relay_site = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 2)
+            .unwrap();
+        assert!(state.deploy_scout(&relay_site.id).ok);
+        state.advance(60_000);
+        state.refined_inventory = RELAY_COST;
+        assert!(state.construct_relay(&relay_site.id).ok);
+        state.advance(RELAY_CONSTRUCTION_MS);
+        let distant = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core > 2 && region.within_scout_range)
+            .unwrap();
+        state.recall_scout();
+        state.advance(30_000);
+        assert!(state.deploy_scout(&distant.id).ok);
+        let events = state
+            .advance(u64::from(distant.hop_distance_from_core) * TRAVEL_MS_PER_HOP + SURVEY_MS);
+        assert!(events.contains(&GameAdvanceEvent::AlphaMilestoneCompleted));
+        assert!(state.planet_snapshot().unwrap().objective.complete);
     }
 }

@@ -3,9 +3,10 @@ use mind_core::{
     config::{AppPaths, Config},
     engine::MindEngine,
     protocol::{
-        self, failure, method, notification, success, CompleteOnboardingParams, DeployScoutParams,
-        PlanetNotification, RpcRequest, StatusNotification, SubscribeResult, UnsubscribeParams,
-        JSONRPC_VERSION, MAX_FRAME_BYTES,
+        self, failure, method, notification, success, CompleteOnboardingParams,
+        ConstructRelayParams, DeployExtractorParams, DeployScoutParams, PlanetNotification,
+        RpcRequest, StatusNotification, SubscribeResult, UnsubscribeParams, JSONRPC_VERSION,
+        MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
 };
@@ -362,6 +363,40 @@ async fn dispatch_frame(
             }
         }
         method::RECALL_SCOUT => (success(request.id, engine.recall_scout()), false),
+        method::DEPLOY_EXTRACTOR => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<DeployExtractorParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.deploy_extractor(&params.region_id)),
+                    false,
+                ),
+                None => (
+                    failure(
+                        request.id,
+                        -32602,
+                        "invalid extractor deployment parameters",
+                    ),
+                    false,
+                ),
+            }
+        }
+        method::CONSTRUCT_RELAY => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<ConstructRelayParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.construct_relay(&params.region_id)),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid relay construction parameters"),
+                    false,
+                ),
+            }
+        }
         method::SUBSCRIBE_STATUS => {
             let id = subscriptions.status.get_or_insert_with(Uuid::new_v4);
             (

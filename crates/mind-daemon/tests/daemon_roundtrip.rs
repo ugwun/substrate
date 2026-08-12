@@ -52,7 +52,7 @@ async fn serves_status_subscription_and_shutdown() {
         .is_ok());
     let initial = client.status().await.unwrap();
     assert_eq!(initial.tick_rate_hz, 100);
-    assert_eq!(initial.protocol_version, 4);
+    assert_eq!(initial.protocol_version, 5);
     assert!(!initial.onboarding.complete);
     assert!(client.planet().await.is_err());
     assert!(client.subscribe_planet().await.is_err());
@@ -72,6 +72,24 @@ async fn serves_status_subscription_and_shutdown() {
         .clone();
     let subscription_id = client.subscribe_status().await.unwrap();
     let planet_subscription_id = client.subscribe_planet().await.unwrap();
+    assert_eq!(
+        client
+            .deploy_extractor(target.clone())
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("survey_required")
+    );
+    assert_eq!(
+        client
+            .construct_relay(target.clone())
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("survey_required")
+    );
     assert!(client.deploy_scout(target).await.unwrap().ok);
     let pulse = client.trigger_diagnostic_pulse().await.unwrap();
     assert_eq!(pulse.pulse_id, 1);

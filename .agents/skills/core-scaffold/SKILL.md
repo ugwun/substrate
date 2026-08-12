@@ -10,8 +10,8 @@ description: Maintain Substrate workspace architecture, configuration, and engin
 - Keep `mind-daemon` as the sole source of truth for current and future gameplay state.
 - Keep `mind-core` independent of Ratatui, MCP presentation, and specific frontends.
 - Advance simulation through the Tokio engine loop with skipped missed ticks. Never advance it while rendering or serving a status request.
-- Advance production, missions, pulses, and all other simulated time only while the daemon runs; do not add offline catch-up.
-- Advance the implemented scout mission from the configured engine period, checkpoint its tick-generated progress every five seconds, and flush it during graceful shutdown.
+- Advance production, missions, rebuilding, construction, pulses, and all other simulated time only while the daemon runs; do not add offline catch-up.
+- Advance the implemented concurrent scout, extraction, refining, rebuild, and relay-construction timers from the configured engine period, checkpoint tick-generated progress every five seconds, and flush it during graceful shutdown.
 - Use `PathBuf` and platform-native directories for every filesystem location.
 - Preserve configuration precedence as CLI, environment, file, then defaults, and validate the merged result.
 - Bind IPC and MCP only to loopback, bind both before readiness, and treat runtime metadata as advisory until a versioned handshake succeeds.

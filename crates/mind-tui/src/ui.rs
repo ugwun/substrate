@@ -3,7 +3,7 @@ use crate::{
     globe::{self, GlobeRenderOptions},
     theme::Theme,
 };
-use mind_core::protocol::{EngineEventKind, PlanetSnapshot, ScoutState};
+use mind_core::protocol::{EngineEventKind, MissionReportOutcome, PlanetSnapshot, ScoutState};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -60,7 +60,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
     } else {
         match app.workspace {
             Workspace::Planet => render_planet(frame, area, app, options, theme, now),
-            Workspace::Operations => render_operations(frame, area, app, options, theme, now),
+            Workspace::Overview => render_overview(frame, area, app, options, theme, now),
             Workspace::System => render_dashboard(frame, area, app, options, theme, now),
         }
     }
@@ -78,12 +78,12 @@ fn render_planet(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], Workspace::Planet, options, theme);
+    render_workspace_header(frame, rows[0], app, Workspace::Planet, options, theme);
     let Some(planet) = &app.planet else {
         frame.render_widget(
             Paragraph::new("Awaiting authoritative planetary state...")
@@ -113,18 +113,15 @@ fn render_planet(
     };
 
     if area.width >= 72 {
-        let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
+        let columns = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(rows[1]);
         render_globe(frame, columns[0], app, planet, options, theme);
-        render_region_summary(frame, columns[1], app, options, theme);
+        render_region_inspector(frame, columns[1], app, planet, options, theme);
     } else {
-        let body = Layout::vertical([Constraint::Percentage(68), Constraint::Percentage(32)])
+        let body = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
             .split(rows[1]);
         render_globe(frame, body[0], app, planet, options, theme);
-        render_region_summary(frame, body[1], app, options, theme);
-    }
-    if app.detail_open {
-        render_region_detail(frame, area, app, options, theme);
+        render_region_inspector(frame, body[1], app, planet, options, theme);
     }
     let controls: &[KeyHint<'_>] = if area.width < 72 {
         &[
@@ -145,15 +142,46 @@ fn render_planet(
                 label: "detach",
             },
         ]
+    } else if area.width < 140 {
+        &[
+            KeyHint {
+                key: "ARROWS",
+                label: "",
+            },
+            KeyHint {
+                key: "ENTER",
+                label: "action",
+            },
+            KeyHint {
+                key: "PGUP/DN",
+                label: "",
+            },
+            KeyHint {
+                key: "TAB",
+                label: "",
+            },
+            KeyHint {
+                key: "Q",
+                label: "detach",
+            },
+            KeyHint {
+                key: "?",
+                label: "help",
+            },
+        ]
     } else {
         &[
             KeyHint {
                 key: "ARROWS",
-                label: "navigate",
+                label: "region",
             },
             KeyHint {
                 key: "ENTER",
-                label: "details",
+                label: "primary action",
+            },
+            KeyHint {
+                key: "PGUP/DN",
+                label: "inspect",
             },
             KeyHint {
                 key: "TAB",
@@ -172,7 +200,7 @@ fn render_planet(
     render_workspace_footer(frame, rows[2], app, now, controls, theme);
 }
 
-fn render_operations(
+fn render_overview(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
@@ -181,18 +209,18 @@ fn render_operations(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], Workspace::Operations, options, theme);
+    render_workspace_header(frame, rows[0], app, Workspace::Overview, options, theme);
     let Some(planet) = &app.planet else {
         frame.render_widget(
-            Paragraph::new("Awaiting authoritative operations state...")
+            Paragraph::new("Awaiting authoritative planetary overview...")
                 .alignment(Alignment::Center)
                 .style(theme.panel_style())
-                .block(panel(" OPERATIONS ", options, theme, PanelTone::Focused)),
+                .block(panel(" OVERVIEW ", options, theme, PanelTone::Focused)),
             rows[1],
         );
         render_workspace_footer(
@@ -215,11 +243,16 @@ fn render_operations(
         return;
     };
     let columns = if area.width >= 72 {
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1])
+        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[1])
     } else {
-        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1])
+        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[1])
     };
-    let mission_text = if let Some(mission) = &planet.active_mission {
+
+    let mut activity = Vec::new();
+    let mut row_index = 0;
+    let mut selected_line = 0;
+    activity.push(section_line("ACTIVE OPERATIONS", theme));
+    if let Some(mission) = &planet.active_mission {
         let target_designation = region_designation(planet, &mission.target_region_id);
         let progress = if mission.phase == ScoutState::Holding || mission.phase_total_ms == 0 {
             100
@@ -227,10 +260,13 @@ fn render_operations(
             100_u64
                 .saturating_sub(mission.remaining_ms.saturating_mul(100) / mission.phase_total_ms)
         };
-        let remaining = mission.remaining_ms.div_ceil(1_000);
-        let mut lines = vec![Line::from(vec![
+        if app.overview_selection == row_index {
+            selected_line = activity.len();
+        }
+        activity.push(Line::from(vec![
+            overview_marker(app.overview_selection == row_index, options, theme),
             Span::styled(
-                planet.scout.designation.clone(),
+                format!("{} #{:03}", planet.scout.designation, mission.mission_id),
                 Style::default().fg(theme.cyan_bright).bold(),
             ),
             Span::styled("  //  ", Style::default().fg(theme.faint)),
@@ -238,87 +274,236 @@ fn render_operations(
                 format!("{:?}", planet.scout.state).to_uppercase(),
                 Style::default().fg(theme.amber).bold(),
             ),
-        ])];
-        lines.extend([
-            Line::from(""),
-            field_line("TARGET", target_designation.to_owned(), theme),
-            field_line("PROGRESS", format!("{progress:>3}%"), theme),
-            field_line("REMAINING", format!("{remaining}s"), theme),
-            Line::from(""),
-        ]);
-        lines.push(
-            if matches!(app.context_action(), Some(ContextAction::Recall)) {
-                key_line("ENTER", "recall scout", theme)
-            } else {
-                Line::styled(
-                    "Scout is returning // no action required.",
-                    Style::default().fg(theme.muted),
-                )
-            },
-        );
-        Text::from(lines)
+        ]));
+        activity.push(Line::styled(
+            format!(
+                "   {target_designation} // {progress}% // {}",
+                scout_remaining_text(mission)
+            ),
+            Style::default().fg(theme.muted),
+        ));
+        row_index += 1;
+    }
+    if let Some(mission) = &planet.active_extraction {
+        if app.overview_selection == row_index {
+            selected_line = activity.len();
+        }
+        activity.push(Line::from(vec![
+            overview_marker(app.overview_selection == row_index, options, theme),
+            Span::styled(
+                format!(
+                    "{} #{:03}",
+                    planet.extractor.designation, mission.mission_id
+                ),
+                Style::default().fg(theme.cyan_bright).bold(),
+            ),
+            Span::styled("  //  ", Style::default().fg(theme.faint)),
+            Span::styled(
+                format!("{:?}", mission.phase).to_uppercase(),
+                Style::default().fg(theme.amber).bold(),
+            ),
+        ]));
+        activity.push(Line::styled(
+            format!(
+                "   {} // {}% // {}s remaining",
+                region_designation(planet, &mission.target_region_id),
+                operation_progress(mission.remaining_ms, mission.phase_total_ms),
+                mission.remaining_ms.div_ceil(1_000)
+            ),
+            Style::default().fg(theme.muted),
+        ));
+        activity.push(Line::styled(
+            format!(
+                "   {} // capacity {} units",
+                risk_text(mission.risk),
+                mission.cargo_capacity
+            ),
+            Style::default().fg(theme.muted),
+        ));
+        row_index += 1;
+    }
+    if let Some(construction) = &planet.active_construction {
+        if app.overview_selection == row_index {
+            selected_line = activity.len();
+        }
+        activity.push(Line::from(vec![
+            overview_marker(app.overview_selection == row_index, options, theme),
+            Span::styled("RANGE RELAY", Style::default().fg(theme.cyan_bright).bold()),
+            Span::styled("  //  ", Style::default().fg(theme.faint)),
+            Span::styled("CONSTRUCTING", Style::default().fg(theme.amber).bold()),
+        ]));
+        activity.push(Line::styled(
+            format!(
+                "   {} // {}% // {}s remaining",
+                region_designation(planet, &construction.region_id),
+                operation_progress(construction.remaining_ms, construction.phase_total_ms),
+                construction.remaining_ms.div_ceil(1_000)
+            ),
+            Style::default().fg(theme.muted),
+        ));
+        row_index += 1;
+    }
+    if row_index == 0 {
+        activity.push(Line::styled(
+            "No active field operations.",
+            Style::default().fg(theme.muted),
+        ));
+    }
+    activity.push(Line::from(""));
+    activity.push(section_line("RECENT REPORTS", theme));
+    if planet.recent_reports.is_empty() {
+        activity.push(Line::styled(
+            "No mission reports recorded.",
+            Style::default().fg(theme.muted),
+        ));
     } else {
-        let location_designation = region_designation(planet, &planet.scout.region_id);
-        Text::from(vec![
-            Line::from(vec![
+        for report in planet.recent_reports.iter().rev() {
+            if app.overview_selection == row_index {
+                selected_line = activity.len();
+            }
+            activity.push(Line::from(vec![
+                overview_marker(app.overview_selection == row_index, options, theme),
                 Span::styled(
-                    planet.scout.designation.clone(),
-                    Style::default().fg(theme.cyan_bright).bold(),
+                    format!("#{:03}  ", report.mission_id),
+                    Style::default().fg(theme.faint),
+                ),
+                Span::styled(
+                    region_designation(planet, &report.region_id).to_owned(),
+                    Style::default().fg(theme.text_strong),
                 ),
                 Span::styled("  //  ", Style::default().fg(theme.faint)),
-                Span::styled("READY", Style::default().fg(theme.success).bold()),
-            ]),
-            Line::from(""),
-            field_line("LOCATION", location_designation.to_owned(), theme),
-            Line::from(""),
-            Line::styled(
-                "Select a reachable region in Planet to deploy.",
-                Style::default().fg(theme.muted),
-            ),
-        ])
-    };
+                Span::styled(
+                    report_outcome_label(report.outcome),
+                    Style::default()
+                        .fg(if report.outcome == MissionReportOutcome::ExtractorLost {
+                            theme.danger
+                        } else {
+                            theme.success
+                        })
+                        .bold(),
+                ),
+            ]));
+            row_index += 1;
+        }
+    }
+    let activity_height = columns[0].height.saturating_sub(2) as usize;
+    let activity_scroll = selected_line.saturating_sub(activity_height.saturating_sub(1)) as u16;
     frame.render_widget(
-        Paragraph::new(mission_text)
+        Paragraph::new(Text::from(activity))
             .wrap(Wrap { trim: true })
-            .style(theme.panel_style())
-            .block(panel(" ACTIVE SCOUT ", options, theme, PanelTone::Focused)),
-        columns[0],
-    );
-    let reports = if planet.recent_reports.is_empty() {
-        Text::from("No mission reports recorded.")
-    } else {
-        Text::from(
-            planet
-                .recent_reports
-                .iter()
-                .rev()
-                .take(columns[1].height.saturating_sub(2) as usize)
-                .map(|report| {
-                    let region_designation = region_designation(planet, &report.region_id);
-                    Line::from(vec![
-                        Span::styled(
-                            format!("#{:03}  ", report.mission_id),
-                            Style::default().fg(theme.faint),
-                        ),
-                        Span::styled(
-                            region_designation.to_owned(),
-                            Style::default().fg(theme.text_strong),
-                        ),
-                        Span::styled("  //  ", Style::default().fg(theme.faint)),
-                        Span::styled(
-                            format!("{:?}", report.outcome).to_uppercase(),
-                            Style::default().fg(theme.success).bold(),
-                        ),
-                    ])
-                })
-                .collect::<Vec<_>>(),
-        )
-    };
-    frame.render_widget(
-        Paragraph::new(reports)
+            .scroll((activity_scroll, 0))
             .style(theme.panel_style())
             .block(panel(
-                " RECENT REPORTS ",
+                " PLANETARY ACTIVITY ",
+                options,
+                theme,
+                PanelTone::Focused,
+            )),
+        columns[0],
+    );
+
+    let scout_location = planet.active_mission.as_ref().map_or_else(
+        || region_designation(planet, &planet.scout.region_id),
+        |mission| region_designation(planet, &mission.target_region_id),
+    );
+    let extractor_status = if let Some(mission) = &planet.active_extraction {
+        format!(
+            "{:?} // {}",
+            mission.phase,
+            region_designation(planet, &mission.target_region_id)
+        )
+    } else if planet.extractor.rebuild_remaining_ms > 0 {
+        format!(
+            "Rebuilding // {}s",
+            planet.extractor.rebuild_remaining_ms.div_ceil(1_000)
+        )
+    } else {
+        format!("{:?} // core", planet.extractor.state)
+    };
+    let relay_status = planet.relay_region_id.as_ref().map_or_else(
+        || "not constructed".to_owned(),
+        |region_id| format!("active // {}", region_designation(planet, region_id)),
+    );
+    let stock = planet.refined_inventory;
+    let raw = planet.raw_inventory;
+    let construction_status = planet.active_construction.as_ref().map_or_else(
+        || {
+            planet.relay_region_id.as_ref().map_or_else(
+                || "idle // no relay constructed".to_owned(),
+                |region_id| format!("relay active // {}", region_designation(planet, region_id)),
+            )
+        },
+        |construction| {
+            format!(
+                "relay {}% // {} // {}s",
+                operation_progress(construction.remaining_ms, construction.phase_total_ms),
+                region_designation(planet, &construction.region_id),
+                construction.remaining_ms.div_ceil(1_000)
+            )
+        },
+    );
+    let summary = Text::from(vec![
+        section_line("MATERIAL STORES", theme),
+        field_line(
+            "STRUCTURAL",
+            format!(
+                "raw {} // refined {} // relay needs 8",
+                raw.structural, stock.structural
+            ),
+            theme,
+        ),
+        field_line(
+            "CONDUCTIVE",
+            format!(
+                "raw {} // refined {} // relay needs 6",
+                raw.conductive, stock.conductive
+            ),
+            theme,
+        ),
+        field_line(
+            "SILICATE",
+            format!(
+                "raw {} // refined {} // relay needs 6",
+                raw.silicate, stock.silicate
+            ),
+            theme,
+        ),
+        field_line(
+            "REFINING",
+            if planet.refining_remaining_ms == 0 {
+                "idle".into()
+            } else {
+                format!(
+                    "{}s to next unit",
+                    planet.refining_remaining_ms.div_ceil(1_000)
+                )
+            },
+            theme,
+        ),
+        Line::from(""),
+        section_line("FLEET & NETWORK", theme),
+        field_line(
+            "SCOUT",
+            format!("{:?} // {scout_location}", planet.scout.state),
+            theme,
+        ),
+        field_line("EXTRACTOR", extractor_status, theme),
+        field_line("RELAY", relay_status, theme),
+        Line::from(""),
+        section_line("FABRICATION", theme),
+        Line::styled(construction_status, Style::default().fg(theme.text_strong)),
+        Line::from(""),
+        Line::styled(
+            "Select an operation or report and press Enter to inspect its region.",
+            Style::default().fg(theme.muted),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(summary)
+            .wrap(Wrap { trim: true })
+            .style(theme.panel_style())
+            .block(panel(
+                " PLANET STATUS ",
                 options,
                 theme,
                 PanelTone::Standard,
@@ -348,7 +533,11 @@ fn render_operations(
         &[
             KeyHint {
                 key: "ENTER",
-                label: "action",
+                label: "inspect region",
+            },
+            KeyHint {
+                key: "ARROWS",
+                label: "select",
             },
             KeyHint {
                 key: "TAB",
@@ -367,6 +556,30 @@ fn render_operations(
     render_workspace_footer(frame, rows[2], app, now, controls, theme);
 }
 
+fn overview_marker(selected: bool, options: RenderOptions, theme: Theme) -> Span<'static> {
+    Span::styled(
+        if selected {
+            if options.ascii {
+                "> "
+            } else {
+                "› "
+            }
+        } else {
+            "  "
+        },
+        Style::default()
+            .fg(if selected { theme.amber } else { theme.faint })
+            .bold(),
+    )
+}
+
+fn operation_progress(remaining_ms: u64, total_ms: u64) -> u64 {
+    remaining_ms
+        .saturating_mul(100)
+        .checked_div(total_ms)
+        .map_or(100, |remaining| 100_u64.saturating_sub(remaining))
+}
+
 fn region_designation<'a>(planet: &'a PlanetSnapshot, region_id: &'a str) -> &'a str {
     planet
         .regions
@@ -375,9 +588,20 @@ fn region_designation<'a>(planet: &'a PlanetSnapshot, region_id: &'a str) -> &'a
         .map_or(region_id, |region| region.designation.as_str())
 }
 
+fn report_outcome_label(outcome: MissionReportOutcome) -> &'static str {
+    match outcome {
+        MissionReportOutcome::SurveyCompleted => "SURVEY COMPLETE",
+        MissionReportOutcome::Recalled => "RECALLED",
+        MissionReportOutcome::Returned => "RETURNED",
+        MissionReportOutcome::ExtractionCompleted => "CARGO RETURNED",
+        MissionReportOutcome::ExtractorLost => "EXTRACTOR LOST",
+    }
+}
+
 fn render_workspace_header(
     frame: &mut Frame<'_>,
     area: Rect,
+    app: &App,
     active: Workspace,
     options: RenderOptions,
     theme: Theme,
@@ -392,8 +616,8 @@ fn render_workspace_header(
             Span::styled(format!(" {label} "), Style::default().fg(theme.muted))
         }
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+    let mut lines = vec![
+        Line::from(vec![
             Span::styled(
                 if options.ascii { " # " } else { " ◆ " },
                 Style::default().fg(theme.amber),
@@ -402,14 +626,109 @@ fn render_workspace_header(
             Span::styled("// ", Style::default().fg(theme.faint)),
             tab(Workspace::Planet, "PLANET"),
             Span::raw(" "),
-            tab(Workspace::Operations, "OPERATIONS"),
+            tab(Workspace::Overview, "OVERVIEW"),
             Span::raw(" "),
             tab(Workspace::System, "SYSTEM"),
-        ]))
-        .style(theme.panel_style())
-        .block(panel("", options, theme, PanelTone::Standard)),
+        ]),
+        Line::from(vec![
+            Span::styled(" OBJECTIVE // ", Style::default().fg(theme.amber).bold()),
+            Span::styled(
+                app.planet
+                    .as_ref()
+                    .map_or("Awaiting planetary state", |planet| {
+                        planet.objective.title.as_str()
+                    }),
+                Style::default().fg(theme.text_strong).bold(),
+            ),
+            Span::styled(" // ", Style::default().fg(theme.faint)),
+            Span::styled(
+                app.planet
+                    .as_ref()
+                    .map_or("", |planet| planet.objective.guidance.as_str()),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+    ];
+    if active == Workspace::Planet {
+        lines.push(planet_store_header_line(
+            app.planet.as_ref(),
+            area.width,
+            theme,
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.panel_style())
+            .block(panel("", options, theme, PanelTone::Standard)),
         area,
     );
+}
+
+fn planet_store_header_line(
+    planet: Option<&PlanetSnapshot>,
+    width: u16,
+    theme: Theme,
+) -> Line<'static> {
+    let Some(planet) = planet else {
+        return Line::styled(" STORES // awaiting planetary state", theme.muted);
+    };
+    let raw = planet.raw_inventory;
+    let refined = planet.refined_inventory;
+    let fabrication = planet.active_construction.as_ref().map_or_else(
+        || {
+            planet.relay_region_id.as_ref().map_or_else(
+                || "idle".to_owned(),
+                |region_id| format!("relay active at {}", region_designation(planet, region_id)),
+            )
+        },
+        |construction| {
+            format!(
+                "relay {}% at {}",
+                operation_progress(construction.remaining_ms, construction.phase_total_ms),
+                region_designation(planet, &construction.region_id)
+            )
+        },
+    );
+    if width < 86 {
+        return Line::from(vec![
+            Span::styled(" STORES // ", Style::default().fg(theme.amber).bold()),
+            Span::styled(
+                format!(
+                    "RAW {}/{}/{}  REF {}/{}/{}  FAB {fabrication}",
+                    raw.structural,
+                    raw.conductive,
+                    raw.silicate,
+                    refined.structural,
+                    refined.conductive,
+                    refined.silicate
+                ),
+                Style::default().fg(theme.text_strong),
+            ),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled(" GATHERED // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            format!(
+                "S {}  C {}  Si {}",
+                raw.structural, raw.conductive, raw.silicate
+            ),
+            Style::default().fg(theme.text_strong),
+        ),
+        Span::styled("   REFINED // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            format!(
+                "S {}  C {}  Si {}",
+                refined.structural, refined.conductive, refined.silicate
+            ),
+            Style::default().fg(theme.text_strong),
+        ),
+        Span::styled(
+            "   FABRICATION // ",
+            Style::default().fg(theme.amber).bold(),
+        ),
+        Span::styled(fabrication, Style::default().fg(theme.text_strong)),
+    ])
 }
 
 fn render_globe(
@@ -449,127 +768,58 @@ fn render_globe(
     );
 }
 
-fn render_region_summary(
+fn render_region_inspector(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
+    planet: &PlanetSnapshot,
     options: RenderOptions,
     theme: Theme,
 ) {
     let text = app.selected_region().map_or_else(
         || Text::from(Line::styled("No region selected.", theme.muted)),
         |region| {
-            let mut lines = vec![designation_line(&region.designation, region.core, theme)];
-            lines.push(field_line(
-                "KNOWLEDGE",
-                format!("{:?}", region.knowledge),
-                theme,
-            ));
-            lines.push(field_line(
-                "TERRAIN",
-                region
-                    .terrain
-                    .map_or_else(|| "unresolved".into(), |value| format!("{value:?}")),
-                theme,
-            ));
-            let reachable = region.within_scout_range || region.core;
-            if area.height < 9 {
-                lines.push(Line::from(vec![
-                    Span::styled("RANGE       ", Style::default().fg(theme.muted)),
-                    Span::styled(
-                        format!("{} hop(s)", region.hop_distance_from_core),
-                        Style::default().fg(theme.text_strong),
+            if let Some(action) = &app.pending_action {
+                let (title, warning) = match action {
+                    ContextAction::Extract(_) => {
+                        let risk = region
+                            .deposit
+                            .as_ref()
+                            .map_or("UNKNOWN", |deposit| risk_text(deposit.risk));
+                        (
+                            "CONFIRM EXTRACTION",
+                            format!(
+                                "{risk} loss risk. Probe and carried material may be permanently lost."
+                            ),
+                        )
+                    }
+                    ContextAction::ConstructRelay(_) => (
+                        "CONFIRM CONSTRUCTION",
+                        "Consume 8 structural, 6 conductive, and 6 silicate units here.".into(),
                     ),
-                    Span::styled("  //  ", Style::default().fg(theme.faint)),
-                    Span::styled(
-                        if reachable {
-                            "REACHABLE"
-                        } else {
-                            "OUT OF RANGE"
-                        },
-                        Style::default()
-                            .fg(if reachable {
-                                theme.success
-                            } else {
-                                theme.muted
-                            })
-                            .bold(),
-                    ),
-                ]));
-            } else {
-                lines.insert(1, Line::from(""));
-                lines.push(field_line(
-                    "RANGE",
-                    format!("{} hop(s)", region.hop_distance_from_core),
-                    theme,
-                ));
-                lines.push(Line::styled(
-                    if reachable {
-                        if options.ascii {
-                            "+ REACHABLE"
-                        } else {
-                            "● REACHABLE"
-                        }
-                    } else if options.ascii {
-                        "- BEYOND SCOUT RANGE"
-                    } else {
-                        "○ BEYOND SCOUT RANGE"
-                    },
-                    Style::default().fg(if reachable {
-                        theme.success
-                    } else {
-                        theme.muted
-                    }),
-                ));
-                lines.push(Line::from(""));
+                    _ => ("CONFIRM ACTION", "Confirm the selected operation.".into()),
+                };
+                return Text::from(vec![
+                    Line::styled(title, Style::default().fg(theme.warning).bold()),
+                    Line::from(""),
+                    designation_line(&region.designation, region.core, theme),
+                    Line::from(""),
+                    Line::styled(warning, Style::default().fg(theme.text_strong)),
+                    Line::from(""),
+                    key_line("ENTER", "confirm", theme),
+                    key_line("ESC", "cancel", theme),
+                ]);
             }
-            lines.push(key_line("ENTER", "region details", theme));
-            Text::from(lines)
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .style(theme.panel_style())
-            .block(panel(
-                " SELECTED REGION ",
-                options,
-                theme,
-                PanelTone::Standard,
-            )),
-        area,
-    );
-}
 
-fn render_region_detail(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    options: RenderOptions,
-    theme: Theme,
-) {
-    let detail_area = centered_rect(58.min(area.width.saturating_sub(2)), 16, area);
-    let text = app.selected_region().map_or_else(
-        || Text::from(Line::styled("No region selected.", theme.muted)),
-        |region| {
-            let action = match app.context_action() {
-                Some(ContextAction::Deploy(_)) => key_line("ENTER", "deploy Scout 01", theme),
-                _ if region.core => Line::styled(
-                    "Scout 01 is already based here.",
-                    Style::default().fg(theme.muted),
-                ),
-                _ if !region.within_scout_range => Line::styled(
-                    "Destination exceeds current scout range.",
-                    Style::default().fg(theme.warning),
-                ),
-                _ => Line::styled(
-                    "Scout unavailable // inspect Operations.",
-                    Style::default().fg(theme.muted),
-                ),
-            };
-            Text::from(vec![
+            let mut lines = vec![
                 designation_line(&region.designation, region.core, theme),
                 Line::from(""),
+                section_line("ACTIVE IN REGION", theme),
+            ];
+            lines.extend(local_operation_lines(planet, region, theme));
+            lines.extend([
+                Line::from(""),
+                section_line("REGION DATA", theme),
                 field_line("KNOWLEDGE", format!("{:?}", region.knowledge), theme),
                 field_line("TERRAIN", option_debug(region.terrain), theme),
                 field_line("TEMPERATURE", option_debug(region.temperature), theme),
@@ -584,20 +834,512 @@ fn render_region_detail(
                     format!("{} hop(s)", region.hop_distance_from_core),
                     theme,
                 ),
-                Line::from(""),
-                action,
-                key_line("ESC", "close", theme),
-            ])
+                field_line(
+                    "NETWORK",
+                    if region.within_scout_range || region.core {
+                        "reachable".into()
+                    } else {
+                        "beyond current reach".into()
+                    },
+                    theme,
+                ),
+            ]);
+            if let Some(deposit) = &region.deposit {
+                lines.push(field_line(
+                    "DEPOSIT",
+                    format!("{:?} // {} units", deposit.resource, deposit.remaining),
+                    theme,
+                ));
+                lines.push(field_line("LOSS RISK", risk_text(deposit.risk).to_owned(), theme));
+            } else if region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed {
+                lines.push(field_line("DEPOSIT", "none detected".into(), theme));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(section_line("LOCAL PRESENCE", theme));
+            lines.extend(region_presence_lines(planet, region, theme));
+            lines.push(Line::from(""));
+            lines.push(section_line("REGION OPERATIONS", theme));
+            lines.extend(region_action_lines(app, planet, region, theme));
+            Text::from(lines)
         },
     );
-    frame.render_widget(Clear, detail_area);
     frame.render_widget(
         Paragraph::new(text)
             .wrap(Wrap { trim: true })
-            .style(theme.raised_style())
-            .block(panel(" REGION DETAIL ", options, theme, PanelTone::Modal)),
-        detail_area,
+            .scroll((app.region_panel_scroll, 0))
+            .style(if app.pending_action.is_some() {
+                theme.raised_style()
+            } else {
+                theme.panel_style()
+            })
+            .block(panel(
+                if app.pending_action.is_some() {
+                    " REGION CONFIRMATION "
+                } else {
+                    " REGION INSPECTOR "
+                },
+                options,
+                theme,
+                if app.pending_action.is_some() {
+                    PanelTone::Modal
+                } else {
+                    PanelTone::Standard
+                },
+            )),
+        area,
     );
+}
+
+fn local_operation_lines(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut has_active_operation = false;
+
+    if let Some(mission) = planet
+        .active_mission
+        .as_ref()
+        .filter(|mission| mission.target_region_id == region.id)
+    {
+        has_active_operation = true;
+        lines.push(operation_title(
+            &planet.scout.designation,
+            mission.mission_id,
+            mission.phase,
+            theme,
+        ));
+        lines.push(field_line(
+            "PROGRESS",
+            format!(
+                "{}% // {}",
+                operation_progress(mission.remaining_ms, mission.phase_total_ms),
+                scout_remaining_text(mission)
+            ),
+            theme,
+        ));
+    }
+
+    if let Some(mission) = planet
+        .active_extraction
+        .as_ref()
+        .filter(|mission| mission.target_region_id == region.id)
+    {
+        has_active_operation = true;
+        lines.push(operation_title(
+            &planet.extractor.designation,
+            mission.mission_id,
+            mission.phase,
+            theme,
+        ));
+        lines.push(field_line(
+            "PROGRESS",
+            format!(
+                "{}% // {}s // {} // cap {}",
+                operation_progress(mission.remaining_ms, mission.phase_total_ms),
+                mission.remaining_ms.div_ceil(1_000),
+                risk_text(mission.risk),
+                mission.cargo_capacity
+            ),
+            theme,
+        ));
+    }
+
+    if let Some(construction) = planet
+        .active_construction
+        .as_ref()
+        .filter(|construction| construction.region_id == region.id)
+    {
+        has_active_operation = true;
+        lines.push(Line::styled(
+            "RANGE RELAY // CONSTRUCTING",
+            Style::default().fg(theme.cyan_bright).bold(),
+        ));
+        lines.push(field_line(
+            "PROGRESS",
+            format!(
+                "{}% // {}s remaining",
+                operation_progress(construction.remaining_ms, construction.phase_total_ms),
+                construction.remaining_ms.div_ceil(1_000)
+            ),
+            theme,
+        ));
+    }
+
+    if region.core && planet.refining_remaining_ms > 0 {
+        has_active_operation = true;
+        lines.push(Line::styled(
+            "CORE REFINING // ACTIVE",
+            Style::default().fg(theme.cyan_bright).bold(),
+        ));
+        lines.push(field_line(
+            "NEXT UNIT",
+            format!("{}s", planet.refining_remaining_ms.div_ceil(1_000)),
+            theme,
+        ));
+    }
+    if region.core && planet.extractor.rebuild_remaining_ms > 0 {
+        has_active_operation = true;
+        lines.push(Line::styled(
+            "EXTRACTOR REBUILD // ACTIVE",
+            Style::default().fg(theme.warning).bold(),
+        ));
+        lines.push(field_line(
+            "REMAINING",
+            format!("{}s", planet.extractor.rebuild_remaining_ms.div_ceil(1_000)),
+            theme,
+        ));
+    }
+
+    if !has_active_operation {
+        lines.push(Line::styled(
+            "No active operation in this region.",
+            Style::default().fg(theme.muted),
+        ));
+    }
+    if let Some(report) = planet
+        .recent_reports
+        .iter()
+        .rev()
+        .find(|report| report.region_id == region.id)
+    {
+        lines.push(field_line(
+            "LAST REPORT",
+            format!(
+                "#{:03} // {}",
+                report.mission_id,
+                report_outcome_label(report.outcome)
+            ),
+            theme,
+        ));
+    }
+    lines
+}
+
+fn operation_title<T: std::fmt::Debug>(
+    designation: &str,
+    mission_id: u64,
+    phase: T,
+    theme: Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            designation.to_owned(),
+            Style::default().fg(theme.cyan_bright).bold(),
+        ),
+        Span::styled(
+            format!(" #{mission_id:03} // "),
+            Style::default().fg(theme.faint),
+        ),
+        Span::styled(
+            format!("{phase:?}").to_uppercase(),
+            Style::default().fg(theme.amber).bold(),
+        ),
+    ])
+}
+
+fn scout_remaining_text(mission: &mind_core::protocol::ActiveMissionSnapshot) -> String {
+    if mission.phase == ScoutState::Holding {
+        "holding until recalled".into()
+    } else {
+        format!("{}s remaining", mission.remaining_ms.div_ceil(1_000))
+    }
+}
+
+fn region_presence_lines(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if region.core {
+        lines.push(field_line("STRUCTURE", "starting core".into(), theme));
+    }
+    if region.relay {
+        lines.push(field_line("STRUCTURE", "active range relay".into(), theme));
+    }
+    if let Some(construction) = planet
+        .active_construction
+        .as_ref()
+        .filter(|construction| construction.region_id == region.id)
+    {
+        lines.push(field_line(
+            "CONSTRUCTION",
+            format!(
+                "range relay // {}% // {}s",
+                operation_progress(construction.remaining_ms, construction.phase_total_ms),
+                construction.remaining_ms.div_ceil(1_000)
+            ),
+            theme,
+        ));
+    }
+
+    let scout_presence = if let Some(mission) = planet
+        .active_mission
+        .as_ref()
+        .filter(|mission| mission.target_region_id == region.id)
+    {
+        let relation = match mission.phase {
+            ScoutState::Outbound => "inbound",
+            ScoutState::Surveying => "surveying locally",
+            ScoutState::Holding => "holding locally",
+            ScoutState::Returning => "returning from region",
+            ScoutState::Ready => "ready",
+        };
+        format!("{} // {relation}", planet.scout.designation)
+    } else if planet.active_mission.is_none() && planet.scout.region_id == region.id {
+        format!("{} // stationed", planet.scout.designation)
+    } else {
+        "none stationed".into()
+    };
+    lines.push(field_line("SCOUT", scout_presence, theme));
+
+    let extractor_presence = if let Some(mission) = planet
+        .active_extraction
+        .as_ref()
+        .filter(|mission| mission.target_region_id == region.id)
+    {
+        let relation = match mission.phase {
+            mind_core::protocol::ExtractorState::Outbound => "inbound",
+            mind_core::protocol::ExtractorState::Extracting => "extracting locally",
+            mind_core::protocol::ExtractorState::Returning => "returning from region",
+            mind_core::protocol::ExtractorState::Ready => "ready",
+            mind_core::protocol::ExtractorState::Rebuilding => "rebuilding",
+        };
+        format!("{} // {relation}", planet.extractor.designation)
+    } else if region.core && planet.active_extraction.is_none() {
+        match planet.extractor.state {
+            mind_core::protocol::ExtractorState::Ready => {
+                format!("{} // stationed", planet.extractor.designation)
+            }
+            mind_core::protocol::ExtractorState::Rebuilding => format!(
+                "{} // rebuilding // {}s",
+                planet.extractor.designation,
+                planet.extractor.rebuild_remaining_ms.div_ceil(1_000)
+            ),
+            _ => "none stationed".into(),
+        }
+    } else {
+        "none stationed".into()
+    };
+    lines.push(field_line("EXTRACTOR", extractor_presence, theme));
+    lines
+}
+
+fn region_action_lines(
+    app: &App,
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let primary = app.primary_region_action();
+    vec![
+        region_action_line(
+            "S",
+            "survey",
+            ContextAction::Deploy(region.id.clone()),
+            app.scout_action(),
+            primary.as_ref(),
+            survey_block_reason(planet, region),
+            theme,
+        ),
+        region_action_line(
+            "X",
+            "extract",
+            ContextAction::Extract(region.id.clone()),
+            app.extraction_action(),
+            primary.as_ref(),
+            extraction_block_reason(planet, region),
+            theme,
+        ),
+        region_action_line(
+            "B",
+            "build relay",
+            ContextAction::ConstructRelay(region.id.clone()),
+            app.construction_action(),
+            primary.as_ref(),
+            construction_block_reason(planet, region),
+            theme,
+        ),
+        region_action_line(
+            "R",
+            "recall scout",
+            ContextAction::Recall,
+            app.scout_recall_action(),
+            primary.as_ref(),
+            recall_block_reason(planet, region),
+            theme,
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn region_action_line(
+    key: &'static str,
+    label: &'static str,
+    action: ContextAction,
+    available: Option<ContextAction>,
+    primary: Option<&ContextAction>,
+    block_reason: String,
+    theme: Theme,
+) -> Line<'static> {
+    let is_available = available.as_ref() == Some(&action);
+    let is_primary = is_available && primary == Some(&action);
+    Line::from(vec![
+        Span::styled(format!("[{key}] "), Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(if is_available {
+                    theme.text_strong
+                } else {
+                    theme.muted
+                })
+                .add_modifier(if is_available {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::styled(" // ", Style::default().fg(theme.faint)),
+        Span::styled(
+            if is_primary {
+                "ready // ENTER".to_owned()
+            } else if is_available {
+                "ready".to_owned()
+            } else {
+                block_reason
+            },
+            Style::default().fg(if is_available {
+                theme.success
+            } else {
+                theme.muted
+            }),
+        ),
+    ])
+}
+
+fn risk_text(risk: mind_core::protocol::RiskLevel) -> &'static str {
+    match risk {
+        mind_core::protocol::RiskLevel::Low => "LOW // 5%",
+        mind_core::protocol::RiskLevel::Moderate => "MODERATE // 15%",
+        mind_core::protocol::RiskLevel::High => "HIGH // 30%",
+    }
+}
+
+fn survey_block_reason(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+) -> String {
+    if region.core {
+        return "core region needs no deployment".into();
+    }
+    if !region.within_scout_range {
+        return "beyond current network reach".into();
+    }
+    if planet.scout.state != ScoutState::Ready {
+        return planet.active_mission.as_ref().map_or_else(
+            || format!("scout is {:?}", planet.scout.state).to_lowercase(),
+            |mission| {
+                format!(
+                    "scout assigned to {}",
+                    region_designation(planet, &mission.target_region_id)
+                )
+            },
+        );
+    }
+    "ready".into()
+}
+
+fn extraction_block_reason(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+) -> String {
+    let Some(deposit) = &region.deposit else {
+        return if region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed {
+            "no deposit detected".into()
+        } else {
+            "survey required".into()
+        };
+    };
+    if !region.within_scout_range {
+        return "beyond current network reach".into();
+    }
+    if deposit.remaining == 0 {
+        return "deposit depleted".into();
+    }
+    match planet.extractor.state {
+        mind_core::protocol::ExtractorState::Ready => "ready".into(),
+        mind_core::protocol::ExtractorState::Rebuilding => format!(
+            "rebuilding // {}s remaining",
+            planet.extractor.rebuild_remaining_ms.div_ceil(1_000)
+        ),
+        _ => planet.active_extraction.as_ref().map_or_else(
+            || format!("extractor is {:?}", planet.extractor.state).to_lowercase(),
+            |mission| {
+                format!(
+                    "extractor assigned to {}",
+                    region_designation(planet, &mission.target_region_id)
+                )
+            },
+        ),
+    }
+}
+
+fn construction_block_reason(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+) -> String {
+    if region.core {
+        return "core already provides network presence".into();
+    }
+    if region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed {
+        return "survey required".into();
+    }
+    if !region.within_scout_range {
+        return "beyond current network reach".into();
+    }
+    if let Some(relay_region_id) = &planet.relay_region_id {
+        return format!(
+            "relay already active at {}",
+            region_designation(planet, relay_region_id)
+        );
+    }
+    if let Some(construction) = &planet.active_construction {
+        return format!(
+            "construction active at {}",
+            region_designation(planet, &construction.region_id)
+        );
+    }
+    let stock = planet.refined_inventory;
+    if stock.structural < 8 || stock.conductive < 6 || stock.silicate < 6 {
+        return format!(
+            "needs S 8 / C 6 / Si 6 // have {} / {} / {}",
+            stock.structural, stock.conductive, stock.silicate
+        );
+    }
+    "ready".into()
+}
+
+fn recall_block_reason(
+    planet: &PlanetSnapshot,
+    region: &mind_core::protocol::RegionSnapshot,
+) -> String {
+    let Some(mission) = &planet.active_mission else {
+        return "no active scout operation".into();
+    };
+    if mission.target_region_id != region.id {
+        return format!(
+            "scout assigned to {}",
+            region_designation(planet, &mission.target_region_id)
+        );
+    }
+    if mission.phase == ScoutState::Returning {
+        return "already returning".into();
+    }
+    "ready".into()
 }
 
 fn option_debug<T: std::fmt::Debug>(value: Option<T>) -> String {
@@ -633,7 +1375,7 @@ fn render_workspace_footer(
             Span::styled(notice.clone(), Style::default().fg(theme.text)),
         ]);
     }
-    let content = if area.width < 100 {
+    let content = if area.width < 140 {
         Text::from(vec![
             Line::from(spans),
             Line::from(hint_spans(controls, theme)),
@@ -859,7 +1601,7 @@ fn render_dashboard(
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if area.width >= 72
     {
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(7),
             Constraint::Min(6),
             Constraint::Length(2),
@@ -870,7 +1612,7 @@ fn render_dashboard(
         (rows[0], columns[0], columns[1], rows[2], rows[3])
     } else {
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Min(6),
@@ -879,7 +1621,7 @@ fn render_dashboard(
         .split(area);
         (rows[0], rows[1], rows[2], rows[3], rows[4])
     };
-    render_workspace_header(frame, header_area, Workspace::System, options, theme);
+    render_workspace_header(frame, header_area, app, Workspace::System, options, theme);
 
     let (system, diagnostic) = if let Some(snapshot) = &app.snapshot {
         (
@@ -965,21 +1707,35 @@ fn render_dashboard(
                 EngineEventKind::DiagnosticPulse => "DIAG",
                 EngineEventKind::OnboardingCompleted => "READY",
                 EngineEventKind::SaveReset => "RESET",
+                EngineEventKind::SaveMigrated => "MIGRATE",
                 EngineEventKind::ScoutDeployed => "SCOUT",
                 EngineEventKind::RegionDetected => "SCAN",
                 EngineEventKind::SurveyCompleted => "SURVEY",
                 EngineEventKind::ScoutRecallRequested => "RECALL",
                 EngineEventKind::ScoutReturned => "RETURN",
+                EngineEventKind::ExtractorDeployed => "EXTRACT",
+                EngineEventKind::ExtractionCompleted => "CARGO",
+                EngineEventKind::ExtractorLost => "LOSS",
+                EngineEventKind::ExtractorRebuilt => "REBUILD",
+                EngineEventKind::RelayConstructionStarted => "BUILD",
+                EngineEventKind::RelayActivated => "RELAY",
+                EngineEventKind::AlphaMilestoneCompleted => "ALPHA",
                 EngineEventKind::PersistenceDegraded => "SAVE!",
                 EngineEventKind::PersistenceRecovered => "SAVE",
                 EngineEventKind::ShutdownRequested => "STOP",
             };
             let tag_color = match event.kind {
-                EngineEventKind::PersistenceDegraded => theme.danger,
+                EngineEventKind::PersistenceDegraded | EngineEventKind::ExtractorLost => {
+                    theme.danger
+                }
                 EngineEventKind::ShutdownRequested | EngineEventKind::SaveReset => theme.warning,
                 EngineEventKind::DiagnosticPulse
                 | EngineEventKind::OnboardingCompleted
                 | EngineEventKind::SurveyCompleted
+                | EngineEventKind::ExtractionCompleted
+                | EngineEventKind::ExtractorRebuilt
+                | EngineEventKind::RelayActivated
+                | EngineEventKind::AlphaMilestoneCompleted
                 | EngineEventKind::PersistenceRecovered => theme.success,
                 _ => theme.cyan,
             };
@@ -1235,7 +1991,7 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, t
 fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
     let help_area = centered_rect(
         54.min(area.width.saturating_sub(2)),
-        18.min(area.height.saturating_sub(2)),
+        24.min(area.height.saturating_sub(2)),
         area,
     );
     let help = Text::from(vec![
@@ -1247,11 +2003,24 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme:
         Line::from(""),
         section_line("PLANET", theme),
         key_line("ARROWS", "navigate regions", theme),
-        key_line("ENTER", "details / deploy", theme),
-        key_line("ESC", "close details", theme),
+        key_line("ENTER", "use the selected region's primary action", theme),
+        key_line("S", "deploy survey scout", theme),
+        key_line("X", "prepare extraction from a known deposit", theme),
+        key_line("B", "prepare relay construction when funded", theme),
+        key_line("R", "recall the scout assigned to this region", theme),
+        key_line("PGUP / PGDN", "scroll the region inspector", theme),
         Line::from(""),
-        section_line("OPERATIONS", theme),
-        key_line("ENTER", "recall active scout", theme),
+        section_line("OVERVIEW", theme),
+        key_line("ARROWS", "select an operation or report", theme),
+        key_line("ENTER", "inspect its region on the globe", theme),
+        Line::styled(
+            "Extraction can permanently lose its probe and cargo.",
+            Style::default().fg(theme.warning),
+        ),
+        Line::styled(
+            "The core always rebuilds a replacement; progress cannot softlock.",
+            Style::default().fg(theme.muted),
+        ),
     ]);
     frame.render_widget(Clear, help_area);
     frame.render_widget(
@@ -1394,7 +2163,7 @@ mod tests {
 
     fn status(complete: bool) -> StatusSnapshot {
         StatusSnapshot {
-            protocol_version: 4,
+            protocol_version: 5,
             daemon_version: "0.1.0".into(),
             pid: 1,
             health: HealthState::Ready,
@@ -1513,6 +2282,57 @@ mod tests {
     }
 
     #[test]
+    fn overview_and_risk_confirmation_explain_progress_and_loss() {
+        let mut state = mind_core::game::GameState::with_seed(44);
+        state.complete_onboarding([2, 2, 2]);
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 1)
+            .unwrap();
+        state.deploy_scout(&target.id);
+        state.advance(45_000);
+
+        let mut app = App::default();
+        app.apply_snapshot(status(true), Instant::now());
+        app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
+        app.connected();
+        app.workspace = Workspace::Overview;
+        let overview = screen(
+            &app,
+            100,
+            30,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(overview.contains("PLANETARY ACTIVITY"));
+        assert!(overview.contains("PLANET STATUS"));
+        assert!(overview.contains("MATERIALS"));
+        assert!(overview.contains("OBJECTIVE"));
+
+        app.workspace = Workspace::Planet;
+        app.selected_region_id = Some(target.id.clone());
+        app.request_confirmation(ContextAction::Extract(target.id));
+        let confirmation = screen(
+            &app,
+            100,
+            30,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(confirmation.contains("CONFIRM EXTRACTION"));
+        assert!(confirmation.contains("permanently"));
+        assert!(confirmation.contains("lost"));
+        assert!(confirmation.contains("confirm"));
+    }
+
+    #[test]
     fn confirmation_and_dashboard_frames_are_readable() {
         let mut app = App::default();
         app.apply_snapshot(status(false), Instant::now());
@@ -1544,7 +2364,7 @@ mod tests {
             },
         );
         assert!(planet.contains("REGIONAL GLOBE"));
-        assert!(planet.contains("SELECTED REGION"));
+        assert!(planet.contains("REGION INSPECTOR"));
         assert!(planet.contains("detach"));
         assert!(planet.contains("help"));
 
@@ -1571,10 +2391,21 @@ mod tests {
             },
         );
         assert!(narrow.contains("REGIONAL GLOBE"));
-        assert!(narrow.contains("SELECTED REGION"));
-        assert!(narrow.contains("REACHABLE"));
-        assert!(narrow.contains("region details"));
+        assert!(narrow.contains("REGION INSPECTOR"));
+        assert!(narrow.contains("REGION DATA"));
         assert!(narrow.contains("detach"));
+
+        app.region_panel_scroll = 14;
+        let scrolled = screen(
+            &app,
+            50,
+            28,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(scrolled.contains("REGION OPERATIONS"));
     }
 
     #[test]
@@ -1592,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn operations_uses_player_facing_region_designations() {
+    fn overview_uses_player_facing_region_designations() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
         let planet = engine.planet().unwrap();
@@ -1608,7 +2439,7 @@ mod tests {
         let mut app = App::default();
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(engine.planet().unwrap(), Instant::now());
-        app.workspace = Workspace::Operations;
+        app.workspace = Workspace::Overview;
         let output = screen(
             &app,
             80,
@@ -1621,6 +2452,87 @@ mod tests {
 
         assert!(output.contains(&target_designation));
         assert!(!output.contains(&target_id));
+    }
+
+    #[test]
+    fn planet_inspector_and_overview_show_concurrent_probe_relationships() {
+        let mut state = mind_core::game::GameState::with_seed(91);
+        state.complete_onboarding([2, 2, 2]);
+        let candidates = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .filter(|region| region.within_scout_range && !region.core)
+            .map(|region| (region.id, region.hop_distance_from_core))
+            .collect::<Vec<_>>();
+        let mut target = None;
+        for (region_id, hops) in candidates {
+            assert!(state.deploy_scout(&region_id).ok);
+            state.advance(u64::from(hops) * 15_000 + 30_000);
+            let surveyed = state
+                .planet_snapshot()
+                .unwrap()
+                .regions
+                .into_iter()
+                .find(|region| region.id == region_id)
+                .unwrap();
+            assert!(state.recall_scout().ok);
+            state.advance(u64::from(hops) * 15_000);
+            if surveyed.deposit.is_some() {
+                target = Some(surveyed);
+                break;
+            }
+        }
+        let target = target.expect("generated starting range should contain a deposit");
+        let expected_risk = risk_text(target.deposit.as_ref().unwrap().risk);
+        assert!(state.deploy_scout(&target.id).ok);
+        assert!(state.deploy_extractor(&target.id).ok);
+
+        let mut app = App::default();
+        app.apply_snapshot(status(true), Instant::now());
+        app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
+        app.connected();
+        app.selected_region_id = Some(target.id.clone());
+        let planet = screen(
+            &app,
+            120,
+            40,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(planet.contains("GATHERED"));
+        assert!(planet.contains("REFINED"));
+        assert!(planet.contains("FABRICATION"));
+        assert!(planet.contains("ACTIVE IN REGION"));
+        assert!(planet.contains("Scout 01 #"));
+        assert!(planet.contains("Extractor 01 #"));
+        assert!(planet.contains("PROGRESS"));
+        assert!(planet.contains(expected_risk));
+        assert!(planet.contains("cap 4"));
+        assert!(planet.contains("LOCAL PRESENCE"));
+        assert!(planet.matches("inbound").count() >= 2);
+        assert!(planet.contains("recall scout"));
+
+        app.workspace = Workspace::Overview;
+        let overview = screen(
+            &app,
+            120,
+            40,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(overview.contains(&state.planet_snapshot().unwrap().scout.designation));
+        assert!(overview.contains(&state.planet_snapshot().unwrap().extractor.designation));
+        assert!(overview.matches("OUTBOUND").count() >= 2);
+        assert!(overview.contains("MATERIAL STORES"));
+        assert!(overview.contains("raw 0 // refined 0"));
+        assert!(overview.contains("FABRICATION"));
+        assert!(overview.contains("capacity 4 units"));
     }
 
     #[test]
