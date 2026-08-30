@@ -32,8 +32,11 @@ optimization without requiring memorized commands, repetitive input, reflexes, o
 constant supervision.
 
 The terminal is the game's visual language rather than a limitation to hide. Maps,
-motion, symbols, layered panels, and restrained color should make the world feel alive
-while preserving equivalent ASCII and monochrome presentations.
+motion, symbols, layered panels, and restrained color should make the world feel alive.
+Where graphical presentation strengthens atmosphere or comprehension, the visual
+direction should draw from late-1980s and early-1990s pixel-art games through strong
+silhouettes, limited palettes, tile-like composition, and expressive but economical
+animation. Equivalent ASCII and monochrome presentations must remain available.
 
 ### Design pillars
 
@@ -122,6 +125,18 @@ Regions are strategic areas rather than movement tiles. Selecting one should exp
 its known conditions, current operations, local presence, opportunities, risks,
 available actions, and exact blockers without forcing the player to change workspace.
 
+### Regions and subregions
+
+Each globe-scale region contains its own explorable subregions. Globe regions govern
+planetary navigation, communications coverage, and strategic reach; subregions
+provide the local scale for terrain, deposits, hazards, structures, routes,
+discoveries, and operations.
+
+The two scales should remain legible together. A player inspecting or operating in a
+subregion must retain a clear sense of its parent region and a quick route back to the
+globe. Subregions should create meaningful local exploration without turning
+planet-wide movement into tile-by-tile micromanagement or multiplying routine chores.
+
 ### Probes and operations
 
 Probes begin as limited mobile senses and tools. Later designs should create distinct
@@ -181,6 +196,21 @@ core action may depend on it. Common actions should use selection and contextual
 controls, every screen should provide help, unavailable actions should explain their
 blockers, and destructive actions should require a clear confirmation.
 
+### Visual direction
+
+Prefer graphical and spatial presentation wherever it communicates the world or an
+operation better than prose alone. Terminal-native maps, local scenes, tile-like
+terrain, compact sprites, diagrams, animation, and environmental effects should evoke
+the clarity and character of late-1980s and early-1990s pixel art without merely
+imitating a particular game or platform.
+
+The visual language must remain functional rather than ornamental: graphics should
+communicate state, hierarchy, movement, risk, and change. Unicode and color may enrich
+the primary presentation, while ASCII, monochrome, narrow, and low-capability modes
+must convey the same actionable information.
+
+### Workspace model
+
 The workspace model is:
 
 - **Planet:** the globe and complete selected-region information; all region-specific
@@ -192,6 +222,12 @@ The workspace model is:
 - **System:** connection state, daemon telemetry, diagnostics, and engine events.
 - **Archive:** a future permanent record of approved discoveries and their
   player-visible context.
+
+When subregions are introduced, Planet should provide the transition between the
+globe-scale region and its local view without creating a separate command model or
+duplicating regional actions in Overview.
+
+### Presentation requirements
 
 The interface should preserve:
 
@@ -309,11 +345,13 @@ well paced, visually compelling, and resilient under real play:
    path from surveying through research and automation.
 2. Tune operation durations, costs, resource distribution, risk, recovery, and
    information density from observed play rather than adding rewards to mask friction.
-3. Complete the geological and research slices with energy, transport, loadout
+3. Strengthen the terminal-native graphical presentation and establish the
+   pixel-art-inspired visual language across the globe, operations, and feedback.
+4. Complete the geological and research slices with energy, transport, loadout
    tradeoffs, environmental requirements, damage, recovery, and salvage.
-4. Expand automation only where players have demonstrated understanding and meaningful
+5. Expand automation only where players have demonstrated understanding and meaningful
    choices remain visible.
-5. Preserve restart continuity, fallback rendering, reconnect behavior, and
+6. Preserve restart continuity, fallback rendering, reconnect behavior, and
    spoiler-safe data boundaries while the systems deepen.
 
 This stage is complete when a new player can progress through the alpha without an
@@ -324,7 +362,7 @@ and leave with more than one sensible next plan.
 
 | Phase | Direction | Intended outcome |
 | --- | --- | --- |
-| 4 | Bases and planetary network | Temporary reach becomes durable, locally legible infrastructure with power, production, routes, failure, and recovery. |
+| 4 | Subregions, bases, and planetary network | Globe regions open into locally legible subregions where temporary reach becomes durable infrastructure with power, production, routes, failure, and recovery. |
 | 5 | External co-processor | Optional research-gated tools, SKILLS, scoped policies, approvals, and audits assist without bypassing the game. |
 | 6 | Breadcrumb progression | A permanent archive and approved, guarantee-paced discoveries connect investigation to planetary play. |
 | 7 | Breadth and longevity | More environments, probe roles, production choices, events, visual effects, balance depth, and optional pulses support long-running saves. |
@@ -346,7 +384,9 @@ Substrate succeeds when:
   automation without mandatory micromanagement;
 - failures matter but do not erase permanent knowledge or make a save unwinnable;
 - rare discoveries remain coherent, fair, and compelling across a long-running save;
-- the interface remains visually distinctive and readable across supported terminal
-  sizes and fallbacks;
+- the globe and its subregions remain understandable as one hierarchy, allowing local
+  operations without losing planetary context;
+- the interface develops a distinctive terminal-native, pixel-art-inspired graphical
+  identity while remaining readable across supported terminal sizes and fallbacks;
 - external assistance, when enabled, is useful, optional, revocable, and limited to
   the player's unlocked and visible capabilities.
