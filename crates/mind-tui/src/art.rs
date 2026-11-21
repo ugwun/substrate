@@ -6,7 +6,8 @@
 
 use crate::{theme::Theme, ui::RenderOptions};
 use mind_core::protocol::{
-    BaseModuleKind, BaseSnapshot, SubregionClass, SubregionKnowledge, SubregionSnapshot,
+    AtmosphericSeverity, BaseModuleKind, BaseSnapshot, PlanetSnapshot, RegionKnowledge,
+    RegionSnapshot, SubregionClass, SubregionKnowledge, SubregionSnapshot, TerrainClass,
 };
 use ratatui::{
     layout::Rect,
@@ -182,6 +183,372 @@ pub fn local_sector_art(params: LocalSectorArtParams<'_>) -> Vec<Line<'static>> 
     vec![
         Line::styled(top.to_owned(), terrain_style),
         Line::styled(bottom.to_owned(), terrain_style),
+    ]
+}
+
+/// 5-row late-1980s pixel-art regional horizon diorama for the Planet inspector.
+///
+/// Renders only discovered terrain, atmosphere, and player-visible presence; unknown regions
+/// display interference static and never leak undiscovered truth.
+pub fn region_terrain_diorama(
+    region: &RegionSnapshot,
+    planet: &PlanetSnapshot,
+    phase: f64,
+    options: RenderOptions,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let blink = (phase * 3.0).floor() as i64 % 2 == 0;
+    let width = 34usize;
+
+    if region.knowledge == RegionKnowledge::Unknown || region.terrain.is_none() {
+        let noise_a = if options.ascii {
+            if blink {
+                ". : . : . : . : . : . : . : . : . "
+            } else {
+                ": . : . : . : . : . : . : . : . : "
+            }
+        } else if blink {
+            "░▒░ ░▒░ ░▒░ ░▒░ ░▒░ ░▒░ ░▒░ ░▒░ ░▒"
+        } else {
+            "▒░▒ ▒░▒ ▒░▒ ▒░▒ ▒░▒ ▒░▒ ▒░▒ ▒░▒ ▒░"
+        };
+        let noise_b = if options.ascii {
+            "  : .   UNRESOLVED HORIZON   . :  "
+        } else {
+            "  ▒░  [ UNRESOLVED HORIZON ]  ░▒  "
+        };
+        let noise_c = if options.ascii {
+            ": . : . :  SURVEY REQUIRED  : . : "
+        } else {
+            "░▒░▒░   SURVEY TO RESOLVE   ▒░▒░▒░"
+        };
+        return vec![
+            Line::styled(noise_a, Style::default().fg(theme.faint)),
+            Line::styled(noise_b, Style::default().fg(theme.muted).bold()),
+            Line::styled(noise_c, Style::default().fg(theme.faint)),
+        ];
+    }
+
+    let terrain = region.terrain.unwrap_or(TerrainClass::Plain);
+    let has_base = planet
+        .network
+        .bases
+        .iter()
+        .any(|base| base.region_id == region.id);
+    let scout_here = planet.scout.region_id == region.id
+        || planet
+            .active_mission
+            .as_ref()
+            .is_some_and(|m| m.target_region_id == region.id);
+    let extractor_here = planet
+        .active_extraction
+        .as_ref()
+        .is_some_and(|m| m.target_region_id == region.id);
+
+    let sky_base = match (options.ascii, region.atmospheric_severity, blink) {
+        (true, Some(AtmosphericSeverity::Severe), true) => "  ////  //   ////   //   ////   / ",
+        (true, Some(AtmosphericSeverity::Severe), false) => " ////   ///   ////  ///   ////    ",
+        (true, Some(AtmosphericSeverity::Variable), true) => " .   ~ ~    .    ~ ~    .    ~ ~  ",
+        (true, Some(AtmosphericSeverity::Variable), false) => "  .    ~ ~    .    ~ ~    .   ~   ",
+        (true, _, _) => "  .      *       .        .    *  ",
+        (false, Some(AtmosphericSeverity::Severe), true) => "  ╱╱╱╱  ╱╱   ╱╱╱╱   ╱╱   ╱╱╱╱   ╱ ",
+        (false, Some(AtmosphericSeverity::Severe), false) => " ╱╱╱╱   ╱╱╱   ╱╱╱╱  ╱╱╱   ╱╱╱╱    ",
+        (false, Some(AtmosphericSeverity::Variable), true) => " ·   ≈≈    ·    ≈≈    ·    ≈≈    ·",
+        (false, Some(AtmosphericSeverity::Variable), false) => "  ·    ≈≈    ·    ≈≈    ·   ≈    ·",
+        (false, _, _) => "  ·      ✧       ·        ·    ✧  ",
+    };
+
+    let craft_tag = if scout_here && extractor_here {
+        if options.ascii {
+            "[S+X]"
+        } else {
+            "◈ ▣"
+        }
+    } else if scout_here {
+        if options.ascii {
+            "<S>"
+        } else {
+            "◈"
+        }
+    } else if extractor_here {
+        if options.ascii {
+            "[X]"
+        } else {
+            "▣"
+        }
+    } else {
+        ""
+    };
+
+    let max_sky_chars = width.saturating_sub(craft_tag.chars().count() + 2);
+    let sky_trimmed: String = sky_base.chars().take(max_sky_chars).collect();
+    let mut sky_spans = vec![Span::styled(
+        sky_trimmed,
+        Style::default().fg(match region.atmospheric_severity {
+            Some(AtmosphericSeverity::Severe) => theme.warning,
+            Some(AtmosphericSeverity::Variable) => theme.cobalt_bright,
+            _ => theme.faint,
+        }),
+    )];
+    if !craft_tag.is_empty() {
+        sky_spans.push(Span::styled(
+            format!(" {craft_tag}"),
+            Style::default().fg(theme.gold).bold(),
+        ));
+    }
+
+    let (mid, low, ground) = match (options.ascii, terrain) {
+        (true, TerrainClass::Basin) => (
+            "\\__                            __/",
+            "   \\____    .  .  .       ____/   ",
+            "========\\________________/========",
+        ),
+        (true, TerrainClass::Plain) => (
+            "                                  ",
+            "   .---.             .--.         ",
+            "___/   \\_____________/  \\_________",
+        ),
+        (true, TerrainClass::Highland) => (
+            "     /^^^^^\\         /^^^^\\       ",
+            "   _/       \\_______/      \\_     ",
+            "__/                          \\____",
+        ),
+        (true, TerrainClass::Ridge) => (
+            "       /\\       /\\      /\\        ",
+            "    __/  \\   __/  \\  __/  \\__     ",
+            "___/      \\_/      \\/        \\____",
+        ),
+        (true, TerrainClass::Fractured) => (
+            "  /\\   /\\     /\\   /\\    /\\  /\\   ",
+            "_/  \\_/  \\___/  \\_/  \\__/  \\/  \\_ ",
+            "===\\_/====\\_/====\\_/====\\_/=======",
+        ),
+        (true, TerrainClass::Polar) => (
+            "    /====\\      /======\\    /==\\  ",
+            "  _/      \\____/        \\__/    \\_",
+            "===/======\\====/========\\==/======",
+        ),
+        (false, TerrainClass::Basin) => (
+            "█▄                              ▄█",
+            " ▀██▄▄       · · ·          ▄▄██▀ ",
+            "▓▓▓▀▀████████████████████████▀▀▓▓▓",
+        ),
+        (false, TerrainClass::Plain) => (
+            "                                  ",
+            "   ▄▄▄               ▄▄           ",
+            "▁▁▄███▄▁▁▁▁▁▂▃▂▁▁▁▁▁▄██▄▁▁▁▁▁▁▁▁▁▁",
+        ),
+        (false, TerrainClass::Highland) => (
+            "     ▄█████▄         ▄████▄       ",
+            "   ▄█████████▄▄▄▄▄▄▄████████▄     ",
+            "▄▄████████████████████████████▄▄▄▄",
+        ),
+        (false, TerrainClass::Ridge) => (
+            "       ▄█▄      ▄█▄     ▄█▄       ",
+            "    ▄▄█████▄  ▄█████▄ ▄█████▄▄    ",
+            "▁▁▄█████████▀████████▀█████████▄▁▁",
+        ),
+        (false, TerrainClass::Fractured) => (
+            "  ▄█▄  ▄█▄    ▄█▄  ▄█▄   ▄█▄ ▄█▄  ",
+            "▄█▀ ▀▄█▀ ▀▄▄▄█▀ ▀▄█▀ ▀▄▄█▀ ▀█▀ ▀█▄",
+            "▀▀▓▓▄▀▓▓▓▄▀▓▓▓▄▀▓▓▓▄▀▓▓▓▄▀▓▓▓▄▓▓▀▀",
+        ),
+        (false, TerrainClass::Polar) => (
+            "    ▄▀▀▀▀▄      ▄▀▀▀▀▀▀▄    ▄▀▀▄  ",
+            "  ▄████████▄▄▄▄██████████▄▄██████▄",
+            "▃▅██████████████████████████████▅▃",
+        ),
+    };
+
+    let terrain_fg = match terrain {
+        TerrainClass::Polar => theme.cobalt_bright,
+        TerrainClass::Fractured | TerrainClass::Ridge => theme.amber,
+        TerrainClass::Highland => theme.cyan,
+        TerrainClass::Basin | TerrainClass::Plain => theme.cyan_bright,
+    };
+
+    let structure_badge = if region.core {
+        if options.ascii {
+            "  [CORE COMPLEX ONLINE] "
+        } else {
+            "  ◇ CORE COMPLEX ONLINE "
+        }
+    } else if has_base {
+        if options.ascii {
+            "  [PLANETARY NODE ACTIVE] "
+        } else {
+            "  ▄█◈█▄ PLANETARY NODE ACTIVE "
+        }
+    } else if region.relay {
+        if options.ascii {
+            "  [RANGE RELAY ACTIVE] "
+        } else {
+            "  ◈ RANGE RELAY ACTIVE "
+        }
+    } else {
+        ""
+    };
+
+    let mut lines = vec![
+        Line::from(sky_spans),
+        Line::styled(mid, Style::default().fg(terrain_fg)),
+        Line::styled(low, Style::default().fg(terrain_fg).bold()),
+        Line::styled(ground, Style::default().fg(theme.border).bold()),
+    ];
+    if !structure_badge.is_empty() {
+        lines.push(Line::styled(
+            structure_badge,
+            Style::default()
+                .fg(if region.core {
+                    theme.gold
+                } else {
+                    theme.success
+                })
+                .bold(),
+        ));
+    }
+    lines
+}
+
+/// 4-row grounded planetary outpost cutaway for the Local Field inspector.
+///
+/// Displays surface domes, power arrays, telemetry masts, storage domes, and dish
+/// modules with live powered, standby, and starved states.
+pub fn local_structure_cutaway(
+    site: &SubregionSnapshot,
+    base: Option<&BaseSnapshot>,
+    active_survey: bool,
+    phase: f64,
+    options: RenderOptions,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let blink = (phase * 3.5).floor() as i64 % 2 == 0;
+    let Some(base) = base else {
+        if active_survey {
+            let sweep = if options.ascii {
+                if blink {
+                    "  =====[ SCANNING SECTOR ]=====   "
+                } else {
+                    "  -----[ SCANNING SECTOR ]-----   "
+                }
+            } else if blink {
+                "  ═════◈ SCANNING SECTOR ◈═════   "
+            } else {
+                "  ─────◎ SCANNING SECTOR ◎─────   "
+            };
+            return vec![
+                Line::styled(sweep, Style::default().fg(theme.gold).bold()),
+                Line::styled(
+                    class_silhouette_bottom(site.class, options.ascii).to_owned(),
+                    Style::default().fg(theme.cyan_bright),
+                ),
+            ];
+        }
+        return Vec::new();
+    };
+
+    let mod_state = |kind: BaseModuleKind| {
+        base.modules.iter().find(|m| m.kind == kind).map(|m| {
+            if !m.enabled {
+                (theme.muted, false)
+            } else if m.active {
+                (theme.cyan_bright, true)
+            } else {
+                (theme.warning, false)
+            }
+        })
+    };
+
+    let slot_glyph =
+        |kind: BaseModuleKind, uni: &'static str, asc: &'static str| match mod_state(kind) {
+            Some((color, active)) => {
+                let text = if options.ascii { asc } else { uni };
+                Span::styled(
+                    text,
+                    if active {
+                        Style::default().fg(color).bold()
+                    } else {
+                        Style::default().fg(color)
+                    },
+                )
+            }
+            None => Span::styled(
+                if options.ascii {
+                    " .... "
+                } else {
+                    " ···· "
+                },
+                Style::default().fg(theme.faint),
+            ),
+        };
+
+    let dish_pulse = if mod_state(BaseModuleKind::Observatory).is_some_and(|(_, a)| a) && blink {
+        if options.ascii {
+            " *O*  "
+        } else {
+            " ✦◉✦  "
+        }
+    } else if options.ascii {
+        " \\O/  "
+    } else {
+        " ╲◉╱  "
+    };
+    let mast_pulse = if mod_state(BaseModuleKind::Communications).is_some_and(|(_, a)| a) && blink {
+        if options.ascii {
+            " ^|^  "
+        } else {
+            " ◈┴◈  "
+        }
+    } else if options.ascii {
+        "  |   "
+    } else {
+        "  ┴   "
+    };
+
+    let roof_line = Line::from(vec![
+        Span::raw(" "),
+        slot_glyph(BaseModuleKind::PowerArray, " ▄▀▀▄ ", " /==\\ "),
+        slot_glyph(BaseModuleKind::Communications, mast_pulse, mast_pulse),
+        slot_glyph(BaseModuleKind::Depot, " ▄██▄ ", " /##\\ "),
+        slot_glyph(BaseModuleKind::Workshop, " ▄▀▄  ", " /+\\  "),
+        slot_glyph(BaseModuleKind::Laboratory, " ▄▀▀▄ ", " (OO) "),
+        slot_glyph(BaseModuleKind::Observatory, dish_pulse, dish_pulse),
+    ]);
+
+    let body_line = Line::from(vec![
+        Span::raw(" "),
+        slot_glyph(BaseModuleKind::PowerArray, " ▐PP▌ ", " [PP] "),
+        slot_glyph(BaseModuleKind::Communications, " ▐CC▌ ", " [CC] "),
+        slot_glyph(BaseModuleKind::Depot, " ▐DD▌ ", " [DD] "),
+        slot_glyph(BaseModuleKind::Workshop, " ▐WW▌ ", " [WW] "),
+        slot_glyph(BaseModuleKind::Laboratory, " ▐LL▌ ", " [LL] "),
+        slot_glyph(BaseModuleKind::Observatory, " ▐OO▌ ", " [OO] "),
+    ]);
+
+    let ground = if options.ascii {
+        "======================================"
+    } else if base.integrity <= 50 {
+        "▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓▀█▀▓"
+    } else {
+        "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀"
+    };
+    let ground_color = if !base.connected || base.integrity <= 20 {
+        theme.warning
+    } else if base.integrity <= 50 {
+        theme.amber
+    } else {
+        theme.cobalt_bright
+    };
+    let legend = if options.ascii {
+        "  P:PWR C:COM D:DEP W:WRK L:LAB O:OBS"
+    } else {
+        "  P·PWR C·COM D·DEP W·WRK L·LAB O·OBS"
+    };
+    vec![
+        roof_line,
+        body_line,
+        Line::styled(ground, Style::default().fg(ground_color).bold()),
+        Line::styled(legend, Style::default().fg(theme.faint)),
     ]
 }
 
@@ -579,6 +946,57 @@ pub fn render_system_cliffhanger_chart(
             );
         });
     frame.render_widget(chart, area);
+}
+
+/// Fast non-blocking 1980s CRT interleaved horizontal raster-wipe overlay (~180 ms).
+///
+/// Renders a crisp cyan/gold retrace band sweeping top-to-bottom across the frame without
+/// hiding authoritative content once completed.
+pub fn render_crt_wipe(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    progress: f64,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    if area.width < 4 || area.height < 4 || progress >= 1.0 {
+        return;
+    }
+    let progress = progress.clamp(0.0, 1.0);
+    let sweep_y = area.y + ((area.height as f64) * progress).floor() as u16;
+    let lead_glyph = if options.ascii { '=' } else { '━' };
+    let trail_glyph = if options.ascii { '-' } else { '░' };
+    let width = usize::from(area.width);
+
+    let lead_style = if theme.no_color() {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(theme.gold)
+            .bg(theme.blueprint)
+            .add_modifier(Modifier::BOLD)
+    };
+    let trail_style = if theme.no_color() {
+        Style::default()
+    } else {
+        Style::default().fg(theme.cyan_bright).bg(theme.blueprint)
+    };
+
+    if sweep_y < area.y + area.height {
+        let lead_rect = Rect::new(area.x, sweep_y, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(lead_glyph.to_string().repeat(width)).style(lead_style),
+            lead_rect,
+        );
+    }
+    if sweep_y > area.y {
+        let trail_y = sweep_y - 1;
+        let trail_rect = Rect::new(area.x, trail_y, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(trail_glyph.to_string().repeat(width)).style(trail_style),
+            trail_rect,
+        );
+    }
 }
 
 /// Atmospheric in-fiction Solar Horizon closing panel grounded in `observation_005` ("Wider Frame").

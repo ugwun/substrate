@@ -1,11 +1,18 @@
-use crate::connection::PlanetActionKind;
+use crate::{
+    boot::{BootIntroState, BootMode},
+    connection::PlanetActionKind,
+};
 use mind_core::protocol::{
     ArchiveRecordSnapshot, BaseModuleKind, DiagnosticPulseResult, EngineEvent, ExtractorLoadout,
     ExtractorState, NewPlaythroughResult, OnboardingCompletionResult, OperationalProfile,
     PlanetActionResult, PlanetSnapshot, RegionSnapshot, ResearchProject, ResourceStock, ScoutState,
     StatusSnapshot, SubregionKnowledge, SubregionSnapshot,
 };
-use std::{collections::VecDeque, time::Duration, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 const EVENT_CACHE_CAPACITY: usize = 256;
 const IDLE_DELAY: Duration = Duration::from_secs(30);
@@ -15,6 +22,8 @@ pub const LOCAL_FIELD_SURVEY_GUIDANCE: &str = "Complete a regional survey here f
 const IDLE_ROTATION_SPEED: f64 = 0.085;
 const CAMERA_RESPONSE: f64 = 7.5;
 const MAX_FRAME_DELTA: Duration = Duration::from_millis(250);
+const TRANSITION_DURATION: Duration = Duration::from_millis(180);
+const DISCOVERY_FLASH_DURATION: Duration = Duration::from_millis(1_200);
 pub const BAND_SLOTS: u8 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +44,7 @@ pub enum OnboardingView {
 pub enum Workspace {
     Planet,
     Overview,
+    Probes,
     Research,
     Archive,
     SystemMap,
@@ -106,6 +116,13 @@ pub struct App {
     pub events: VecDeque<EngineEvent>,
     pub observed_tick_rate: Option<f64>,
     pub last_update: Option<Instant>,
+    pub planet_received_at: Option<Instant>,
+    pub last_frame_duration_us: u64,
+    pub frame_count: u64,
+    pub ansi16: bool,
+    pub boot_intro: Option<BootIntroState>,
+    pub transition_started_at: Option<Instant>,
+    pub globe_cache: RefCell<crate::globe::GlobeCache>,
     pub event_scroll: usize,
     pub follow_events: bool,
     pub show_help: bool,
@@ -123,6 +140,8 @@ pub struct App {
     pub region_panel_scroll: u16,
     pub overview_selection: usize,
     pub overview_status_scroll: u16,
+    pub probe_selection: usize,
+    pub probe_panel_scroll: u16,
     pub research_selection: usize,
     pub archive_selection: usize,
     pub show_return_summary: bool,
@@ -143,6 +162,10 @@ pub struct App {
     last_seen_chapter: Option<u8>,
     suppress_initial_return_summary: bool,
     pending_archive_ack_id: Option<String>,
+    boot_intro_enabled: bool,
+    boot_intro_armed: bool,
+    pub animations_enabled: bool,
+    recent_discoveries: Vec<(String, Instant)>,
 }
 
 impl Default for App {
@@ -155,6 +178,13 @@ impl Default for App {
             events: VecDeque::new(),
             observed_tick_rate: None,
             last_update: None,
+            planet_received_at: None,
+            last_frame_duration_us: 0,
+            frame_count: 0,
+            ansi16: false,
+            boot_intro: None,
+            transition_started_at: None,
+            globe_cache: RefCell::new(crate::globe::GlobeCache::default()),
             event_scroll: 0,
             follow_events: true,
             show_help: false,
@@ -172,6 +202,8 @@ impl Default for App {
             region_panel_scroll: 0,
             overview_selection: 0,
             overview_status_scroll: 0,
+            probe_selection: 0,
+            probe_panel_scroll: 0,
             research_selection: 0,
             archive_selection: 0,
             show_return_summary: false,
@@ -192,6 +224,10 @@ impl Default for App {
             last_seen_chapter: None,
             suppress_initial_return_summary: false,
             pending_archive_ack_id: None,
+            boot_intro_enabled: false,
+            boot_intro_armed: false,
+            animations_enabled: true,
+            recent_discoveries: Vec::new(),
         }
     }
 }
@@ -223,6 +259,17 @@ impl App {
         if returned_to_onboarding {
             self.reset_local_playthrough_state();
             self.notice = Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED".into());
+            if self.boot_intro_enabled {
+                self.boot_intro = Some(BootIntroState::start(received_at, BootMode::FullColdBoot));
+            }
+        } else if self.boot_intro_armed && self.session_menu.is_none() {
+            self.boot_intro_armed = false;
+            let mode = if snapshot.onboarding.complete {
+                BootMode::QuickPowerOn
+            } else {
+                BootMode::FullColdBoot
+            };
+            self.boot_intro = Some(BootIntroState::start(received_at, mode));
         }
         if let Some((previous_tick, previous_at)) = self.previous_tick_sample {
             let elapsed = received_at
@@ -311,7 +358,45 @@ impl App {
             self.transmission_opened_at = next_unpresented.as_ref().map(|_| received_at);
             self.transmission_revealed = false;
         }
+        if let Some(previous) = self.planet.as_ref() {
+            if previous.revision != planet.revision {
+                let old_regions: HashMap<&str, _> = previous
+                    .regions
+                    .iter()
+                    .map(|r| (r.id.as_str(), r.knowledge))
+                    .collect();
+                for region in &planet.regions {
+                    if old_regions
+                        .get(region.id.as_str())
+                        .is_some_and(|&old| region.knowledge > old)
+                    {
+                        self.recent_discoveries
+                            .push((region.id.clone(), received_at));
+                    }
+                }
+                let old_subregions: HashMap<&str, SubregionKnowledge> = previous
+                    .network
+                    .subregions
+                    .iter()
+                    .map(|s| (s.id.as_str(), s.knowledge))
+                    .collect();
+                for site in &planet.network.subregions {
+                    let increased = old_subregions
+                        .get(site.id.as_str())
+                        .map_or(site.knowledge > SubregionKnowledge::Unknown, |&old| {
+                            site.knowledge > old
+                        });
+                    if increased {
+                        self.recent_discoveries.push((site.id.clone(), received_at));
+                    }
+                }
+            }
+        }
+        self.recent_discoveries.retain(|(_, at)| {
+            received_at.saturating_duration_since(*at) < DISCOVERY_FLASH_DURATION
+        });
         self.planet = Some(planet);
+        self.planet_received_at = Some(received_at);
         if system_map_became_available {
             self.workspace = Workspace::SystemMap;
             self.system_map_opened_at = Some(received_at);
@@ -359,7 +444,24 @@ impl App {
         if self.session_menu == Some(SessionMenuState::Selecting) {
             self.session_menu = None;
             self.session_menu_message = None;
+            self.start_armed_boot_intro(Instant::now());
         }
+    }
+
+    pub fn start_armed_boot_intro(&mut self, now: Instant) {
+        if !self.boot_intro_armed {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        self.boot_intro_armed = false;
+        let mode = if snapshot.onboarding.complete {
+            BootMode::QuickPowerOn
+        } else {
+            BootMode::FullColdBoot
+        };
+        self.boot_intro = Some(BootIntroState::start(now, mode));
     }
 
     pub fn move_session_menu_selection(&mut self, delta: i8) {
@@ -402,6 +504,9 @@ impl App {
     pub fn new_playthrough_completed(&mut self, result: NewPlaythroughResult) {
         if result.ok {
             self.reset_local_playthrough_state();
+            if self.boot_intro_enabled {
+                self.boot_intro_armed = true;
+            }
             self.notice = Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED".into());
         } else {
             self.session_menu = Some(SessionMenuState::Selecting);
@@ -419,8 +524,248 @@ impl App {
 
     fn reset_local_playthrough_state(&mut self) {
         let connection = self.connection.clone();
+        let ansi16 = self.ansi16;
+        let boot_intro_enabled = self.boot_intro_enabled;
+        let animations_enabled = self.animations_enabled;
         *self = Self::default();
         self.connection = connection;
+        self.ansi16 = ansi16;
+        self.boot_intro_enabled = boot_intro_enabled;
+        self.animations_enabled = animations_enabled;
+    }
+
+    pub fn enable_boot_intro(&mut self) {
+        self.boot_intro_enabled = true;
+        self.boot_intro_armed = true;
+    }
+
+    pub fn boot_intro_active(&self, now: Instant) -> bool {
+        self.boot_intro.is_some_and(|boot| boot.is_active(now))
+    }
+
+    pub fn skip_boot_intro(&mut self) {
+        if let Some(boot) = self.boot_intro.as_mut() {
+            boot.skip();
+        }
+    }
+
+    pub fn active_discovery_flash_ids(&self, now: Instant) -> Vec<&str> {
+        self.recent_discoveries
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < DISCOVERY_FLASH_DURATION)
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+
+    pub fn has_discovery_flash(&self, id: &str, now: Instant) -> bool {
+        self.recent_discoveries.iter().any(|(entry, at)| {
+            entry == id && now.saturating_duration_since(*at) < DISCOVERY_FLASH_DURATION
+        })
+    }
+
+    pub fn select_probe(&mut self, index: usize) {
+        self.probe_selection = index % crate::probes::PROBE_COUNT;
+        self.probe_panel_scroll = 0;
+        self.notice = None;
+    }
+
+    pub fn move_probe_selection(&mut self, delta: i8) {
+        let count = crate::probes::PROBE_COUNT as isize;
+        self.probe_selection =
+            (self.probe_selection as isize + isize::from(delta)).rem_euclid(count) as usize;
+        self.probe_panel_scroll = 0;
+        self.notice = None;
+    }
+
+    pub fn scroll_probe_panel(&mut self, amount: i16) {
+        self.probe_panel_scroll = if amount.is_negative() {
+            self.probe_panel_scroll
+                .saturating_sub(amount.unsigned_abs())
+        } else {
+            self.probe_panel_scroll
+                .saturating_add(amount as u16)
+                .min(48)
+        };
+    }
+
+    pub fn focus_selected_probe_region(&mut self) -> bool {
+        let Some(planet) = self.planet.as_ref() else {
+            return false;
+        };
+        let target_region = if self.probe_selection % crate::probes::PROBE_COUNT == 1 {
+            planet
+                .active_extraction
+                .as_ref()
+                .map(|m| m.target_region_id.clone())
+                .unwrap_or_else(|| planet.core_region_id.clone())
+        } else {
+            planet
+                .active_mission
+                .as_ref()
+                .map(|m| m.target_region_id.clone())
+                .unwrap_or_else(|| planet.scout.region_id.clone())
+        };
+        if planet.regions.iter().any(|r| r.id == target_region) {
+            self.selected_region_id = Some(target_region);
+            self.workspace = Workspace::Planet;
+            self.local_view = false;
+            self.pending_action = None;
+            self.region_panel_scroll = 0;
+            self.focus_selected_region(false);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn trigger_transition(&mut self, now: Instant) {
+        if self.animations_enabled {
+            self.transition_started_at = Some(now);
+        }
+    }
+
+    pub fn clear_transition(&mut self) {
+        self.transition_started_at = None;
+    }
+
+    pub fn transition_progress(&self, now: Instant) -> Option<f64> {
+        let started = self.transition_started_at?;
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= TRANSITION_DURATION {
+            None
+        } else {
+            Some((elapsed.as_secs_f64() / TRANSITION_DURATION.as_secs_f64()).clamp(0.0, 1.0))
+        }
+    }
+
+    pub fn record_frame_metrics(&mut self, duration: Duration) {
+        self.last_frame_duration_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.frame_count = self.frame_count.saturating_add(1);
+    }
+
+    /// Presentation-only interpolation for non-pausing daemon timers between 1 Hz pushes.
+    /// Never completes an operation locally; clamps at 0 ms so the daemon remains sole authority.
+    pub fn display_remaining_ms(&self, remaining_ms: u64, now: Instant) -> u64 {
+        if remaining_ms == 0 || !matches!(self.connection, ConnectionState::Connected) {
+            return remaining_ms;
+        }
+        let elapsed_ms = self
+            .planet_received_at
+            .map_or(0, |received| {
+                now.saturating_duration_since(received).as_millis() as u64
+            })
+            .min(1_500);
+        remaining_ms.saturating_sub(elapsed_ms)
+    }
+
+    /// Adaptive animation scheduler: 30 FPS during motion, 2-4 FPS for ambient indicators,
+    /// `None` (zero redraws) when the screen is static.
+    pub fn next_frame_deadline(&self, now: Instant) -> Option<Instant> {
+        const ACTIVE_FRAME: Duration = Duration::from_millis(33);
+        const WAVEFORM_FRAME: Duration = Duration::from_millis(66);
+        const AMBIENT_FRAME: Duration = Duration::from_millis(250);
+        const BEACON_FRAME: Duration = Duration::from_millis(350);
+
+        if self.session_menu.is_some() || self.show_help || self.snapshot.is_none() {
+            return None;
+        }
+        if self.boot_intro_active(now) {
+            return Some(now + ACTIVE_FRAME);
+        }
+        if self.show_return_summary || self.show_chapter_card {
+            return None;
+        }
+        if self.transition_progress(now).is_some() {
+            return Some(now + ACTIVE_FRAME);
+        }
+        if self.onboarding_pending() {
+            return Some(now + ACTIVE_FRAME);
+        }
+        if self.active_transmission_record().is_some() {
+            if !self.transmission_revealed {
+                let elapsed = self
+                    .transmission_opened_at
+                    .map_or(Duration::from_secs(10), |opened| {
+                        now.saturating_duration_since(opened)
+                    });
+                if elapsed < Duration::from_millis(1_650) {
+                    return Some(now + ACTIVE_FRAME);
+                }
+            }
+            return None;
+        }
+        if !matches!(self.connection, ConnectionState::Connected) {
+            return None;
+        }
+
+        match self.workspace {
+            Workspace::Planet => {
+                let planet = self.planet.as_ref()?;
+                if !self.active_discovery_flash_ids(now).is_empty() {
+                    return Some(now + ACTIVE_FRAME);
+                }
+                if self.local_view {
+                    let active_local = planet.network.active_site_survey.is_some()
+                        || !planet.network.active_projects.is_empty()
+                        || planet.active_extraction.is_some()
+                        || !planet.network.bases.is_empty();
+                    return active_local.then_some(now + AMBIENT_FRAME);
+                }
+                let idle_at = self.last_input + IDLE_DELAY;
+                let idle_rotating = now >= idle_at;
+                let yaw_delta = ((self.globe_target_yaw - self.globe_yaw + std::f64::consts::PI)
+                    .rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI)
+                    .abs();
+                let pitch_delta = (self.globe_target_pitch - self.globe_pitch).abs();
+                let camera_easing = yaw_delta > 0.002 || pitch_delta > 0.002;
+                let globe_motion = planet
+                    .active_mission
+                    .as_ref()
+                    .is_some_and(|m| m.phase != ScoutState::Holding)
+                    || planet.active_extraction.is_some()
+                    || planet.active_construction.is_some()
+                    || !planet.network.active_projects.is_empty();
+                if idle_rotating || camera_easing || globe_motion {
+                    return Some(now + ACTIVE_FRAME);
+                }
+                if planet.campaign.lead_region_id.is_some() {
+                    return Some((now + BEACON_FRAME).min(idle_at));
+                }
+                Some(idle_at)
+            }
+            Workspace::SystemMap => {
+                let pullback_active = self.system_map_opened_at.is_some_and(|opened| {
+                    now.saturating_duration_since(opened) < Duration::from_millis(2_700)
+                });
+                if pullback_active {
+                    Some(now + ACTIVE_FRAME)
+                } else {
+                    Some(now + BEACON_FRAME)
+                }
+            }
+            Workspace::Archive => {
+                let running = self
+                    .planet
+                    .as_ref()
+                    .and_then(|planet| planet.archive.experiment.as_ref())
+                    .is_some_and(|exp| exp.active && exp.running);
+                running.then_some(now + WAVEFORM_FRAME)
+            }
+            Workspace::Probes => Some(now + AMBIENT_FRAME),
+            Workspace::Overview | Workspace::Research => {
+                let planet = self.planet.as_ref()?;
+                let active_timers = planet.active_mission.is_some()
+                    || planet.active_extraction.is_some()
+                    || planet.active_construction.is_some()
+                    || planet.research.active.is_some()
+                    || !planet.network.active_projects.is_empty()
+                    || planet.refining_remaining_ms > 0
+                    || planet.extractor.rebuild_remaining_ms > 0;
+                active_timers.then_some(now + AMBIENT_FRAME)
+            }
+            Workspace::System => None,
+        }
     }
 
     pub fn advance_globe_animation(&mut self, now: Instant) {
@@ -430,6 +775,9 @@ impl App {
             .as_secs_f64();
         self.last_animation_frame = now;
         self.globe_phase = (self.globe_phase + elapsed * 0.42).rem_euclid(1.0);
+        if self.boot_intro_active(now) && self.active_transmission_id.is_some() {
+            self.transmission_opened_at = Some(now);
+        }
         if self.workspace != Workspace::Planet
             || self.show_help
             || self.show_return_summary
@@ -457,7 +805,8 @@ impl App {
             .is_some_and(|planet| planet.system_map.available);
         self.workspace = match (self.workspace, reverse, system_map_available) {
             (Workspace::Planet, false, _) => Workspace::Overview,
-            (Workspace::Overview, false, _) => Workspace::Research,
+            (Workspace::Overview, false, _) => Workspace::Probes,
+            (Workspace::Probes, false, _) => Workspace::Research,
             (Workspace::Research, false, _) => Workspace::Archive,
             (Workspace::Archive, false, true) => Workspace::SystemMap,
             (Workspace::Archive, false, false) => Workspace::System,
@@ -465,7 +814,8 @@ impl App {
             (Workspace::System, false, _) => Workspace::Planet,
             (Workspace::Planet, true, _) => Workspace::System,
             (Workspace::Overview, true, _) => Workspace::Planet,
-            (Workspace::Research, true, _) => Workspace::Overview,
+            (Workspace::Probes, true, _) => Workspace::Overview,
+            (Workspace::Research, true, _) => Workspace::Probes,
             (Workspace::Archive, true, _) => Workspace::Research,
             (Workspace::SystemMap, true, _) => Workspace::Archive,
             (Workspace::System, true, true) => Workspace::SystemMap,
@@ -864,7 +1214,7 @@ impl App {
 
     pub fn extractor_loadout_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
-        (self.workspace == Workspace::Planet
+        (matches!(self.workspace, Workspace::Planet | Workspace::Probes)
             && planet.extractor.state == ExtractorState::Ready
             && planet.active_extraction.is_none())
         .then(|| ContextAction::ConfigureExtractor(planet.extractor.loadout.next()))
@@ -1587,5 +1937,41 @@ mod tests {
         engine.acknowledge_archive_presentation("observation_001");
         app.apply_planet(engine.planet().unwrap(), now);
         assert!(app.active_transmission_id.is_none());
+    }
+
+    #[test]
+    fn adaptive_frame_scheduler_sleeps_when_static_and_uses_30fps_when_animating() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.connected();
+
+        // Session menu is completely static -> zero animation redraws.
+        app.open_session_menu();
+        assert!(app.next_frame_deadline(now).is_none());
+        app.close_session_menu();
+
+        // Pending Coherence onboarding runs live oscilloscope at ~30 FPS.
+        let onboarding_deadline = app.next_frame_deadline(now).unwrap();
+        assert!(onboarding_deadline.saturating_duration_since(now) <= Duration::from_millis(40));
+
+        // Complete onboarding, acknowledge transmission, switch to static System / Overview.
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.show_return_summary = false;
+
+        app.workspace = Workspace::System;
+        assert!(app.next_frame_deadline(now).is_none());
+        app.workspace = Workspace::Overview;
+        assert!(app.next_frame_deadline(now).is_none());
+
+        // On Planet while easing camera after navigation -> 30 FPS.
+        app.workspace = Workspace::Planet;
+        app.move_selection(0, 1);
+        let easing_deadline = app.next_frame_deadline(now).unwrap();
+        assert!(easing_deadline.saturating_duration_since(now) <= Duration::from_millis(40));
     }
 }

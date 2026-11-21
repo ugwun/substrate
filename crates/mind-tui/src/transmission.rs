@@ -16,6 +16,7 @@ use ratatui::{
 use std::time::Duration;
 
 const TRANSMISSION_REVEAL_MS: u128 = 1_600;
+const CARRIER_LOCK_MS: u128 = 350;
 
 const ASCII_DOUBLE_BORDER: border::Set<'static> = border::Set {
     top_left: "+",
@@ -286,6 +287,41 @@ pub fn render_discovery_transmission(
         String::new()
     };
 
+    let acquiring_carrier = !force_complete && elapsed.as_millis() < CARRIER_LOCK_MS;
+    let carrier_line = if acquiring_carrier {
+        let frac = (elapsed.as_millis() as f64 / CARRIER_LOCK_MS as f64).clamp(0.0, 1.0);
+        let filled = (frac * 12.0).round() as usize;
+        let bar: String = (0..12)
+            .map(|i| {
+                if options.ascii {
+                    if i < filled {
+                        '#'
+                    } else {
+                        '.'
+                    }
+                } else if i < filled {
+                    '█'
+                } else {
+                    '░'
+                }
+            })
+            .collect();
+        Line::from(vec![
+            Span::styled("CARRIER ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("[{bar}] ACQUIRING SIGNAL"),
+                Style::default().fg(theme.gold).bold(),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("SOURCE  ", Style::default().fg(theme.muted)),
+            Span::styled(source_label.to_owned(), Style::default().fg(theme.text)),
+            Span::styled("   ARCHIVE  ", Style::default().fg(theme.muted)),
+            Span::styled("PERMANENT RECORD", Style::default().fg(theme.success)),
+        ])
+    };
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -302,12 +338,7 @@ pub fn render_discovery_transmission(
                 Style::default().fg(theme.cyan_bright),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("SOURCE  ", Style::default().fg(theme.muted)),
-            Span::styled(source_label.to_owned(), Style::default().fg(theme.text)),
-            Span::styled("   ARCHIVE  ", Style::default().fg(theme.muted)),
-            Span::styled("PERMANENT RECORD", Style::default().fg(theme.success)),
-        ]),
+        carrier_line,
     ];
 
     if inner.height >= 16 {

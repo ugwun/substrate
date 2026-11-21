@@ -4,26 +4,34 @@ pub const CANVAS_RGB: (u8, u8, u8) = (0, 31, 39);
 pub const PANEL_RGB: (u8, u8, u8) = (5, 45, 54);
 pub const RAISED_RGB: (u8, u8, u8) = (7, 54, 66);
 pub const CYAN_RGB: (u8, u8, u8) = (42, 161, 152);
-pub const CYAN_BRIGHT_RGB: (u8, u8, u8) = (94, 196, 189);
-pub const AMBER_RGB: (u8, u8, u8) = (203, 155, 22);
+pub const CYAN_BRIGHT_RGB: (u8, u8, u8) = (94, 214, 214);
+pub const AMBER_RGB: (u8, u8, u8) = (218, 165, 32);
+pub const GOLD_RGB: (u8, u8, u8) = (250, 204, 72);
+pub const BLUEPRINT_RGB: (u8, u8, u8) = (10, 34, 72);
+pub const BLUEPRINT_GRID_RGB: (u8, u8, u8) = (32, 82, 148);
+pub const COBALT_BRIGHT_RGB: (u8, u8, u8) = (106, 184, 255);
+pub const MAGENTA_RGB: (u8, u8, u8) = (224, 122, 224);
 
-const TEXT_RGB: (u8, u8, u8) = (147, 161, 161);
-const TEXT_STRONG_RGB: (u8, u8, u8) = (238, 232, 213);
-const MUTED_RGB: (u8, u8, u8) = (101, 123, 131);
-const FAINT_RGB: (u8, u8, u8) = (69, 94, 101);
-const BORDER_RGB: (u8, u8, u8) = (20, 77, 87);
-const SELECTION_RGB: (u8, u8, u8) = (10, 68, 77);
-const BLUE_RGB: (u8, u8, u8) = (38, 139, 210);
+const TEXT_RGB: (u8, u8, u8) = (156, 172, 174);
+const TEXT_STRONG_RGB: (u8, u8, u8) = (242, 238, 222);
+const MUTED_RGB: (u8, u8, u8) = (108, 132, 142);
+const FAINT_RGB: (u8, u8, u8) = (70, 98, 108);
+const BORDER_RGB: (u8, u8, u8) = (24, 88, 102);
+const SELECTION_RGB: (u8, u8, u8) = (12, 74, 88);
+const BLUE_RGB: (u8, u8, u8) = (46, 148, 224);
 const ORANGE_RGB: (u8, u8, u8) = (238, 125, 70);
 const RED_RGB: (u8, u8, u8) = (245, 110, 105);
-const GREEN_RGB: (u8, u8, u8) = (154, 174, 30);
+const GREEN_RGB: (u8, u8, u8) = (154, 182, 42);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     no_color: bool,
+    ansi16: bool,
     pub canvas: Color,
     pub panel: Color,
     pub raised: Color,
+    pub blueprint: Color,
+    pub blueprint_grid: Color,
     pub text: Color,
     pub text_strong: Color,
     pub muted: Color,
@@ -33,7 +41,10 @@ pub struct Theme {
     pub cyan: Color,
     pub cyan_bright: Color,
     pub amber: Color,
+    pub gold: Color,
     pub blue: Color,
+    pub cobalt_bright: Color,
+    pub magenta: Color,
     pub warning: Color,
     pub danger: Color,
     pub success: Color,
@@ -41,12 +52,19 @@ pub struct Theme {
 
 impl Theme {
     pub fn new(no_color: bool) -> Self {
+        Self::for_color_mode(no_color, false)
+    }
+
+    pub fn for_color_mode(no_color: bool, ansi16: bool) -> Self {
         if no_color {
             return Self {
-                no_color,
+                no_color: true,
+                ansi16: false,
                 canvas: Color::Reset,
                 panel: Color::Reset,
                 raised: Color::Reset,
+                blueprint: Color::Reset,
+                blueprint_grid: Color::Reset,
                 text: Color::Reset,
                 text_strong: Color::Reset,
                 muted: Color::Reset,
@@ -56,18 +74,52 @@ impl Theme {
                 cyan: Color::Reset,
                 cyan_bright: Color::Reset,
                 amber: Color::Reset,
+                gold: Color::Reset,
                 blue: Color::Reset,
+                cobalt_bright: Color::Reset,
+                magenta: Color::Reset,
                 warning: Color::Reset,
                 danger: Color::Reset,
                 success: Color::Reset,
             };
         }
 
+        if ansi16 {
+            return Self {
+                no_color: false,
+                ansi16: true,
+                canvas: Color::Black,
+                panel: Color::Black,
+                raised: Color::DarkGray,
+                blueprint: Color::Blue,
+                blueprint_grid: Color::DarkGray,
+                text: Color::Gray,
+                text_strong: Color::White,
+                muted: Color::DarkGray,
+                faint: Color::DarkGray,
+                border: Color::Cyan,
+                selection: Color::Blue,
+                cyan: Color::Cyan,
+                cyan_bright: Color::LightCyan,
+                amber: Color::Yellow,
+                gold: Color::LightYellow,
+                blue: Color::Blue,
+                cobalt_bright: Color::LightBlue,
+                magenta: Color::LightMagenta,
+                warning: Color::LightYellow,
+                danger: Color::LightRed,
+                success: Color::LightGreen,
+            };
+        }
+
         Self {
-            no_color,
+            no_color: false,
+            ansi16: false,
             canvas: rgb(CANVAS_RGB),
             panel: rgb(PANEL_RGB),
             raised: rgb(RAISED_RGB),
+            blueprint: rgb(BLUEPRINT_RGB),
+            blueprint_grid: rgb(BLUEPRINT_GRID_RGB),
             text: rgb(TEXT_RGB),
             text_strong: rgb(TEXT_STRONG_RGB),
             muted: rgb(MUTED_RGB),
@@ -77,11 +129,22 @@ impl Theme {
             cyan: rgb(CYAN_RGB),
             cyan_bright: rgb(CYAN_BRIGHT_RGB),
             amber: rgb(AMBER_RGB),
+            gold: rgb(GOLD_RGB),
             blue: rgb(BLUE_RGB),
+            cobalt_bright: rgb(COBALT_BRIGHT_RGB),
+            magenta: rgb(MAGENTA_RGB),
             warning: rgb(ORANGE_RGB),
             danger: rgb(RED_RGB),
             success: rgb(GREEN_RGB),
         }
+    }
+
+    pub fn blueprint_style(self) -> Style {
+        self.on(self.blueprint).fg(self.text_strong)
+    }
+
+    pub const fn ansi16(self) -> bool {
+        self.ansi16
     }
 
     pub fn canvas_style(self) -> Style {
@@ -164,6 +227,9 @@ mod tests {
             CYAN_RGB,
             CYAN_BRIGHT_RGB,
             AMBER_RGB,
+            GOLD_RGB,
+            COBALT_BRIGHT_RGB,
+            MAGENTA_RGB,
             ORANGE_RGB,
             RED_RGB,
             GREEN_RGB,
@@ -174,12 +240,34 @@ mod tests {
             TEXT_RGB,
             CYAN_BRIGHT_RGB,
             AMBER_RGB,
+            GOLD_RGB,
+            COBALT_BRIGHT_RGB,
+            MAGENTA_RGB,
             ORANGE_RGB,
             RED_RGB,
             GREEN_RGB,
         ] {
             assert!(contrast_ratio(foreground, RAISED_RGB) >= 4.5);
         }
+        for foreground in [
+            TEXT_STRONG_RGB,
+            CYAN_BRIGHT_RGB,
+            GOLD_RGB,
+            COBALT_BRIGHT_RGB,
+        ] {
+            assert!(contrast_ratio(foreground, BLUEPRINT_RGB) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn ansi16_theme_uses_standard_indexed_ega_colors_without_rgb() {
+        let theme = Theme::for_color_mode(false, true);
+        assert!(theme.ansi16());
+        assert!(!theme.no_color());
+        assert_eq!(theme.blueprint, Color::Blue);
+        assert_eq!(theme.cyan_bright, Color::LightCyan);
+        assert_eq!(theme.gold, Color::LightYellow);
+        assert_eq!(theme.magenta, Color::LightMagenta);
     }
 
     fn contrast_ratio(left: (u8, u8, u8), right: (u8, u8, u8)) -> f64 {

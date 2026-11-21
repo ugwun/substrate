@@ -3,8 +3,9 @@ use crate::{
         App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
         Workspace,
     },
-    art,
+    art, boot,
     globe::{self, GlobeRenderOptions},
+    probes,
     theme::Theme,
     transmission,
 };
@@ -33,6 +34,17 @@ const ASCII_BORDER: border::Set<'static> = border::Set {
     horizontal_bottom: "-",
 };
 
+const ASCII_DOUBLE_BORDER: border::Set<'static> = border::Set {
+    top_left: "+",
+    top_right: "+",
+    bottom_left: "+",
+    bottom_right: "+",
+    vertical_left: "|",
+    vertical_right: "|",
+    horizontal_top: "=",
+    horizontal_bottom: "=",
+};
+
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
     pub ascii: bool,
@@ -55,7 +67,7 @@ struct KeyHint<'a> {
 
 pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Instant) {
     let area = frame.area();
-    let theme = Theme::new(options.no_color);
+    let theme = Theme::for_color_mode(options.no_color, app.ansi16);
     frame.render_widget(Block::default().style(theme.canvas_style()), area);
     if area.width < 44 || area.height < 14 {
         render_too_small(frame, area, options, theme);
@@ -63,6 +75,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
             render_session_menu(frame, area, app, options, theme);
         }
         return;
+    }
+    if app.session_menu.is_none() {
+        if let Some(boot_state) = app
+            .boot_intro
+            .filter(|boot_state| boot_state.is_active(now))
+        {
+            boot::render_boot_intro(frame, area, boot_state, options, theme, now);
+            return;
+        }
     }
     if app.snapshot.is_none() {
         render_connection_required(frame, area, app, options, theme);
@@ -72,6 +93,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
         match app.workspace {
             Workspace::Planet => render_planet(frame, area, app, options, theme, now),
             Workspace::Overview => render_overview(frame, area, app, options, theme, now),
+            Workspace::Probes => render_probes(frame, area, app, options, theme, now),
             Workspace::Research => render_research(frame, area, app, options, theme, now),
             Workspace::Archive => render_archive(frame, area, app, options, theme, now),
             Workspace::SystemMap => render_system_map(frame, area, app, options, theme, now),
@@ -118,6 +140,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
     }
     if app.session_menu.is_some() {
         render_session_menu(frame, area, app, options, theme);
+    } else if let Some(progress) = app.transition_progress(now) {
+        art::render_crt_wipe(frame, area, progress, options, theme);
     }
 }
 
@@ -169,21 +193,21 @@ fn render_planet(
         let columns = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(rows[1]);
         if app.local_view {
-            render_local_sites(frame, columns[0], app, planet, options, theme);
+            render_local_sites(frame, columns[0], app, planet, options, theme, now);
             render_local_inspector(frame, columns[1], app, planet, options, theme);
         } else {
-            render_globe(frame, columns[0], app, planet, options, theme);
-            render_region_inspector(frame, columns[1], app, planet, options, theme);
+            render_globe(frame, columns[0], app, planet, options, theme, now);
+            render_region_inspector(frame, columns[1], app, planet, options, theme, now);
         }
     } else {
         let body = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
             .split(rows[1]);
         if app.local_view {
-            render_local_sites(frame, body[0], app, planet, options, theme);
+            render_local_sites(frame, body[0], app, planet, options, theme, now);
             render_local_inspector(frame, body[1], app, planet, options, theme);
         } else {
-            render_globe(frame, body[0], app, planet, options, theme);
-            render_region_inspector(frame, body[1], app, planet, options, theme);
+            render_globe(frame, body[0], app, planet, options, theme, now);
+            render_region_inspector(frame, body[1], app, planet, options, theme, now);
         }
     }
     let local_controls = [
@@ -366,6 +390,7 @@ fn render_overview(
     activity.push(section_line("ACTIVE OPERATIONS", theme));
     if let Some(research) = &planet.research.active {
         has_active_operation = true;
+        let remaining_ms = app.display_remaining_ms(research.remaining_ms, now);
         let title = planet
             .research
             .options
@@ -375,8 +400,8 @@ fn render_overview(
         activity.push(Line::styled(
             format!(
                 "  {title} // {}% // {}s remaining",
-                operation_progress(research.remaining_ms, research.phase_total_ms),
-                research.remaining_ms.div_ceil(1_000)
+                operation_progress(remaining_ms, research.phase_total_ms),
+                remaining_ms.div_ceil(1_000)
             ),
             Style::default().fg(theme.cyan_bright).bold(),
         ));
@@ -384,11 +409,15 @@ fn render_overview(
     if let Some(mission) = &planet.active_mission {
         has_active_operation = true;
         let target_designation = region_designation(planet, &mission.target_region_id);
+        let remaining_ms = if mission.phase == ScoutState::Holding {
+            mission.remaining_ms
+        } else {
+            app.display_remaining_ms(mission.remaining_ms, now)
+        };
         let progress = if mission.phase == ScoutState::Holding || mission.phase_total_ms == 0 {
             100
         } else {
-            100_u64
-                .saturating_sub(mission.remaining_ms.saturating_mul(100) / mission.phase_total_ms)
+            100_u64.saturating_sub(remaining_ms.saturating_mul(100) / mission.phase_total_ms)
         };
         if app.overview_selection == row_index {
             selected_line = activity.len();
@@ -408,7 +437,11 @@ fn render_overview(
         activity.push(Line::styled(
             format!(
                 "   {target_designation} // {progress}% // {}{}",
-                scout_remaining_text(mission),
+                if mission.phase == ScoutState::Holding {
+                    "holding on station".to_owned()
+                } else {
+                    format!("{}s remaining", remaining_ms.div_ceil(1_000))
+                },
                 if mission.automated { " // AUTO" } else { "" }
             ),
             Style::default().fg(theme.muted),
@@ -417,6 +450,7 @@ fn render_overview(
     }
     if let Some(mission) = &planet.active_extraction {
         has_active_operation = true;
+        let remaining_ms = app.display_remaining_ms(mission.remaining_ms, now);
         if app.overview_selection == row_index {
             selected_line = activity.len();
         }
@@ -439,8 +473,8 @@ fn render_overview(
             format!(
                 "   {} // {}% // {}s remaining{}",
                 region_designation(planet, &mission.target_region_id),
-                operation_progress(mission.remaining_ms, mission.phase_total_ms),
-                mission.remaining_ms.div_ceil(1_000),
+                operation_progress(remaining_ms, mission.phase_total_ms),
+                remaining_ms.div_ceil(1_000),
                 if mission.automated { " // AUTO" } else { "" }
             ),
             Style::default().fg(theme.muted),
@@ -458,6 +492,7 @@ fn render_overview(
     }
     if let Some(construction) = &planet.active_construction {
         has_active_operation = true;
+        let remaining_ms = app.display_remaining_ms(construction.remaining_ms, now);
         if app.overview_selection == row_index {
             selected_line = activity.len();
         }
@@ -471,8 +506,8 @@ fn render_overview(
             format!(
                 "   {} // {}% // {}s remaining",
                 region_designation(planet, &construction.region_id),
-                operation_progress(construction.remaining_ms, construction.phase_total_ms),
-                construction.remaining_ms.div_ceil(1_000)
+                operation_progress(remaining_ms, construction.phase_total_ms),
+                remaining_ms.div_ceil(1_000)
             ),
             Style::default().fg(theme.muted),
         ));
@@ -480,6 +515,7 @@ fn render_overview(
     }
     for project in &planet.network.active_projects {
         has_active_operation = true;
+        let remaining_ms = app.display_remaining_ms(project.remaining_ms, now);
         if app.overview_selection == row_index {
             selected_line = activity.len();
         }
@@ -502,8 +538,8 @@ fn render_overview(
             format!(
                 "   {} // {}% // {}s{}",
                 region_designation(planet, &project.region_id),
-                operation_progress(project.remaining_ms, project.phase_total_ms),
-                project.remaining_ms.div_ceil(1_000),
+                operation_progress(remaining_ms, project.phase_total_ms),
+                remaining_ms.div_ceil(1_000),
                 if project.logistics_supported {
                     " // DEPOT SUPPLY"
                 } else {
@@ -1589,32 +1625,47 @@ fn render_workspace_header(
     options: RenderOptions,
     theme: Theme,
 ) {
-    let tab = |workspace, label| {
-        if active == workspace {
-            Span::styled(
-                format!(" {label} "),
-                theme.selection_style().fg(theme.cyan_bright),
-            )
+    let compact = area.width < 118;
+    let ultra_compact = area.width < 84;
+    let tab = |workspace, label: &str| {
+        let formatted = if compact {
+            label.to_owned()
         } else {
-            Span::styled(format!(" {label} "), Style::default().fg(theme.muted))
+            format!(" {label} ")
+        };
+        if active == workspace {
+            Span::styled(formatted, theme.selection_style().fg(theme.cyan_bright))
+        } else {
+            Span::styled(formatted, Style::default().fg(theme.muted))
         }
     };
-    let mut navigation = vec![
-        Span::styled(
-            if options.ascii { " # " } else { " ◆ " },
+    let mut navigation = if ultra_compact {
+        vec![Span::styled(
+            if options.ascii { "# " } else { "◆ " },
             Style::default().fg(theme.amber),
-        ),
-        Span::styled("SUBSTRATE ", Style::default().fg(theme.text_strong).bold()),
-        Span::styled("// ", Style::default().fg(theme.faint)),
+        )]
+    } else {
+        vec![
+            Span::styled(
+                if options.ascii { " # " } else { " ◆ " },
+                Style::default().fg(theme.amber),
+            ),
+            Span::styled("SUBSTRATE ", Style::default().fg(theme.text_strong).bold()),
+            Span::styled("// ", Style::default().fg(theme.faint)),
+        ]
+    };
+    navigation.extend([
         tab(Workspace::Planet, "PLANET"),
         Span::raw(" "),
         tab(Workspace::Overview, "OVERVIEW"),
+        Span::raw(" "),
+        tab(Workspace::Probes, "PROBES"),
         Span::raw(" "),
         tab(Workspace::Research, "RESEARCH"),
         Span::raw(" "),
         tab(Workspace::Archive, "ARCHIVE"),
         Span::raw(" "),
-    ];
+    ]);
     if app
         .planet
         .as_ref()
@@ -1624,19 +1675,24 @@ fn render_workspace_header(
     }
     navigation.push(tab(Workspace::System, "SYSTEM"));
     if let Some(planet) = &app.planet {
-        let pips = transmission::step_pips(&planet.campaign, options.ascii);
-        navigation.extend([
-            Span::styled("  //  ", Style::default().fg(theme.faint)),
-            Span::styled(
-                format!(
-                    "CH {} {} ",
-                    transmission::roman_chapter(planet.campaign.chapter_number),
-                    planet.campaign.title
+        if !ultra_compact {
+            let pips = transmission::step_pips(&planet.campaign, options.ascii);
+            navigation.extend([
+                Span::styled(
+                    if compact { " // " } else { "  //  " },
+                    Style::default().fg(theme.faint),
                 ),
-                Style::default().fg(theme.amber).bold(),
-            ),
-            Span::styled(format!("[{pips}]"), Style::default().fg(theme.cyan_bright)),
-        ]);
+                Span::styled(
+                    format!(
+                        "CH {} {} ",
+                        transmission::roman_chapter(planet.campaign.chapter_number),
+                        planet.campaign.title
+                    ),
+                    Style::default().fg(theme.amber).bold(),
+                ),
+                Span::styled(format!("[{pips}]"), Style::default().fg(theme.cyan_bright)),
+            ]);
+        }
     }
     let second_line = if let Some(planet) = &app.planet {
         Line::from(vec![
@@ -1789,6 +1845,86 @@ fn planet_store_header_line(
     ])
 }
 
+fn render_probes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+    now: Instant,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(2),
+    ])
+    .split(area);
+    render_workspace_header(frame, rows[0], app, Workspace::Probes, options, theme);
+    if let Some(planet) = &app.planet {
+        probes::render_probe_bay_body(frame, rows[1], app, planet, options, theme, now);
+    } else {
+        frame.render_widget(
+            Paragraph::new("Awaiting authoritative planetary state...")
+                .alignment(Alignment::Center)
+                .style(theme.panel_style())
+                .block(panel(" PROBE BAY ", options, theme, PanelTone::Focused)),
+            rows[1],
+        );
+    }
+    let controls = if area.width < 72 {
+        &[
+            KeyHint {
+                key: "1/2",
+                label: "probe",
+            },
+            KeyHint {
+                key: "G",
+                label: "rig",
+            },
+            KeyHint {
+                key: "PGUP/DN",
+                label: "specs",
+            },
+            KeyHint {
+                key: "Q",
+                label: "menu",
+            },
+        ][..]
+    } else {
+        &[
+            KeyHint {
+                key: "LEFT/RIGHT",
+                label: "switch probe",
+            },
+            KeyHint {
+                key: "G",
+                label: "cycle rig",
+            },
+            KeyHint {
+                key: "PGUP/DN",
+                label: "scroll specs",
+            },
+            KeyHint {
+                key: "ENTER",
+                label: "jump to region",
+            },
+            KeyHint {
+                key: "TAB",
+                label: "workspace",
+            },
+            KeyHint {
+                key: "Q",
+                label: "menu",
+            },
+            KeyHint {
+                key: "?",
+                label: "help",
+            },
+        ][..]
+    };
+    render_workspace_footer(frame, rows[2], app, now, controls, theme);
+}
+
 fn render_globe(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1796,11 +1932,14 @@ fn render_globe(
     planet: &PlanetSnapshot,
     options: RenderOptions,
     theme: Theme,
+    now: Instant,
 ) {
     let inner_height = area.height.saturating_sub(2).max(1);
     let inner_width = area.width.saturating_sub(2).max(1);
+    let flash_ids = app.active_discovery_flash_ids(now);
+    let mut cache = app.globe_cache.borrow_mut();
     frame.render_widget(
-        Paragraph::new(globe::render(
+        Paragraph::new(globe::render_cached_with_flashes(
             planet,
             app.selected_region_id.as_deref(),
             GlobeRenderOptions {
@@ -1813,6 +1952,8 @@ fn render_globe(
                 no_color: options.no_color,
                 theme,
             },
+            &mut cache,
+            &flash_ids,
         ))
         .alignment(Alignment::Center)
         .style(theme.canvas_style())
@@ -1833,6 +1974,7 @@ fn render_local_sites(
     planet: &PlanetSnapshot,
     options: RenderOptions,
     theme: Theme,
+    now: Instant,
 ) {
     let sites = app.selected_subregions();
     let region_name = app
@@ -1970,6 +2112,7 @@ fn render_local_sites(
                     Style::default().fg(theme.amber),
                 ));
             }
+            let newly_scanned = app.has_discovery_flash(&site.id, now);
             frame.render_widget(
                 Paragraph::new(lines)
                     .alignment(Alignment::Center)
@@ -1981,6 +2124,8 @@ fn render_local_sites(
                     .block(panel(
                         if selected {
                             " SELECTED "
+                        } else if newly_scanned {
+                            " NEW SCAN "
                         } else if active_survey {
                             " SCAN "
                         } else if site.knowledge == SubregionKnowledge::Unknown {
@@ -1992,7 +2137,7 @@ fn render_local_sites(
                         theme,
                         if selected {
                             PanelTone::Focused
-                        } else if active_survey {
+                        } else if newly_scanned || active_survey {
                             PanelTone::Modal
                         } else {
                             PanelTone::Standard
@@ -2120,12 +2265,23 @@ fn render_local_inspector(
             }
             lines.push(Line::from(""));
             lines.push(section_line("LOCAL INFRASTRUCTURE", theme));
-            if let Some(base) = planet
+            let site_base = planet
                 .network
                 .bases
                 .iter()
-                .find(|base| base.subregion_id == site.id)
-            {
+                .find(|base| base.subregion_id == site.id);
+            if let Some(base) = site_base {
+                if area.height >= 30 {
+                    lines.extend(art::local_structure_cutaway(
+                        site,
+                        Some(base),
+                        false,
+                        app.globe_phase,
+                        options,
+                        theme,
+                    ));
+                    lines.push(Line::from(""));
+                }
                 lines.push(field_line(
                     "NODE",
                     format!(
@@ -2193,6 +2349,20 @@ fn render_local_inspector(
                 theme,
             ));
             lines.extend(local_action_lines(app, planet, site, theme));
+            if let Some(base) = site_base {
+                if area.height >= 20 && area.height < 30 {
+                    lines.push(Line::from(""));
+                    lines.push(section_line("OUTPOST SCHEMATIC", theme));
+                    lines.extend(art::local_structure_cutaway(
+                        site,
+                        Some(base),
+                        false,
+                        app.globe_phase,
+                        options,
+                        theme,
+                    ));
+                }
+            }
             Text::from(lines)
         },
     );
@@ -2617,6 +2787,7 @@ fn render_region_inspector(
     planet: &PlanetSnapshot,
     options: RenderOptions,
     theme: Theme,
+    now: Instant,
 ) {
     let text = app.selected_region().map_or_else(
         || Text::from(Line::styled("No region selected.", theme.muted)),
@@ -2655,12 +2826,37 @@ fn render_region_inspector(
             }
 
             let mut lines = vec![designation_line(&region.designation, region.core, theme)];
+            let region_has_concurrent_ops = planet
+                .active_mission
+                .as_ref()
+                .is_some_and(|m| m.target_region_id == region.id)
+                && planet
+                    .active_extraction
+                    .as_ref()
+                    .is_some_and(|m| m.target_region_id == region.id);
+            let show_top_diorama = area.height >= 22 && !region_has_concurrent_ops;
+            if show_top_diorama {
+                lines.extend(art::region_terrain_diorama(
+                    region,
+                    planet,
+                    app.globe_phase,
+                    options,
+                    theme,
+                ));
+            }
             if area.height < 14 && area.width < 60 {
                 lines.push(Line::from(""));
                 lines.extend(region_data_lines(region, theme));
                 lines.push(Line::from(""));
                 lines.push(section_line("ACTIVE IN REGION", theme));
-                lines.extend(local_operation_lines(planet, region, options.ascii, theme));
+                lines.extend(local_operation_lines(
+                    app,
+                    planet,
+                    region,
+                    options.ascii,
+                    theme,
+                    now,
+                ));
                 lines.push(Line::from(""));
                 lines.push(section_line("REGION OPERATIONS", theme));
                 lines.extend(region_action_lines(app, planet, region, theme));
@@ -2670,7 +2866,14 @@ fn render_region_inspector(
             } else {
                 lines.push(Line::from(""));
                 lines.push(section_line("ACTIVE IN REGION", theme));
-                lines.extend(local_operation_lines(planet, region, options.ascii, theme));
+                lines.extend(local_operation_lines(
+                    app,
+                    planet,
+                    region,
+                    options.ascii,
+                    theme,
+                    now,
+                ));
                 if area.height >= 14 {
                     lines.push(Line::from(""));
                     lines.push(section_line("LOCAL PRESENCE", theme));
@@ -2679,6 +2882,16 @@ fn render_region_inspector(
                 lines.push(Line::from(""));
                 lines.push(section_line("REGION OPERATIONS", theme));
                 lines.extend(region_action_lines(app, planet, region, theme));
+                if !show_top_diorama && area.height >= 22 {
+                    lines.push(Line::from(""));
+                    lines.extend(art::region_terrain_diorama(
+                        region,
+                        planet,
+                        app.globe_phase,
+                        options,
+                        theme,
+                    ));
+                }
                 lines.push(Line::from(""));
                 lines.extend(region_data_lines(region, theme));
                 if area.height < 14 {
@@ -2774,10 +2987,12 @@ fn region_data_lines(
 }
 
 fn local_operation_lines(
+    app: &App,
     planet: &PlanetSnapshot,
     region: &mind_core::protocol::RegionSnapshot,
     ascii: bool,
     theme: Theme,
+    now: Instant,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut has_active_operation = false;
@@ -2794,10 +3009,22 @@ fn local_operation_lines(
             mission.phase,
             theme,
         ));
-        let pct = operation_progress(mission.remaining_ms, mission.phase_total_ms);
+        let remaining_ms = if mission.phase == ScoutState::Holding {
+            mission.remaining_ms
+        } else {
+            app.display_remaining_ms(mission.remaining_ms, now)
+        };
+        let pct = operation_progress(remaining_ms, mission.phase_total_ms);
         lines.push(field_line(
             "PROGRESS",
-            format!("{pct}% // {}", scout_remaining_text(mission)),
+            format!(
+                "{pct}% // {}",
+                if mission.phase == ScoutState::Holding {
+                    "holding on station".to_owned()
+                } else {
+                    format!("{}s remaining", remaining_ms.div_ceil(1_000))
+                }
+            ),
             theme,
         ));
         if matches!(mission.phase, ScoutState::Outbound | ScoutState::Returning) {
@@ -2833,13 +3060,11 @@ fn local_operation_lines(
             mission.phase,
             theme,
         ));
-        let pct = operation_progress(mission.remaining_ms, mission.phase_total_ms);
+        let remaining_ms = app.display_remaining_ms(mission.remaining_ms, now);
+        let pct = operation_progress(remaining_ms, mission.phase_total_ms);
         lines.push(field_line(
             "PROGRESS",
-            format!(
-                "{pct}% // {}s remaining",
-                mission.remaining_ms.div_ceil(1_000)
-            ),
+            format!("{pct}% // {}s remaining", remaining_ms.div_ceil(1_000)),
             theme,
         ));
         if matches!(
@@ -2883,6 +3108,7 @@ fn local_operation_lines(
         .filter(|construction| construction.region_id == region.id)
     {
         has_active_operation = true;
+        let remaining_ms = app.display_remaining_ms(construction.remaining_ms, now);
         lines.push(Line::styled(
             "RANGE RELAY // CONSTRUCTING",
             Style::default().fg(theme.cyan_bright).bold(),
@@ -2891,8 +3117,8 @@ fn local_operation_lines(
             "PROGRESS",
             format!(
                 "{}% // {}s remaining",
-                operation_progress(construction.remaining_ms, construction.phase_total_ms),
-                construction.remaining_ms.div_ceil(1_000)
+                operation_progress(remaining_ms, construction.phase_total_ms),
+                remaining_ms.div_ceil(1_000)
             ),
             theme,
         ));
@@ -2968,14 +3194,6 @@ fn operation_title<T: std::fmt::Debug>(
             Style::default().fg(theme.amber).bold(),
         ),
     ])
-}
-
-fn scout_remaining_text(mission: &mind_core::protocol::ActiveMissionSnapshot) -> String {
-    if mission.phase == ScoutState::Holding {
-        "holding until recalled".into()
-    } else {
-        format!("{}s remaining", mission.remaining_ms.div_ceil(1_000))
-    }
 }
 
 fn region_presence_lines(
@@ -3737,6 +3955,15 @@ fn render_dashboard(
                         .map_or_else(|| "unavailable".into(), |cpu| format!("{cpu:.1}%")),
                     theme,
                 ),
+                field_line(
+                    "TUI DRAW",
+                    format!(
+                        "{:.2}ms // {} frames",
+                        app.last_frame_duration_us as f64 / 1_000.0,
+                        app.frame_count
+                    ),
+                    theme,
+                ),
                 field_line("CLIENTS", snapshot.connected_clients.to_string(), theme),
             ]),
             snapshot.last_diagnostic.as_ref().map_or_else(
@@ -4153,6 +4380,15 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme:
         key_line("ENTER", "inspect its region on the globe", theme),
         key_line("PGUP / PGDN", "scroll planet-wide details", theme),
         Line::from(""),
+        section_line("PROBE BAY", theme),
+        key_line(
+            "LEFT / RIGHT / 1 / 2",
+            "switch scout or extraction schematic",
+            theme,
+        ),
+        key_line("G", "swap extractor rig live when ready", theme),
+        key_line("ENTER", "jump to the probe's region on the globe", theme),
+        Line::from(""),
         section_line("RESEARCH", theme),
         key_line("UP / DOWN", "select research or a profile", theme),
         key_line("ENTER", "commit research or activate a profile", theme),
@@ -4346,7 +4582,7 @@ fn panel<'a>(title: &'a str, options: RenderOptions, theme: Theme, tone: PanelTo
     let (surface, border_color, title_color, emphasized) = match tone {
         PanelTone::Focused => (theme.panel, theme.cyan, theme.cyan_bright, true),
         PanelTone::Standard => (theme.panel, theme.border, theme.muted, false),
-        PanelTone::Modal => (theme.raised, theme.amber, theme.text_strong, true),
+        PanelTone::Modal => (theme.raised, theme.amber, theme.gold, true),
         PanelTone::Warning => (theme.raised, theme.warning, theme.warning, true),
     };
     let mut border_style = Style::default().fg(border_color);
@@ -4355,13 +4591,15 @@ fn panel<'a>(title: &'a str, options: RenderOptions, theme: Theme, tone: PanelTo
         border_style = border_style.add_modifier(Modifier::BOLD);
         title_style = title_style.add_modifier(Modifier::BOLD);
     }
+    let border_set = match (options.ascii, tone) {
+        (true, PanelTone::Focused) => ASCII_DOUBLE_BORDER,
+        (true, _) => ASCII_BORDER,
+        (false, PanelTone::Focused) => border::DOUBLE,
+        (false, _) => border::ROUNDED,
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_set(if options.ascii {
-            ASCII_BORDER
-        } else {
-            border::ROUNDED
-        })
+        .border_set(border_set)
         .style(theme.on(surface).fg(theme.text))
         .border_style(border_style)
         .title_style(title_style);
@@ -5705,5 +5943,466 @@ mod tests {
         assert!(ascii.is_ascii());
         assert!(ascii.contains("LOCAL FIELD"), "{ascii}");
         assert!(ascii.contains("SCAN"), "{ascii}");
+    }
+
+    #[test]
+    fn boot_intro_renders_cold_boot_and_quick_power_on_in_unicode_and_ascii() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.enable_boot_intro();
+        app.apply_snapshot(status(false), now);
+        app.connected();
+
+        let render_at = |app: &App, at: Instant, options: RenderOptions| {
+            let backend = TestBackend::new(100, 32);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, app, options, at))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let mut lines = Vec::new();
+            for y in 0..32 {
+                let mut row = String::new();
+                for x in 0..100 {
+                    row.push_str(buffer[(x, y)].symbol());
+                }
+                lines.push(row);
+            }
+            lines.join("\n")
+        };
+
+        let cold_unicode = render_at(
+            &app,
+            now + std::time::Duration::from_millis(1_800),
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            cold_unicode.contains("COLD INITIALIZATION"),
+            "{cold_unicode}"
+        );
+        assert!(cold_unicode.contains("CORE BUS"), "{cold_unicode}");
+        assert!(cold_unicode.contains("PRESS ANY KEY"), "{cold_unicode}");
+
+        let cold_ascii = render_at(
+            &app,
+            now + std::time::Duration::from_millis(1_800),
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(cold_ascii.is_ascii());
+        assert!(cold_ascii.contains("SUBSTRATE"), "{cold_ascii}");
+        assert!(cold_ascii.contains("COLD INITIALIZATION"), "{cold_ascii}");
+
+        app.skip_boot_intro();
+        assert!(!app.boot_intro_active(now + std::time::Duration::from_millis(1_800)));
+
+        let mut returning = App::default();
+        returning.enable_boot_intro();
+        returning.apply_snapshot(status(true), now);
+        returning.connected();
+        let quick = render_at(
+            &returning,
+            now + std::time::Duration::from_millis(250),
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(quick.contains("TERMINAL LINK ACTIVE"), "{quick}");
+        assert!(!returning.boot_intro_active(now + std::time::Duration::from_millis(900)));
+    }
+
+    #[test]
+    fn crt_transition_wipe_renders_and_clears_on_input() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.trigger_transition(now);
+
+        let mid = now + std::time::Duration::from_millis(90);
+        assert!(app.transition_progress(mid).is_some());
+
+        let backend = TestBackend::new(90, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                    mid,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..28 {
+            for x in 0..90 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.is_ascii());
+        assert!(text.contains("====="), "{text}");
+
+        app.clear_transition();
+        assert!(app.transition_progress(mid).is_none());
+    }
+
+    #[test]
+    fn ansi16_mode_renders_clean_ega_palette_without_rgb() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut app = App::default();
+        app.ansi16 = true;
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: false,
+                    },
+                    now,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..32 {
+            for x in 0..100 {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    !matches!(cell.fg, ratatui::style::Color::Rgb(_, _, _)),
+                    "unexpected RGB fg at ({x}, {y}): {:?}",
+                    cell.fg
+                );
+                assert!(
+                    !matches!(cell.bg, ratatui::style::Color::Rgb(_, _, _)),
+                    "unexpected RGB bg at ({x}, {y}): {:?}",
+                    cell.bg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn probe_bay_renders_scout_and_morphing_extractor_rigs_including_rebuild_gantry() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut planet = engine.planet().unwrap();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(planet.clone(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.workspace = Workspace::Probes;
+
+        let scout_screen = screen(
+            &app,
+            116,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(scout_screen.contains("PROBE BAY"), "{scout_screen}");
+        assert!(scout_screen.contains("WIDE SENSOR DISH"), "{scout_screen}");
+        assert!(scout_screen.contains("SLOT A"), "{scout_screen}");
+        assert!(scout_screen.contains("RESERVED"), "{scout_screen}");
+
+        // Switch to Extraction Probe and verify all three rigs visibly morph the blueprint.
+        app.select_probe(1);
+        let balanced = screen(
+            &app,
+            116,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(balanced.contains("BALANCED FRAME"), "{balanced}");
+        assert!(balanced.contains("RIG LOADOUT MATRIX"), "{balanced}");
+        assert_eq!(
+            app.extractor_loadout_action(),
+            Some(ContextAction::ConfigureExtractor(ExtractorLoadout::Cargo))
+        );
+
+        planet.extractor.loadout = ExtractorLoadout::Cargo;
+        planet.revision += 1;
+        app.apply_planet(planet.clone(), now);
+        let cargo = screen(
+            &app,
+            116,
+            32,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(cargo.is_ascii());
+        assert!(cargo.contains("+2 OUTBOARD HOPPERS"), "{cargo}");
+
+        planet.extractor.loadout = ExtractorLoadout::Shielded;
+        planet.revision += 1;
+        app.apply_planet(planet.clone(), now);
+        let shielded = screen(
+            &app,
+            116,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(shielded.contains("ABLATIVE CANOPY"), "{shielded}");
+
+        // Verify rebuilding state displays the assembly gantry.
+        planet.extractor.state = ExtractorState::Rebuilding;
+        planet.extractor.rebuild_remaining_ms = 45_000;
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        let rebuilding = screen(
+            &app,
+            116,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(rebuilding.contains("GANTRY ACTIVE"), "{rebuilding}");
+        assert!(rebuilding.contains("FABRICATING"), "{rebuilding}");
+
+        // Enter jumps cleanly to Planet focused on the probe's region.
+        assert!(app.focus_selected_probe_region());
+        assert_eq!(app.workspace, Workspace::Planet);
+
+        // Verify 80x24 narrow stacked Probe Bay can scroll to reach rig matrix and hardpoints.
+        app.workspace = Workspace::Probes;
+        app.select_probe(1);
+        app.scroll_probe_panel(8);
+        let narrow_scrolled = screen(
+            &app,
+            80,
+            24,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            narrow_scrolled.contains("RIG LOADOUT MATRIX") || narrow_scrolled.contains("TRV"),
+            "{narrow_scrolled}"
+        );
+    }
+
+    #[test]
+    fn confirmed_new_playthrough_arms_cold_boot_and_return_summary_allows_quick_boot_animation() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.enable_boot_intro();
+        app.apply_snapshot(status(true), now);
+        app.connected();
+        app.skip_boot_intro();
+
+        // Confirmed new playthrough resets local state and re-arms full cold boot.
+        app.new_playthrough_completed(mind_core::protocol::NewPlaythroughResult {
+            ok: true,
+            code: None,
+        });
+        app.apply_snapshot(status(false), now + std::time::Duration::from_millis(50));
+        assert!(app.boot_intro_active(now + std::time::Duration::from_millis(100)));
+        assert_eq!(
+            app.boot_intro.map(|b| b.mode),
+            Some(crate::boot::BootMode::FullColdBoot)
+        );
+
+        // Pending return summary must not suppress quick-boot animation frames.
+        let mut returning = App::default();
+        returning.enable_boot_intro();
+        returning.show_return_summary = true;
+        returning.apply_snapshot(status(true), now);
+        assert!(returning.boot_intro_active(now + std::time::Duration::from_millis(100)));
+        assert!(returning
+            .next_frame_deadline(now + std::time::Duration::from_millis(100))
+            .is_some());
+    }
+
+    #[test]
+    fn region_terrain_diorama_hides_unknown_and_renders_discovered_horizon() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let planet = engine.planet().unwrap();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(planet.clone(), now);
+        app.connected();
+        app.show_return_summary = false;
+
+        // Core region is surveyed and renders its terrain diorama and core presence badge.
+        let surveyed = screen(
+            &app,
+            116,
+            34,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(surveyed.contains("CORE COMPLEX ONLINE"), "{surveyed}");
+
+        // Select an unknown region: diorama shows interference static without leaking terrain.
+        let unknown_id = planet
+            .regions
+            .iter()
+            .find(|r| r.knowledge == mind_core::protocol::RegionKnowledge::Unknown)
+            .unwrap()
+            .id
+            .clone();
+        app.selected_region_id = Some(unknown_id);
+        let unknown = screen(
+            &app,
+            116,
+            34,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(unknown.is_ascii());
+        assert!(unknown.contains("UNRESOLVED HORIZON"), "{unknown}");
+        assert!(!unknown.contains("CORE COMPLEX ONLINE"), "{unknown}");
+    }
+
+    #[test]
+    fn local_structure_cutaway_and_discovery_flash_render_cleanly() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut planet = engine.planet().unwrap();
+        let core_id = planet.core_region_id.clone();
+
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(planet.clone(), now);
+        app.connected();
+        app.show_return_summary = false;
+
+        // Simulate a newly surveyed region + local node with multiple modules.
+        if let Some(unknown) = planet
+            .regions
+            .iter_mut()
+            .find(|r| r.knowledge == mind_core::protocol::RegionKnowledge::Unknown)
+        {
+            unknown.knowledge = mind_core::protocol::RegionKnowledge::Surveyed;
+            unknown.terrain = Some(mind_core::protocol::TerrainClass::Highland);
+        }
+        planet.network.subregions.clear();
+        planet.network.subregions.push(SubregionSnapshot {
+            id: format!("{core_id}_site_1"),
+            designation: "R-081 / S-1".into(),
+            region_id: core_id.clone(),
+            slot: 0,
+            row: 0,
+            column: 0,
+            knowledge: SubregionKnowledge::Observed,
+            class: Some(SubregionClass::ShelteredShelf),
+            hazard: Some(RiskLevel::Low),
+            energy_yield: Some(5),
+            deposit: None,
+            base_id: Some("node_01".into()),
+        });
+        planet
+            .network
+            .bases
+            .push(mind_core::protocol::BaseSnapshot {
+                id: "node_01".into(),
+                designation: "Node 01".into(),
+                region_id: core_id,
+                subregion_id: planet.network.subregions[0].id.clone(),
+                integrity: 88,
+                generation: 10,
+                demand: 4,
+                stored_energy: 70,
+                energy_capacity: 100,
+                connected: true,
+                modules: vec![
+                    mind_core::protocol::BaseModuleSnapshot {
+                        kind: BaseModuleKind::PowerArray,
+                        enabled: true,
+                        active: true,
+                        generation: 8,
+                        demand: 0,
+                    },
+                    mind_core::protocol::BaseModuleSnapshot {
+                        kind: BaseModuleKind::Observatory,
+                        enabled: true,
+                        active: true,
+                        generation: 0,
+                        demand: 3,
+                    },
+                ],
+            });
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        assert!(!app.active_discovery_flash_ids(now).is_empty());
+
+        app.local_view = true;
+        let cutaway = screen(
+            &app,
+            120,
+            38,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(cutaway.contains("▐PP▌"), "{cutaway}");
+        assert!(cutaway.contains("▐OO▌"), "{cutaway}");
+        assert!(cutaway.contains("P·PWR"), "{cutaway}");
+
+        let cutaway_ascii = screen(
+            &app,
+            120,
+            38,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(cutaway_ascii.is_ascii());
+        assert!(cutaway_ascii.contains("[PP]"), "{cutaway_ascii}");
+        assert!(cutaway_ascii.contains("[OO]"), "{cutaway_ascii}");
     }
 }

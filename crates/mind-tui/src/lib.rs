@@ -1,7 +1,9 @@
 pub mod app;
 pub mod art;
+pub mod boot;
 pub mod connection;
 pub mod globe;
+pub mod probes;
 pub mod theme;
 pub mod transmission;
 pub mod ui;

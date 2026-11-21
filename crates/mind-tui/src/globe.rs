@@ -28,6 +28,7 @@ pub struct GlobeRenderOptions {
 #[derive(Debug, Clone, Copy)]
 struct SurfaceSample {
     color: Rgb,
+    knowledge: RegionKnowledge,
     luminance: f64,
     selected: bool,
     selected_edge: bool,
@@ -87,10 +88,115 @@ impl Cell {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlobeCacheKey {
+    width: u16,
+    height: u16,
+    yaw_q: i32,
+    pitch_q: i32,
+    revision: u64,
+    selected_index: Option<usize>,
+    ascii: bool,
+    no_color: bool,
+    ansi16: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct GlobeCache {
+    key: Option<GlobeCacheKey>,
+    base_cells: Vec<Vec<Cell>>,
+    hits: u64,
+    misses: u64,
+}
+
+impl GlobeCache {
+    pub fn stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.base_cells.clear();
+    }
+}
+
+struct RegionGrid {
+    latitude_bands: usize,
+    longitude_sectors: usize,
+    indices: Vec<Option<usize>>,
+}
+
+impl RegionGrid {
+    fn from_planet(planet: &PlanetSnapshot) -> Self {
+        let latitude_bands = usize::from(planet.latitude_bands.max(1));
+        let longitude_sectors = usize::from(planet.longitude_sectors.max(1));
+        let mut indices = vec![None; latitude_bands * longitude_sectors];
+        for (index, region) in planet.regions.iter().enumerate() {
+            let band = usize::from(region.position.latitude_band);
+            let sector = usize::from(region.position.longitude_sector);
+            if band < latitude_bands && sector < longitude_sectors {
+                indices[band * longitude_sectors + sector] = Some(index);
+            }
+        }
+        Self {
+            latitude_bands,
+            longitude_sectors,
+            indices,
+        }
+    }
+
+    #[inline]
+    fn get(&self, latitude_band: u8, longitude_sector: u8) -> Option<usize> {
+        let band = usize::from(latitude_band);
+        let sector = usize::from(longitude_sector);
+        if band < self.latitude_bands && sector < self.longitude_sectors {
+            self.indices[band * self.longitude_sectors + sector]
+        } else {
+            None
+        }
+    }
+}
+
+struct SurfaceContext<'a> {
+    planet: &'a PlanetSnapshot,
+    grid: &'a RegionGrid,
+    selected_index: Option<usize>,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    yaw: f64,
+    sin_pitch: f64,
+    cos_pitch: f64,
+    light: (f64, f64, f64),
+    latitude_step: f64,
+    longitude_step: f64,
+    edge_threshold: f64,
+}
+
 pub fn render(
     planet: &PlanetSnapshot,
     selected_id: Option<&str>,
     options: GlobeRenderOptions,
+) -> Text<'static> {
+    let mut cache = GlobeCache::default();
+    render_cached(planet, selected_id, options, &mut cache)
+}
+
+pub fn render_cached(
+    planet: &PlanetSnapshot,
+    selected_id: Option<&str>,
+    options: GlobeRenderOptions,
+    cache: &mut GlobeCache,
+) -> Text<'static> {
+    render_cached_with_flashes(planet, selected_id, options, cache, &[])
+}
+
+pub fn render_cached_with_flashes(
+    planet: &PlanetSnapshot,
+    selected_id: Option<&str>,
+    options: GlobeRenderOptions,
+    cache: &mut GlobeCache,
+    flash_region_ids: &[&str],
 ) -> Text<'static> {
     let width = usize::from(options.width.max(1));
     let height = usize::from(options.height.max(1));
@@ -101,50 +207,68 @@ pub fn render(
     let center_x = (width.saturating_sub(1)) as f64 / 2.0;
     let center_y = (subpixel_height.saturating_sub(1)) as f64 / 2.0;
     let rich_unicode = !options.ascii && !options.no_color;
+    let selected_index =
+        selected_id.and_then(|id| planet.regions.iter().position(|region| region.id == id));
 
-    let mut cells = (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| {
-                    let top = sample_surface(
-                        planet,
-                        selected_id,
-                        x,
-                        y * 2,
-                        center_x,
-                        center_y,
-                        radius,
-                        options.yaw,
-                        options.pitch,
-                    );
-                    let bottom = sample_surface(
-                        planet,
-                        selected_id,
-                        x,
-                        y * 2 + 1,
-                        center_x,
-                        center_y,
-                        radius,
-                        options.yaw,
-                        options.pitch,
-                    );
-                    if rich_unicode {
-                        rich_cell(top, bottom, x, y, options.theme)
-                    } else {
-                        fallback_cell(
-                            top,
-                            bottom,
-                            options.ascii,
-                            options.no_color,
-                            x,
-                            y,
-                            options.theme,
-                        )
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let key = GlobeCacheKey {
+        width: options.width.max(1),
+        height: options.height.max(1),
+        yaw_q: (options.yaw * 1_000.0).round() as i32,
+        pitch_q: (options.pitch * 1_000.0).round() as i32,
+        revision: planet.revision,
+        selected_index,
+        ascii: options.ascii,
+        no_color: options.no_color,
+        ansi16: options.theme.ansi16(),
+    };
+
+    if cache.key.as_ref() == Some(&key) && cache.base_cells.len() == height {
+        cache.hits = cache.hits.saturating_add(1);
+    } else {
+        cache.misses = cache.misses.saturating_add(1);
+        let grid = RegionGrid::from_planet(planet);
+        let ctx = SurfaceContext {
+            planet,
+            grid: &grid,
+            selected_index,
+            center_x,
+            center_y,
+            radius,
+            yaw: options.yaw,
+            sin_pitch: options.pitch.sin(),
+            cos_pitch: options.pitch.cos(),
+            light: normalized3((-0.38, 0.46, 0.80)),
+            latitude_step: PI / f64::from(planet.latitude_bands.max(1)),
+            longitude_step: TAU / f64::from(planet.longitude_sectors.max(1)),
+            edge_threshold: REGION_EDGE_WIDTH.max(0.48 / radius),
+        };
+        cache.base_cells = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        let top = sample_surface(&ctx, x, y * 2);
+                        let bottom = sample_surface(&ctx, x, y * 2 + 1);
+                        if rich_unicode {
+                            rich_cell(top, bottom, x, y, options.theme)
+                        } else {
+                            fallback_cell(
+                                top,
+                                bottom,
+                                options.ascii,
+                                options.no_color,
+                                x,
+                                y,
+                                options.theme,
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        cache.key = Some(key);
+    }
+
+    let mut cells = cache.base_cells.clone();
 
     draw_mission_path(&mut cells, planet, options, center_x, center_y, radius);
     draw_extraction_path(&mut cells, planet, options, center_x, center_y, radius);
@@ -154,60 +278,60 @@ pub fn render(
         &mut cells,
         planet,
         selected_id,
+        flash_region_ids,
         options,
         center_x,
         center_y,
         radius,
     );
 
-    Text::from(
-        cells
-            .into_iter()
-            .map(|row| {
-                Line::from(
-                    row.into_iter()
-                        .map(|cell| Span::styled(cell.symbol, cell.style))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
+    Text::from(cells.into_iter().map(merge_row_spans).collect::<Vec<_>>())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn sample_surface(
-    planet: &PlanetSnapshot,
-    selected_id: Option<&str>,
-    x: usize,
-    y: usize,
-    center_x: f64,
-    center_y: f64,
-    radius: f64,
-    yaw: f64,
-    pitch: f64,
-) -> Option<SurfaceSample> {
-    let screen_x = (x as f64 - center_x) / radius;
-    let screen_y = (center_y - y as f64) / radius;
+fn merge_row_spans(row: Vec<Cell>) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.len() / 2 + 1);
+    let mut current_style: Option<Style> = None;
+    let mut current_text = String::new();
+
+    for cell in row {
+        if current_style == Some(cell.style) {
+            current_text.push_str(&cell.symbol);
+        } else {
+            if let Some(style) = current_style {
+                spans.push(Span::styled(std::mem::take(&mut current_text), style));
+            }
+            current_style = Some(cell.style);
+            current_text.push_str(&cell.symbol);
+        }
+    }
+    if let Some(style) = current_style {
+        spans.push(Span::styled(current_text, style));
+    }
+    Line::from(spans)
+}
+
+fn sample_surface(ctx: &SurfaceContext<'_>, x: usize, y: usize) -> Option<SurfaceSample> {
+    let screen_x = (x as f64 - ctx.center_x) / ctx.radius;
+    let screen_y = (ctx.center_y - y as f64) / ctx.radius;
     let radius_squared = screen_x.mul_add(screen_x, screen_y * screen_y);
     if radius_squared > 1.0 {
         return None;
     }
 
     let depth = (1.0 - radius_squared).sqrt();
-    let sin_pitch = pitch.sin();
-    let cos_pitch = pitch.cos();
-    let latitude = (depth.mul_add(sin_pitch, screen_y * cos_pitch))
+    let latitude = (depth.mul_add(ctx.sin_pitch, screen_y * ctx.cos_pitch))
         .clamp(-1.0, 1.0)
         .asin();
-    let longitude =
-        normalize_angle(yaw + screen_x.atan2(depth.mul_add(cos_pitch, -screen_y * sin_pitch)));
-    let region = region_at(planet, latitude, longitude)?;
-    let selected = selected_id.is_some_and(|id| region.id == id);
-    let region_edge = near_region_edge(planet, latitude, longitude, radius);
+    let longitude = normalize_angle(
+        ctx.yaw + screen_x.atan2(depth.mul_add(ctx.cos_pitch, -screen_y * ctx.sin_pitch)),
+    );
+    let region_index = region_index_at(ctx, latitude, longitude)?;
+    let region = &ctx.planet.regions[region_index];
+    let selected = ctx.selected_index == Some(region_index);
+    let region_edge = near_region_edge(ctx, latitude, longitude);
     let selected_edge = selected && region_edge;
 
-    let light = normalized3((-0.38, 0.46, 0.80));
-    let diffuse = (screen_x * light.0 + screen_y * light.1 + depth * light.2).max(0.0);
+    let diffuse = (screen_x * ctx.light.0 + screen_y * ctx.light.1 + depth * ctx.light.2).max(0.0);
     let limb = depth.powf(0.38);
     let mut luminance = (0.18 + diffuse * 0.70 + limb * 0.12).clamp(0.10, 1.0);
     luminance += terrain_texture(region, latitude, longitude);
@@ -233,11 +357,54 @@ fn sample_surface(
 
     Some(SurfaceSample {
         color,
+        knowledge: region.knowledge,
         luminance: luminance.clamp(0.0, 1.0),
         selected,
         selected_edge,
         region_edge,
     })
+}
+
+fn sample_color(sample: &SurfaceSample, theme: Theme) -> Color {
+    if !theme.ansi16() {
+        return sample.color.color();
+    }
+    if sample.selected_edge {
+        return theme.gold;
+    }
+    if sample.selected {
+        return theme.amber;
+    }
+    match sample.knowledge {
+        RegionKnowledge::Unknown => {
+            if sample.luminance >= 0.45 {
+                Color::DarkGray
+            } else {
+                Color::Black
+            }
+        }
+        RegionKnowledge::Detected => {
+            if sample.luminance >= 0.50 {
+                Color::LightBlue
+            } else {
+                Color::Blue
+            }
+        }
+        RegionKnowledge::Surveyed => {
+            if sample.luminance >= 0.55 {
+                Color::LightCyan
+            } else {
+                Color::Cyan
+            }
+        }
+        RegionKnowledge::Observed => {
+            if sample.luminance >= 0.65 {
+                Color::White
+            } else {
+                Color::LightCyan
+            }
+        }
+    }
 }
 
 fn rich_cell(
@@ -251,16 +418,16 @@ fn rich_cell(
         (Some(top), Some(bottom)) => Cell {
             symbol: Cow::Borrowed("▀"),
             style: Style::default()
-                .fg(top.color.color())
-                .bg(bottom.color.color()),
+                .fg(sample_color(&top, theme))
+                .bg(sample_color(&bottom, theme)),
         },
         (Some(top), None) => Cell {
             symbol: Cow::Borrowed("▀"),
-            style: Style::default().fg(top.color.color()),
+            style: Style::default().fg(sample_color(&top, theme)),
         },
         (None, Some(bottom)) => Cell {
             symbol: Cow::Borrowed("▄"),
-            style: Style::default().fg(bottom.color.color()),
+            style: Style::default().fg(sample_color(&bottom, theme)),
         },
         (None, None) => star_cell(x, y, false, theme),
     }
@@ -318,7 +485,7 @@ fn fallback_cell(
             .fg(theme.amber)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(sample.color.color())
+        Style::default().fg(sample_color(&sample, theme))
     };
     Cell {
         symbol: Cow::Borrowed(symbol),
@@ -341,10 +508,12 @@ fn star_cell(x: usize, y: usize, ascii: bool, theme: Theme) -> Cell {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_region_markers(
     cells: &mut [Vec<Cell>],
     planet: &PlanetSnapshot,
     selected_id: Option<&str>,
+    flash_region_ids: &[&str],
     options: GlobeRenderOptions,
     center_x: f64,
     center_y: f64,
@@ -393,6 +562,28 @@ fn draw_region_markers(
             center_y,
             radius,
         );
+    }
+
+    for flash_id in flash_region_ids {
+        if let Some(region) = find_region(planet, flash_id) {
+            place_marker(
+                cells,
+                planet,
+                region,
+                if (options.phase * 8.0).floor() as i64 % 2 == 0 {
+                    "◈"
+                } else {
+                    "◎"
+                },
+                "*",
+                options.theme.gold,
+                true,
+                options,
+                center_x,
+                center_y,
+                radius,
+            );
+        }
     }
 
     if let Some(core) = planet.regions.iter().find(|region| region.core) {
@@ -818,33 +1009,34 @@ fn project(latitude: f64, longitude: f64, yaw: f64, pitch: f64) -> Option<Projec
     })
 }
 
-fn region_at(planet: &PlanetSnapshot, latitude: f64, longitude: f64) -> Option<&RegionSnapshot> {
-    let latitude_step = PI / f64::from(planet.latitude_bands);
-    let longitude_step = TAU / f64::from(planet.longitude_sectors);
-    let latitude_band = (((FRAC_PI_2 - latitude) / latitude_step).floor() as i16)
-        .clamp(0, i16::from(planet.latitude_bands.saturating_sub(1))) as u8;
-    let longitude_sector = ((normalize_angle(longitude) + longitude_step / 2.0) / longitude_step)
+#[inline]
+fn region_index_at(ctx: &SurfaceContext<'_>, latitude: f64, longitude: f64) -> Option<usize> {
+    let latitude_band = (((FRAC_PI_2 - latitude) / ctx.latitude_step).floor() as i16)
+        .clamp(0, i16::from(ctx.planet.latitude_bands.saturating_sub(1)))
+        as u8;
+    let longitude_sector = ((normalize_angle(longitude) + ctx.longitude_step / 2.0)
+        / ctx.longitude_step)
         .floor() as u8
-        % planet.longitude_sectors;
-    planet.regions.iter().find(|region| {
-        region.position.latitude_band == latitude_band
-            && region.position.longitude_sector == longitude_sector
-    })
+        % ctx.planet.longitude_sectors;
+    ctx.grid.get(latitude_band, longitude_sector)
 }
 
-fn near_region_edge(planet: &PlanetSnapshot, latitude: f64, longitude: f64, radius: f64) -> bool {
-    let latitude_step = PI / f64::from(planet.latitude_bands);
-    let longitude_step = TAU / f64::from(planet.longitude_sectors);
-    let latitude_edge = (1..planet.latitude_bands)
-        .map(|band| FRAC_PI_2 - f64::from(band) * latitude_step)
-        .map(|edge| (latitude - edge).abs())
-        .fold(f64::INFINITY, f64::min);
-    let sector_center = (normalize_angle(longitude) / longitude_step).round() * longitude_step;
+#[inline]
+fn near_region_edge(ctx: &SurfaceContext<'_>, latitude: f64, longitude: f64) -> bool {
+    let bands = ctx.planet.latitude_bands;
+    let latitude_edge = if bands > 1 {
+        let band_pos = (FRAC_PI_2 - latitude) / ctx.latitude_step;
+        let nearest_edge = band_pos.round().clamp(1.0, f64::from(bands - 1));
+        (band_pos - nearest_edge).abs() * ctx.latitude_step
+    } else {
+        f64::INFINITY
+    };
+    let sector_center =
+        (normalize_angle(longitude) / ctx.longitude_step).round() * ctx.longitude_step;
     let longitude_edge =
-        (normalize_signed_angle(longitude - sector_center).abs() - longitude_step / 2.0).abs()
+        (normalize_signed_angle(longitude - sector_center).abs() - ctx.longitude_step / 2.0).abs()
             * latitude.cos().abs().max(0.18);
-    let threshold = REGION_EDGE_WIDTH.max(0.48 / radius);
-    latitude_edge < threshold || longitude_edge < threshold
+    latitude_edge < ctx.edge_threshold || longitude_edge < ctx.edge_threshold
 }
 
 fn region_center(planet: &PlanetSnapshot, region: &RegionSnapshot) -> (f64, f64) {
@@ -1090,5 +1282,52 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .any(|span| span.style.fg == Some(Theme::new(false).cyan)));
         assert!(!plain_text(&rich_output).contains('•'));
+    }
+
+    #[test]
+    fn cached_globe_render_hits_cache_invalidates_on_selection_and_merges_spans() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let planet = engine.planet().unwrap();
+        let options = GlobeRenderOptions {
+            width: 58,
+            height: 24,
+            yaw: 0.4,
+            pitch: 0.1,
+            phase: 0.25,
+            ascii: false,
+            no_color: false,
+            theme: Theme::new(false),
+        };
+        let mut cache = GlobeCache::default();
+        let first = render_cached(&planet, Some(&planet.core_region_id), options, &mut cache);
+        assert_eq!(cache.stats(), (0, 1));
+        let second = render_cached(
+            &planet,
+            Some(&planet.core_region_id),
+            GlobeRenderOptions {
+                phase: 0.75,
+                ..options
+            },
+            &mut cache,
+        );
+        assert_eq!(cache.stats(), (1, 1));
+        assert!(plain_text(&first).contains('◎'));
+        assert!(plain_text(&second).contains('◌'));
+        assert_eq!(
+            plain_text(&first),
+            plain_text(&render(&planet, Some(&planet.core_region_id), options))
+        );
+        // Merged spans must be substantially fewer than total cells (58 * 24 = 1392).
+        let span_count: usize = first.lines.iter().map(|line| line.spans.len()).sum();
+        assert!(span_count < 900, "expected span merging, got {span_count}");
+
+        let other_region = planet
+            .regions
+            .iter()
+            .find(|region| region.id != planet.core_region_id)
+            .unwrap();
+        let _third = render_cached(&planet, Some(&other_region.id), options, &mut cache);
+        assert_eq!(cache.stats(), (1, 2));
     }
 }

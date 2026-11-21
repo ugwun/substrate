@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use futures_util::{FutureExt, StreamExt};
 use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_core::protocol::BaseModuleKind;
 use mind_tui::{
@@ -25,6 +26,10 @@ struct Args {
     ascii: bool,
     #[arg(long)]
     no_color: bool,
+    #[arg(long, env = "SUBSTRATE_TRUECOLOR")]
+    truecolor: bool,
+    #[arg(long, env = "SUBSTRATE_ANSI16")]
+    ansi16: bool,
 }
 
 #[tokio::main]
@@ -48,16 +53,59 @@ async fn run() -> Result<()> {
         ascii: args.ascii || term_is_dumb,
         no_color: args.no_color || no_color_env || term_is_dumb,
     };
+    let ansi16 = !options.no_color
+        && !term_is_dumb
+        && !args.truecolor
+        && (args.ansi16 || !supports_truecolor());
+    let enable_boot_intro = !term_is_dumb;
 
     let (command_tx, command_rx) = mpsc::channel(8);
     let (update_tx, mut update_rx) = mpsc::channel(32);
     let connection_task = tokio::spawn(connection::run(config.address, command_rx, update_tx));
     let mut terminal = ratatui::try_init().context("failed to initialize terminal")?;
-    let result = run_dashboard(&mut terminal, &command_tx, &mut update_rx, options).await;
+    let result = run_dashboard(
+        &mut terminal,
+        &command_tx,
+        &mut update_rx,
+        options,
+        ansi16,
+        enable_boot_intro,
+    )
+    .await;
     let _ = command_tx.send(ConnectionCommand::Detach).await;
     let _ = time::timeout(Duration::from_secs(1), connection_task).await;
     let restore_result = ratatui::try_restore().context("failed to restore terminal");
     result.and(restore_result)
+}
+
+fn supports_truecolor() -> bool {
+    if env::var("COLORTERM").is_ok_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("truecolor") || lower.contains("24bit")
+    }) {
+        return true;
+    }
+    if env::var_os("WT_SESSION").is_some() {
+        return true;
+    }
+    if env::var("TERM_PROGRAM").is_ok_and(|value| {
+        matches!(
+            value.as_str(),
+            "WezTerm" | "iTerm.app" | "vscode" | "Alacritty" | "ghostty" | "kitty" | "Hyper"
+        )
+    }) {
+        return true;
+    }
+    env::var("TERM").is_ok_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("truecolor")
+            || lower.contains("24bit")
+            || lower.contains("256color")
+            || lower.contains("kitty")
+            || lower.contains("alacritty")
+            || lower.contains("wezterm")
+            || lower.contains("ghostty")
+    })
 }
 
 async fn run_dashboard(
@@ -65,26 +113,85 @@ async fn run_dashboard(
     commands: &mpsc::Sender<ConnectionCommand>,
     updates: &mut mpsc::Receiver<ConnectionUpdate>,
     options: RenderOptions,
+    ansi16: bool,
+    enable_boot_intro: bool,
 ) -> Result<()> {
     let mut app = App::default();
+    app.ansi16 = ansi16;
+    app.animations_enabled = enable_boot_intro;
+    if enable_boot_intro {
+        app.enable_boot_intro();
+    }
     app.open_session_menu();
-    let mut draw_interval = time::interval(Duration::from_millis(160));
-    draw_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut events = EventStream::new();
+    let mut dirty = true;
 
     loop {
+        if dirty {
+            let now = std::time::Instant::now();
+            app.advance_globe_animation(now);
+            let draw_start = std::time::Instant::now();
+            terminal
+                .draw(|frame| ui::render(frame, &app, options, now))
+                .context("failed to draw dashboard")?;
+            app.record_frame_metrics(draw_start.elapsed());
+            dirty = false;
+        }
+
+        let now = std::time::Instant::now();
+        let next_deadline = app.next_frame_deadline(now);
+        let animation_sleep = async {
+            if let Some(deadline) = next_deadline {
+                time::sleep_until(time::Instant::from_std(deadline)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
+        const MAX_COALESCED_EVENTS: usize = 32;
         tokio::select! {
-            _ = draw_interval.tick() => {
-                let now = std::time::Instant::now();
-                app.advance_globe_animation(now);
-                terminal
-                    .draw(|frame| ui::render(frame, &app, options, now))
-                    .context("failed to draw dashboard")?;
-                while event::poll(Duration::ZERO).context("failed to poll terminal input")? {
-                    if let Event::Key(key) = event::read().context("failed to read terminal input")? {
-                        if handle_key(&mut app, key, commands).await? {
-                            return Ok(());
+            biased;
+            maybe_event = events.next() => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+                        match event {
+                            Event::Key(key) => {
+                                if handle_key(&mut app, key, commands).await? {
+                                    return Ok(());
+                                }
+                                dirty = true;
+                            }
+                            Event::Resize(_, _) => {
+                                dirty = true;
+                            }
+                            _ => {}
+                        }
+                        // Drain a bounded batch of already-queued stream events without
+                        // mixing synchronous poll/read with Crossterm's EventStream.
+                        for _ in 0..MAX_COALESCED_EVENTS {
+                            match events.next().now_or_never() {
+                                Some(Some(Ok(Event::Key(key)))) => {
+                                    if handle_key(&mut app, key, commands).await? {
+                                        return Ok(());
+                                    }
+                                    dirty = true;
+                                }
+                                Some(Some(Ok(Event::Resize(_, _)))) => {
+                                    dirty = true;
+                                }
+                                Some(Some(Ok(_))) => {}
+                                Some(Some(Err(error))) => {
+                                    return Err(error).context("failed to read terminal input");
+                                }
+                                Some(None) => return Ok(()),
+                                None => break,
+                            }
                         }
                     }
+                    Some(Err(error)) => {
+                        return Err(error).context("failed to read terminal input");
+                    }
+                    None => return Ok(()),
                 }
             }
             update = updates.recv() => {
@@ -117,6 +224,10 @@ async fn run_dashboard(
                     }
                     None => app.disconnected("connection worker stopped"),
                 }
+                dirty = true;
+            }
+            _ = animation_sleep => {
+                dirty = true;
             }
         }
     }
@@ -135,9 +246,15 @@ async fn handle_key(
     {
         return Ok(true);
     }
-    app.record_input(std::time::Instant::now());
+    let now = std::time::Instant::now();
+    app.record_input(now);
+    app.clear_transition();
     if app.session_menu.is_some() {
         return handle_session_menu(app, key, commands).await;
+    }
+    if app.boot_intro_active(now) {
+        app.skip_boot_intro();
+        return Ok(false);
     }
     if key.code == KeyCode::Char('q') {
         app.open_session_menu();
@@ -256,8 +373,14 @@ async fn handle_key(
                 .await
                 .context("connection worker stopped")?;
         }
-        KeyCode::Tab => app.cycle_workspace(key.modifiers.contains(event::KeyModifiers::SHIFT)),
-        KeyCode::BackTab => app.cycle_workspace(true),
+        KeyCode::Tab => {
+            app.cycle_workspace(key.modifiers.contains(event::KeyModifiers::SHIFT));
+            app.trigger_transition(now);
+        }
+        KeyCode::BackTab => {
+            app.cycle_workspace(true);
+            app.trigger_transition(now);
+        }
         KeyCode::Esc if app.pending_action.is_some() => app.cancel_confirmation_action(),
         KeyCode::Enter if app.pending_action.is_some() => match app.pending_action.clone() {
             Some(ContextAction::Extract(region_id)) => {
@@ -332,13 +455,18 @@ async fn handle_key(
         _ if app.pending_action.is_some() => {}
         KeyCode::Esc if app.workspace == Workspace::Planet && app.local_view => {
             app.leave_local_view();
+            app.trigger_transition(now);
         }
         KeyCode::Esc => app.open_session_menu(),
         KeyCode::Char('v') if app.workspace == Workspace::Planet => {
+            let was_local = app.local_view;
             if app.local_view {
                 app.leave_local_view();
             } else {
                 app.enter_local_view();
+            }
+            if app.local_view != was_local {
+                app.trigger_transition(now);
             }
         }
         KeyCode::Char('n') if !app.local_view => {
@@ -566,6 +694,42 @@ async fn handle_key(
         }
         KeyCode::PageDown if app.workspace == Workspace::Overview => {
             app.scroll_overview_status(6);
+        }
+        KeyCode::Left | KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Probes => {
+            app.move_probe_selection(-1);
+        }
+        KeyCode::Right | KeyCode::Down | KeyCode::Char('j')
+            if app.workspace == Workspace::Probes =>
+        {
+            app.move_probe_selection(1);
+        }
+        KeyCode::Char('1') if app.workspace == Workspace::Probes => {
+            app.select_probe(0);
+        }
+        KeyCode::Char('2') if app.workspace == Workspace::Probes => {
+            app.select_probe(1);
+        }
+        KeyCode::Char('g') if app.workspace == Workspace::Probes => {
+            if let Some(ContextAction::ConfigureExtractor(loadout)) = app.extractor_loadout_action()
+            {
+                commands
+                    .send(ConnectionCommand::ConfigureExtractor(loadout))
+                    .await
+                    .context("connection worker stopped")?;
+            } else {
+                app.notice = Some("EXTRACTOR RIG LOCKED UNTIL PROBE IS READY".into());
+            }
+        }
+        KeyCode::PageUp if app.workspace == Workspace::Probes => {
+            app.scroll_probe_panel(-4);
+        }
+        KeyCode::PageDown if app.workspace == Workspace::Probes => {
+            app.scroll_probe_panel(4);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Probes => {
+            if app.focus_selected_probe_region() {
+                app.trigger_transition(now);
+            }
         }
         KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Research => {
             app.move_research_selection(-1);
