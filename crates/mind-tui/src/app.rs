@@ -461,16 +461,6 @@ impl App {
     }
 
     pub fn enter_local_view(&mut self) {
-        let network_unlocked = self
-            .planet
-            .as_ref()
-            .is_some_and(|planet| planet.network.unlocked);
-        if !network_unlocked {
-            self.notice = Some(format!(
-                "LOCAL FIELD LOCKED // {LOCAL_FIELD_UNLOCK_GUIDANCE}"
-            ));
-            return;
-        }
         if self.selected_subregions().is_empty() {
             self.notice = Some(format!(
                 "LOCAL FIELD UNAVAILABLE // {LOCAL_FIELD_SURVEY_GUIDANCE}"
@@ -594,6 +584,7 @@ impl App {
         let region = self.selected_region()?;
         let site = self.selected_subregion()?;
         (self.local_view
+            && planet.network.unlocked
             && site.knowledge >= SubregionKnowledge::Surveyed
             && site
                 .deposit
@@ -613,6 +604,7 @@ impl App {
         let site = self.selected_subregion()?;
         let stock = planet.refined_inventory;
         (self.local_view
+            && planet.network.unlocked
             && site.knowledge >= SubregionKnowledge::Surveyed
             && region.within_scout_range
             && site.base_id.is_none()
@@ -749,10 +741,7 @@ impl App {
             && region.within_scout_range
         {
             Some(ContextAction::Extract(region.id.clone()))
-        } else if planet.scout.state == ScoutState::Ready
-            && region.within_scout_range
-            && !region.core
-        {
+        } else if self.scout_can_deploy_to(planet, region) {
             Some(ContextAction::Deploy(region.id.clone()))
         } else {
             self.construction_action()
@@ -762,11 +751,23 @@ impl App {
     pub fn scout_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
         let region = self.selected_region()?;
-        (self.workspace == Workspace::Planet
-            && planet.scout.state == ScoutState::Ready
-            && region.within_scout_range
-            && !region.core)
+        (self.workspace == Workspace::Planet && self.scout_can_deploy_to(planet, region))
             .then(|| ContextAction::Deploy(region.id.clone()))
+    }
+
+    fn scout_can_deploy_to(&self, planet: &PlanetSnapshot, region: &RegionSnapshot) -> bool {
+        if !region.within_scout_range || region.core {
+            return false;
+        }
+        if planet.scout.state == ScoutState::Ready {
+            return true;
+        }
+        planet.scout.state == ScoutState::Holding
+            && planet.network.active_site_survey.is_none()
+            && planet
+                .active_mission
+                .as_ref()
+                .is_some_and(|mission| mission.target_region_id != region.id)
     }
 
     pub fn extraction_action(&self) -> Option<ContextAction> {
@@ -1395,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn local_field_gate_explains_foundation_and_regional_survey_requirements() {
+    fn local_field_gate_explains_regional_survey_requirement_and_opens_after_survey() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
         let now = Instant::now();
@@ -1403,18 +1404,15 @@ mod tests {
         app.apply_snapshot(engine.status(), now);
         app.apply_planet(engine.planet().unwrap(), now);
 
-        app.enter_local_view();
-        assert!(!app.local_view);
-        assert_eq!(
-            app.notice.as_deref(),
-            Some(
-                "LOCAL FIELD LOCKED // Build a relay, extend survey range, activate a research profile, then complete one automated operation."
-            )
-        );
-
-        let mut unlocked = engine.planet().unwrap();
-        unlocked.network.unlocked = true;
-        app.apply_planet(unlocked, now);
+        // Core has no local field until a non-core region is surveyed, or selecting an unknown region explains the requirement.
+        let unknown = engine
+            .planet()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| !region.core)
+            .unwrap();
+        app.selected_region_id = Some(unknown.id);
         app.enter_local_view();
         assert!(!app.local_view);
         assert_eq!(

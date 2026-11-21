@@ -2350,6 +2350,9 @@ fn local_survey_blocker(app: &App, planet: &PlanetSnapshot, site: &SubregionSnap
 }
 
 fn local_extraction_blocker(planet: &PlanetSnapshot, site: &SubregionSnapshot) -> String {
+    if !planet.network.unlocked {
+        return crate::app::LOCAL_FIELD_UNLOCK_GUIDANCE.into();
+    }
     if site.knowledge < SubregionKnowledge::Surveyed {
         return "focused survey required".into();
     }
@@ -2381,6 +2384,9 @@ fn extractor_loadout_blocker(planet: &PlanetSnapshot) -> String {
 }
 
 fn local_base_blocker(app: &App, planet: &PlanetSnapshot, site: &SubregionSnapshot) -> String {
+    if !planet.network.unlocked {
+        return crate::app::LOCAL_FIELD_UNLOCK_GUIDANCE.into();
+    }
     if site.knowledge < SubregionKnowledge::Surveyed {
         return "focused survey required".into();
     }
@@ -3109,18 +3115,17 @@ fn region_action_lines(
             theme,
         ),
     ];
-    let local_field_available = planet.network.unlocked
-        && planet
-            .network
-            .subregions
-            .iter()
-            .any(|site| site.region_id == region.id);
-    let local_field_status = if !planet.network.unlocked {
-        crate::app::LOCAL_FIELD_UNLOCK_GUIDANCE
-    } else if !local_field_available {
+    let local_field_available = planet
+        .network
+        .subregions
+        .iter()
+        .any(|site| site.region_id == region.id);
+    let local_field_status = if !local_field_available {
         crate::app::LOCAL_FIELD_SURVEY_GUIDANCE
-    } else {
+    } else if planet.network.unlocked {
         "open spatial local field"
+    } else {
+        "open 4x4 local field (focused survey ready)"
     };
     lines.push(Line::from(vec![
         Span::styled("[V] ", Style::default().fg(theme.amber).bold()),
@@ -3751,6 +3756,7 @@ fn render_dashboard(
                 EngineEventKind::ArchiveExperimentStarted => "ARC+",
                 EngineEventKind::ArchiveExperimentCompleted => "ARC✓",
                 EngineEventKind::ArchiveObservationRecorded => "EVID",
+                EngineEventKind::ArchivePresentationReviewed => "EVID",
                 EngineEventKind::PersistenceDegraded => "SAVE!",
                 EngineEventKind::PersistenceRecovered => "SAVE",
                 EngineEventKind::ShutdownRequested => "STOP",
@@ -4469,6 +4475,7 @@ mod tests {
         engine.complete_onboarding([2, 2, 2]);
         let mut planet = engine.planet().unwrap();
         planet.network.unlocked = true;
+        planet.network.subregions.clear();
         for slot in 0..16_u8 {
             planet.network.subregions.push(SubregionSnapshot {
                 id: format!("{}_site_{}", planet.core_region_id, slot + 1),
@@ -4601,7 +4608,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_local_field_explains_the_complete_unlock_sequence() {
+    fn unsurveyed_local_field_explains_regional_survey_requirement() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
         let now = Instant::now();
@@ -4609,6 +4616,14 @@ mod tests {
         app.apply_snapshot(engine.status(), now);
         app.apply_planet(engine.planet().unwrap(), now);
         app.show_return_summary = false;
+        let unknown = engine
+            .planet()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| !region.core)
+            .unwrap();
+        app.selected_region_id = Some(unknown.id);
         app.enter_local_view();
 
         let output = screen(
@@ -4620,12 +4635,9 @@ mod tests {
                 no_color: true,
             },
         );
-        assert!(output.contains("LOCAL FIELD LOCKED"), "{output}");
-        assert!(output.contains("Build a relay"), "{output}");
-        assert!(output.contains("extend survey range"), "{output}");
-        assert!(output.contains("activate a research profile"), "{output}");
+        assert!(output.contains("LOCAL FIELD UNAVAILABLE"), "{output}");
         assert!(
-            output.contains("complete one automated operation"),
+            output.contains("Complete a regional survey here first"),
             "{output}"
         );
     }
@@ -5061,6 +5073,7 @@ mod tests {
                 activity_id: 1,
                 kind: mind_core::protocol::ActivityKind::Survey,
                 region_id: Some("region_082".into()),
+                archive_record_id: None,
                 summary: "Survey completed at R-082; one analysis unit recorded.".into(),
             });
         let mut app = App::default();

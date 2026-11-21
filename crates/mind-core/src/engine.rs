@@ -645,6 +645,14 @@ impl MindEngine {
         )
     }
 
+    pub fn acknowledge_archive_presentation(&self, record_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.acknowledge_archive_presentation(record_id),
+            EngineEventKind::ArchivePresentationReviewed,
+            "Archive transmission reviewed",
+        )
+    }
+
     fn commit_planet_action(
         &self,
         operation: impl FnOnce(&mut GameState) -> PlanetActionResult,

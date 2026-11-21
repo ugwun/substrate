@@ -567,6 +567,31 @@ async fn dispatch_frame(
                 ),
             }
         }
+        method::ACKNOWLEDGE_ARCHIVE_PRESENTATION => {
+            let params = request.params.and_then(|value| {
+                serde_json::from_value::<mind_core::protocol::AcknowledgeArchivePresentationParams>(
+                    value,
+                )
+                .ok()
+            });
+            match params {
+                Some(params) => (
+                    success(
+                        request.id,
+                        engine.acknowledge_archive_presentation(&params.record_id),
+                    ),
+                    false,
+                ),
+                None => (
+                    failure(
+                        request.id,
+                        -32602,
+                        "invalid archive presentation acknowledgement",
+                    ),
+                    false,
+                ),
+            }
+        }
         method::SUBSCRIBE_STATUS => {
             let id = subscriptions.status.get_or_insert_with(Uuid::new_v4);
             (

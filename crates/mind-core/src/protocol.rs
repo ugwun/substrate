@@ -33,6 +33,7 @@ pub mod method {
     pub const SET_EXTRACTION_ROUTE: &str = "mind.set_extraction_route";
     pub const CLEAR_EXTRACTION_ROUTE: &str = "mind.clear_extraction_route";
     pub const ACKNOWLEDGE_ACTIVITY: &str = "mind.acknowledge_activity";
+    pub const ACKNOWLEDGE_ARCHIVE_PRESENTATION: &str = "mind.acknowledge_archive_presentation";
     pub const SURVEY_SUBREGION: &str = "mind.survey_subregion";
     pub const ESTABLISH_BASE: &str = "mind.establish_base";
     pub const CONSTRUCT_BASE_MODULE: &str = "mind.construct_base_module";
@@ -115,6 +116,7 @@ pub enum EngineEventKind {
     ArchiveExperimentStarted,
     ArchiveExperimentCompleted,
     ArchiveObservationRecorded,
+    ArchivePresentationReviewed,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
@@ -475,6 +477,29 @@ pub struct ObjectiveSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CampaignStepSnapshot {
+    pub label: String,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CampaignSnapshot {
+    pub chapter_id: String,
+    pub chapter_number: u8,
+    pub total_chapters: u8,
+    pub title: String,
+    pub question: String,
+    pub voice: String,
+    pub next_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_region_id: Option<String>,
+    pub steps: Vec<CampaignStepSnapshot>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SystemMapSnapshot {
     pub available: bool,
 }
@@ -504,6 +529,8 @@ pub struct ArchiveExperimentSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ArchiveSnapshot {
     pub records: Vec<ArchiveRecordSnapshot>,
+    #[serde(default)]
+    pub unpresented_record_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment: Option<ArchiveExperimentSnapshot>,
 }
@@ -662,6 +689,8 @@ pub struct ActivityRecord {
     pub kind: ActivityKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_record_id: Option<String>,
     pub summary: String,
 }
 
@@ -712,6 +741,7 @@ pub struct PlanetSnapshot {
     pub extraction_route: ExtractionRouteSnapshot,
     pub unreviewed_activity: Vec<ActivityRecord>,
     pub objective: ObjectiveSnapshot,
+    pub campaign: CampaignSnapshot,
     pub archive: ArchiveSnapshot,
     pub system_map: SystemMapSnapshot,
     pub network: PlanetaryNetworkSnapshot,
@@ -775,6 +805,11 @@ pub struct RegionAutomationParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct AcknowledgeActivityParams {
     pub through_activity_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AcknowledgeArchivePresentationParams {
+    pub record_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

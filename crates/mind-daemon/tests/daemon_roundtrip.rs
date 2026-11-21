@@ -290,6 +290,26 @@ async fn graceful_restart_preserves_onboarding_completion_without_offline_progre
             .unwrap()
             .ok
     );
+    let initial_planet = first_client.planet().await.unwrap();
+    assert_eq!(initial_planet.campaign.chapter_number, 1);
+    assert_eq!(
+        initial_planet.archive.unpresented_record_ids,
+        vec!["observation_001".to_owned()]
+    );
+    assert!(
+        first_client
+            .acknowledge_archive_presentation("observation_001")
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(first_client
+        .planet()
+        .await
+        .unwrap()
+        .archive
+        .unpresented_record_ids
+        .is_empty());
     let first_tick = first_client.status().await.unwrap().tick;
     let target = first_client
         .planet()

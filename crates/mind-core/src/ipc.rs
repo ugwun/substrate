@@ -1,10 +1,11 @@
 use crate::{
     protocol::{
-        self, decode_result, method, AcknowledgeActivityParams, ActivateProfileParams,
-        BaseModuleKind, CompleteOnboardingParams, ConfigureExtractorParams,
-        ConstructBaseModuleParams, ConstructRelayParams, DeployExtractorParams, DeployScoutParams,
-        DiagnosticPulseResult, ExtractorLoadout, NewPlaythroughResult, OnboardingCompletionResult,
-        PingResult, PlanetActionResult, PlanetNotification, PlanetSnapshot, ProtocolError,
+        self, decode_result, method, AcknowledgeActivityParams,
+        AcknowledgeArchivePresentationParams, ActivateProfileParams, BaseModuleKind,
+        CompleteOnboardingParams, ConfigureExtractorParams, ConstructBaseModuleParams,
+        ConstructRelayParams, DeployExtractorParams, DeployScoutParams, DiagnosticPulseResult,
+        ExtractorLoadout, NewPlaythroughResult, OnboardingCompletionResult, PingResult,
+        PlanetActionResult, PlanetNotification, PlanetSnapshot, ProtocolError,
         RegionAutomationParams, ResearchProject, RpcIncoming, SetBaseModuleEnabledParams,
         StartResearchParams, StatusNotification, StatusSnapshot, SubregionParams, SubscribeResult,
         UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
@@ -300,6 +301,17 @@ impl IpcClient {
             through_activity_id,
         })?;
         self.call(method::ACKNOWLEDGE_ACTIVITY, Some(params)).await
+    }
+
+    pub async fn acknowledge_archive_presentation(
+        &mut self,
+        record_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(AcknowledgeArchivePresentationParams {
+            record_id: record_id.into(),
+        })?;
+        self.call(method::ACKNOWLEDGE_ARCHIVE_PRESENTATION, Some(params))
+            .await
     }
 
     pub async fn next_status(&mut self) -> Result<StatusNotification, IpcError> {

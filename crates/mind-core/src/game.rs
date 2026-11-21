@@ -20,8 +20,8 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use uuid::Uuid;
 
-const SAVE_SCHEMA_VERSION: u32 = 10;
-const MIGRATABLE_SCHEMA_VERSIONS: [u32; 5] = [5, 6, 7, 8, 9];
+const SAVE_SCHEMA_VERSION: u32 = 11;
+const MIGRATABLE_SCHEMA_VERSIONS: [u32; 6] = [5, 6, 7, 8, 9, 10];
 const RESETTABLE_SCHEMA_VERSIONS: [u32; 4] = [1, 2, 3, 4];
 const WORLD_GENERATION_VERSION: u32 = 4;
 const LATITUDE_BANDS: u8 = 10;
@@ -143,6 +143,8 @@ pub struct GameState {
     acknowledged_activity_id: u64,
     #[serde(default)]
     archive_records: Vec<ArchiveRecordState>,
+    #[serde(default)]
+    presented_archive_count: usize,
     #[serde(default)]
     active_archive_experiment: Option<ArchiveExperimentState>,
     #[serde(default)]
@@ -441,6 +443,7 @@ impl GameState {
             next_activity_id: 1,
             acknowledged_activity_id: 0,
             archive_records: Vec::new(),
+            presented_archive_count: 0,
             active_archive_experiment: None,
             archive_comparison_region_ids: Vec::new(),
             random_state: seed ^ 0xA17A_5EED_D15C_0FFE,
@@ -492,6 +495,9 @@ impl GameState {
         }
         if migrated {
             state.migrate_archive_progress(version.schema_version);
+            if version.schema_version <= 10 {
+                state.presented_archive_count = state.archive_records.len();
+            }
         }
         state.validate()?;
         if migrated {
@@ -695,17 +701,73 @@ impl GameState {
                 }
                 _ => self.world.core_region_id.clone(),
             };
+            let regions: Vec<RegionSnapshot> = self
+                .world
+                .regions
+                .iter()
+                .map(|region| self.region_snapshot(region))
+                .collect();
+            let network = self.network_snapshot();
+            let archive_experiment = self.archive_experiment_snapshot();
+            let observed_subregions = self
+                .world
+                .regions
+                .iter()
+                .flat_map(|region| &region.subregions)
+                .filter(|site| site.knowledge == SubregionKnowledge::Observed)
+                .count();
+            let has_observed_sheltered = self.world.regions.iter().any(|region| {
+                region.subregions.iter().any(|site| {
+                    site.class == SubregionClass::ShelteredShelf
+                        && site.knowledge == SubregionKnowledge::Observed
+                })
+            });
+            let offline_base_region_id = network
+                .bases
+                .iter()
+                .find(|base| !base.connected || base.integrity <= 20)
+                .map(|base| base.region_id.as_str());
+            let campaign = crate::campaign::derive_campaign(&crate::campaign::CampaignInput {
+                has_observation_002: self.has_archive_observation(OBSERVATION_002),
+                has_observation_003: self.has_archive_observation(OBSERVATION_003),
+                has_observation_004: self.has_archive_observation(OBSERVATION_004),
+                has_observation_005: self.has_archive_observation(OBSERVATION_005),
+                horizon_reached: self.horizon_reached,
+                relay_built: self.relay_region_id.is_some(),
+                relay_constructing: self.active_construction.is_some(),
+                research_unlocked: self.reach_milestone_complete,
+                active_research: self.active_research.is_some(),
+                completed_research_count: self.completed_research.len(),
+                profile: self.operational_profile,
+                foundation_complete: self.alpha_complete,
+                analysis_units: self.analysis_units,
+                refined_inventory: self.refined_inventory,
+                scout_state: phase,
+                scout_region_id: &region_id,
+                active_site_survey: self.active_site_survey.is_some(),
+                active_base_projects: self.base_projects.len(),
+                observed_subregions,
+                has_observed_sheltered,
+                comparison_regions_count: self.archive_comparison_region_ids.len(),
+                comparison_region_ids: &self.archive_comparison_region_ids,
+                archive_experiment: archive_experiment.as_ref(),
+                horizon: &network.horizon,
+                regions: &regions,
+                subregions: &network.subregions,
+                offline_base_region_id,
+            });
+            let unpresented_record_ids = self
+                .archive_records
+                .iter()
+                .skip(self.presented_archive_count)
+                .map(|record| record.record_id.clone())
+                .collect();
             PlanetSnapshot {
                 revision: self.state_revision,
                 latitude_bands: LATITUDE_BANDS,
                 longitude_sectors: LONGITUDE_SECTORS,
                 core_region_id: self.world.core_region_id.clone(),
-                regions: self
-                    .world
-                    .regions
-                    .iter()
-                    .map(|region| self.region_snapshot(region))
-                    .collect(),
+                regions,
                 scout: ScoutSnapshot {
                     id: self.scout.id.clone(),
                     designation: self.scout.designation.clone(),
@@ -774,6 +836,7 @@ impl GameState {
                     .cloned()
                     .collect(),
                 objective: self.objective_snapshot(),
+                campaign,
                 archive: ArchiveSnapshot {
                     records: self
                         .archive_records
@@ -788,13 +851,14 @@ impl GameState {
                             discovered_at_revision: record.discovered_at_revision,
                         })
                         .collect(),
-                    experiment: self.archive_experiment_snapshot(),
+                    unpresented_record_ids,
+                    experiment: archive_experiment,
                 },
                 system_map: SystemMapSnapshot {
                     available: self.horizon_reached
                         && self.has_archive_observation(OBSERVATION_005),
                 },
-                network: self.network_snapshot(),
+                network,
             }
         })
     }
@@ -817,22 +881,57 @@ impl GameState {
         if !self.region_within_range(&region.position) {
             return self.action_rejected("region_out_of_range");
         }
-        if self.active_mission.is_some() {
-            return self.action_rejected("scout_unavailable");
+        let target_position = region.position.clone();
+        let survey_required = region.knowledge < RegionKnowledge::Surveyed;
+        let survey_completed = region.knowledge >= RegionKnowledge::Surveyed;
+        let network_hops = self.travel_hops_to_network(&target_position).max(1);
+        let travel_ms = u64::from(network_hops) * TRAVEL_MS_PER_HOP;
+        let mut outbound_ms = travel_ms;
+
+        if let Some(current) = &self.active_mission {
+            if current.phase != ScoutState::Holding || current.target_region_id == region_id {
+                return self.action_rejected("scout_unavailable");
+            }
+            if self
+                .active_site_survey
+                .as_ref()
+                .is_some_and(|survey| survey.region_id == current.target_region_id)
+            {
+                return self.action_rejected("site_survey_in_progress");
+            }
+            let previous_region_id = current.target_region_id.clone();
+            let previous_mission_id = current.mission_id;
+            if let Some(previous_region) = self
+                .world
+                .regions
+                .iter_mut()
+                .find(|candidate| candidate.id == previous_region_id)
+            {
+                let direct_hops = graph_distance(&previous_region.position, &target_position)
+                    .min(network_hops)
+                    .max(1);
+                outbound_ms = u64::from(direct_hops) * TRAVEL_MS_PER_HOP;
+                if previous_region.knowledge == RegionKnowledge::Observed {
+                    previous_region.knowledge = RegionKnowledge::Surveyed;
+                }
+            }
+            self.push_report(MissionReport {
+                mission_id: previous_mission_id,
+                region_id: previous_region_id,
+                outcome: MissionReportOutcome::Returned,
+            });
         }
-        let travel_ms =
-            u64::from(self.travel_hops_to_network(&region.position).max(1)) * TRAVEL_MS_PER_HOP;
         let mission_id = self.next_mission_id;
         self.next_mission_id += 1;
         self.active_mission = Some(MissionState {
             mission_id,
             target_region_id: region_id.to_owned(),
             phase: ScoutState::Outbound,
-            remaining_ms: travel_ms,
-            phase_total_ms: travel_ms,
+            remaining_ms: outbound_ms,
+            phase_total_ms: outbound_ms,
             travel_ms,
-            survey_required: region.knowledge < RegionKnowledge::Surveyed,
-            survey_completed: region.knowledge >= RegionKnowledge::Surveyed,
+            survey_required,
+            survey_completed,
             auto_return: false,
         });
         self.changed();
@@ -1042,8 +1141,8 @@ impl GameState {
     }
 
     pub fn survey_subregion(&mut self, subregion_id: &str) -> PlanetActionResult {
-        if !self.alpha_complete {
-            return self.action_rejected("planetary_network_locked");
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
         }
         if self.active_site_survey.is_some() {
             return self.action_rejected("site_survey_in_progress");
@@ -1512,6 +1611,24 @@ impl GameState {
         let acknowledged = through_activity_id.min(latest);
         if acknowledged > self.acknowledged_activity_id {
             self.acknowledged_activity_id = acknowledged;
+            self.changed();
+        }
+        self.action_accepted(None)
+    }
+
+    pub fn acknowledge_archive_presentation(&mut self, record_id: &str) -> PlanetActionResult {
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
+        }
+        let Some(index) = self
+            .archive_records
+            .iter()
+            .position(|record| record.record_id == record_id)
+        else {
+            return self.action_rejected("unknown_archive_record");
+        };
+        if index + 1 > self.presented_archive_count {
+            self.presented_archive_count = index + 1;
             self.changed();
         }
         self.action_accepted(None)
@@ -2374,17 +2491,17 @@ impl GameState {
             region_id: region_id.clone(),
             discovered_at_revision: self.state_revision,
         });
-        self.push_activity(
+        self.push_activity_with_archive(
             ActivityKind::Milestone,
             region_id,
+            Some(record_id.into()),
             format!("Permanent archive observation recorded: {title}."),
         );
         true
     }
 
     fn refresh_initial_archive_observation(&mut self) -> bool {
-        if !self.alpha_complete
-            || !self.has_archive_observation(OBSERVATION_001)
+        if !self.has_archive_observation(OBSERVATION_001)
             || self.has_archive_observation(OBSERVATION_002)
         {
             return false;
@@ -2907,21 +3024,18 @@ impl GameState {
 
     fn network_snapshot(&self) -> PlanetaryNetworkSnapshot {
         let unlocked = self.alpha_complete;
-        let subregions = if unlocked {
-            self.world
-                .regions
-                .iter()
-                .filter(|region| region.knowledge >= RegionKnowledge::Surveyed)
-                .flat_map(|region| {
-                    region
-                        .subregions
-                        .iter()
-                        .map(|subregion| self.subregion_snapshot(&region.id, subregion))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let subregions = self
+            .world
+            .regions
+            .iter()
+            .filter(|region| region.knowledge >= RegionKnowledge::Surveyed)
+            .flat_map(|region| {
+                region
+                    .subregions
+                    .iter()
+                    .map(|subregion| self.subregion_snapshot(&region.id, subregion))
+            })
+            .collect();
         PlanetaryNetworkSnapshot {
             unlocked,
             subregion_rows: SUBREGION_ROWS,
@@ -3338,15 +3452,36 @@ impl GameState {
     }
 
     fn push_activity(&mut self, kind: ActivityKind, region_id: Option<String>, summary: String) {
+        self.push_activity_with_archive(kind, region_id, None, summary);
+    }
+
+    fn push_activity_with_archive(
+        &mut self,
+        kind: ActivityKind,
+        region_id: Option<String>,
+        archive_record_id: Option<String>,
+        summary: String,
+    ) {
         let record = ActivityRecord {
             activity_id: self.next_activity_id,
             kind,
             region_id,
+            archive_record_id,
             summary,
         };
         self.next_activity_id = self.next_activity_id.saturating_add(1);
         if self.activity_log.len() == ACTIVITY_CAPACITY {
-            self.activity_log.remove(0);
+            let evict_index = self
+                .activity_log
+                .iter()
+                .position(|entry| entry.activity_id <= self.acknowledged_activity_id)
+                .or_else(|| {
+                    self.activity_log
+                        .iter()
+                        .position(|entry| entry.kind != ActivityKind::Milestone)
+                })
+                .unwrap_or(0);
+            self.activity_log.remove(evict_index);
         }
         self.activity_log.push(record);
     }
@@ -3668,8 +3803,7 @@ impl GameState {
             return Err(GameError::Invariant("alpha progression is inconsistent"));
         }
         if let Some(survey) = &self.active_site_survey {
-            if !self.alpha_complete
-                || survey.remaining_ms == 0
+            if survey.remaining_ms == 0
                 || survey.phase_total_ms == 0
                 || self
                     .find_subregion(&survey.subregion_id)
@@ -3822,6 +3956,7 @@ impl GameState {
                 records[0].discovered_at_revision > records[1].discovered_at_revision
             })
             || self.horizon_reached != self.has_archive_observation(OBSERVATION_005)
+            || self.presented_archive_count > self.archive_records.len()
         {
             return Err(GameError::Invariant("archive records are inconsistent"));
         }
@@ -6366,5 +6501,295 @@ mod tests {
             .unwrap()
             .unreviewed_activity
             .is_empty());
+    }
+
+    #[test]
+    fn schema_ten_migrates_to_eleven_without_replaying_existing_transmissions() {
+        let mut state = GameState::with_seed(41);
+        awaken(&mut state);
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+
+        let mut raw: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        raw["schema_version"] = Value::from(10);
+        raw["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("presented_archive_count");
+        fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        let loaded = GameState::load(&path).unwrap();
+        assert_eq!(loaded.disposition, LoadDisposition::PreviousMigrated);
+        let snapshot = loaded.state.planet_snapshot().unwrap();
+        assert_eq!(snapshot.archive.records.len(), 1);
+        assert!(
+            snapshot.archive.unpresented_record_ids.is_empty(),
+            "migrated saves must not abruptly replay old archive records"
+        );
+        let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["schema_version"], SAVE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn archive_transmission_survives_log_eviction_and_return_summary_dismissal() {
+        let mut state = GameState::with_seed(42);
+        awaken(&mut state);
+        assert_eq!(
+            state
+                .planet_snapshot()
+                .unwrap()
+                .archive
+                .unpresented_record_ids,
+            vec![OBSERVATION_001.to_owned()]
+        );
+
+        for index in 0..80 {
+            state.push_activity(
+                ActivityKind::Survey,
+                Some("region_082".into()),
+                format!("Routine survey #{index}"),
+            );
+        }
+        let latest = state
+            .planet_snapshot()
+            .unwrap()
+            .unreviewed_activity
+            .last()
+            .unwrap()
+            .activity_id;
+        assert!(state.acknowledge_activity(latest).ok);
+        assert!(state
+            .planet_snapshot()
+            .unwrap()
+            .unreviewed_activity
+            .is_empty());
+        assert_eq!(
+            state
+                .planet_snapshot()
+                .unwrap()
+                .archive
+                .unpresented_record_ids,
+            vec![OBSERVATION_001.to_owned()],
+            "dismissing return summary and filling the 64-entry activity log must not lose transmissions"
+        );
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+        let mut restored = GameState::load(&path).unwrap().state;
+        assert_eq!(
+            restored
+                .planet_snapshot()
+                .unwrap()
+                .archive
+                .unpresented_record_ids,
+            vec![OBSERVATION_001.to_owned()]
+        );
+        assert!(
+            restored
+                .acknowledge_archive_presentation(OBSERVATION_001)
+                .ok
+        );
+        assert!(restored
+            .planet_snapshot()
+            .unwrap()
+            .archive
+            .unpresented_record_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn early_focused_local_survey_and_observation_002_unlock_before_foundation() {
+        let mut state = GameState::with_seed(43);
+        awaken(&mut state);
+        assert!(!state.alpha_complete);
+
+        let target = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .find(|region| region.hop_distance_from_core == 1)
+            .unwrap();
+        assert!(state.deploy_scout(&target.id).ok);
+        state.advance(TRAVEL_MS_PER_HOP + SURVEY_MS);
+
+        let snapshot = state.planet_snapshot().unwrap();
+        assert!(!snapshot.network.unlocked);
+        let local_sites: Vec<_> = snapshot
+            .network
+            .subregions
+            .iter()
+            .filter(|site| site.region_id == target.id)
+            .collect();
+        assert_eq!(local_sites.len(), usize::from(SUBREGIONS_PER_REGION));
+        let first_detected = local_sites
+            .iter()
+            .find(|site| site.knowledge == SubregionKnowledge::Detected)
+            .unwrap();
+        assert!(state.survey_subregion(&first_detected.id).ok);
+        // Persisted mid-survey before foundation must validate and load cleanly.
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        state.save(&path).unwrap();
+        let mut state = GameState::load(&path).unwrap().state;
+        state.advance(SITE_SURVEY_MS);
+
+        // Foothold construction remains locked until foundation completes.
+        assert_eq!(
+            state.establish_base(&first_detected.id).code.as_deref(),
+            Some("planetary_network_locked")
+        );
+
+        // Complete 2 more local surveys ensuring a sheltered shelf is observed across reachable regions.
+        let mut observed = 1usize;
+        let mut sheltered = state
+            .find_subregion(&first_detected.id)
+            .is_some_and(|(_, s)| s.class == SubregionClass::ShelteredShelf);
+        let region_candidates: Vec<String> = state
+            .world
+            .regions
+            .iter()
+            .filter(|r| !r.id.eq(&state.world.core_region_id) && hop_distance(&r.position) <= 2)
+            .map(|r| r.id.clone())
+            .collect();
+        for rid in region_candidates {
+            if observed >= 3 && sheltered {
+                break;
+            }
+            if state
+                .active_mission
+                .as_ref()
+                .map(|m| m.target_region_id.as_str())
+                != Some(rid.as_str())
+            {
+                assert!(state.deploy_scout(&rid).ok);
+                state.advance(TRAVEL_MS_PER_HOP * 2 + SURVEY_MS);
+            }
+            while let Some(site_id) =
+                state
+                    .world
+                    .regions
+                    .iter()
+                    .find(|r| r.id == rid)
+                    .and_then(|r| {
+                        r.subregions
+                            .iter()
+                            .find(|s| {
+                                s.knowledge == SubregionKnowledge::Detected
+                                    && (!sheltered && s.class == SubregionClass::ShelteredShelf)
+                            })
+                            .or_else(|| {
+                                r.subregions
+                                    .iter()
+                                    .find(|s| s.knowledge == SubregionKnowledge::Detected)
+                            })
+                            .map(|s| s.id.clone())
+                    })
+            {
+                if observed >= 3 && sheltered {
+                    break;
+                }
+                let is_sheltered = state
+                    .find_subregion(&site_id)
+                    .is_some_and(|(_, s)| s.class == SubregionClass::ShelteredShelf);
+                assert!(state.survey_subregion(&site_id).ok);
+                state.advance(SITE_SURVEY_MS);
+                observed += 1;
+                if is_sheltered {
+                    sheltered = true;
+                }
+                if observed >= 3 && !sheltered {
+                    break;
+                }
+            }
+        }
+        assert!(state.has_archive_observation(OBSERVATION_002));
+        let snapshot = state.planet_snapshot().unwrap();
+        assert_eq!(snapshot.campaign.chapter_id, "chapter_02");
+        assert_eq!(snapshot.campaign.title, "Repeated Span");
+        assert!(snapshot
+            .archive
+            .unpresented_record_ids
+            .contains(&OBSERVATION_002.to_owned()));
+    }
+
+    #[test]
+    fn holding_scout_can_redeploy_directly_to_another_reachable_region() {
+        let mut state = GameState::with_seed(44);
+        awaken(&mut state);
+        let reachable: Vec<String> = state
+            .planet_snapshot()
+            .unwrap()
+            .regions
+            .into_iter()
+            .filter(|region| region.hop_distance_from_core == 1)
+            .map(|region| region.id)
+            .collect();
+        assert!(reachable.len() >= 2);
+
+        assert!(state.deploy_scout(&reachable[0]).ok);
+        state.advance(TRAVEL_MS_PER_HOP + SURVEY_MS);
+        assert_eq!(
+            state.planet_snapshot().unwrap().scout.state,
+            ScoutState::Holding
+        );
+        // Redeploying to the same held region is still rejected.
+        assert_eq!(
+            state.deploy_scout(&reachable[0]).code.as_deref(),
+            Some("scout_unavailable")
+        );
+        // Redeploying directly to another reachable region succeeds without manual recall.
+        assert!(state.deploy_scout(&reachable[1]).ok);
+        let snapshot = state.planet_snapshot().unwrap();
+        assert_eq!(snapshot.scout.state, ScoutState::Outbound);
+        assert_eq!(
+            snapshot.active_mission.unwrap().target_region_id,
+            reachable[1]
+        );
+        // First region preserves its Surveyed knowledge.
+        assert_eq!(
+            snapshot
+                .regions
+                .iter()
+                .find(|region| region.id == reachable[0])
+                .unwrap()
+                .knowledge,
+            RegionKnowledge::Surveyed
+        );
+    }
+
+    #[test]
+    fn campaign_tracks_all_five_chapters_from_awakening_to_horizon() {
+        let mut state = GameState::with_seed(45);
+        awaken(&mut state);
+        let ch1 = state.planet_snapshot().unwrap().campaign;
+        assert_eq!(ch1.chapter_number, 1);
+        assert_eq!(ch1.chapter_id, "chapter_01");
+        assert_eq!(ch1.title, "Retained Interval");
+        assert!(!ch1.complete);
+
+        assert!(state.record_archive_observation(OBSERVATION_002, None));
+        let ch2 = state.planet_snapshot().unwrap().campaign;
+        assert_eq!(ch2.chapter_number, 2);
+        assert_eq!(ch2.title, "Repeated Span");
+
+        assert!(state.record_archive_observation(OBSERVATION_003, None));
+        let ch3 = state.planet_snapshot().unwrap().campaign;
+        assert_eq!(ch3.chapter_number, 3);
+        assert_eq!(ch3.title, "Pause Structure");
+
+        assert!(state.record_archive_observation(OBSERVATION_004, None));
+        let ch4 = state.planet_snapshot().unwrap().campaign;
+        assert_eq!(ch4.chapter_number, 4);
+        assert_eq!(ch4.title, "Stable Weighting");
+
+        state.horizon_reached = true;
+        assert!(state.record_archive_observation(OBSERVATION_005, None));
+        let ch5 = state.planet_snapshot().unwrap().campaign;
+        assert_eq!(ch5.chapter_number, 5);
+        assert_eq!(ch5.title, "Wider Frame");
+        assert!(ch5.complete);
     }
 }
