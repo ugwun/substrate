@@ -4,7 +4,7 @@ Substrate is an atmospheric terminal game about an awakening machine intelligenc
 
 ![Animated Substrate terminal gameplay showing the 200-region globe, a live scout mission, Overview, Research, and System workspaces](docs/assets/substrate-terminal-demo.gif)
 
-The repository currently implements a complete multi-hour planetary demo: graphical onboarding; a lit, smoothly rotating 200-region globe; fog and surveys; variable geological deposits; concurrent survey and extraction probes; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a 4-by-4 explorable local field in every region; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment; and a concluding solar-horizon map. All progression remains daemon-owned and is presented through the Substrate Dark TUI. The system map is the end of this demo and provides no system-scale actions.
+The repository currently implements a complete multi-hour story-driven planetary campaign: graphical Coherence onboarding with a live signal oscilloscope; a five-chapter narrative arc with foreground questions, chapter briefings (`c`), and full-screen Discovery Transmissions; a lit, smoothly rotating 200-region globe with campaign lead beacons (`n`); fog and surveys with direct scout redeployment; variable geological deposits; concurrent survey and extraction probes; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a pixel-art 4-by-4 explorable local field in every surveyed region; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment with live waveform telemetry; and an animated Solar Horizon cliffhanger map. All progression remains daemon-owned and is presented through the Substrate Dark TUI. The system map is the end of this planetary chapter and provides no system-scale actions.
 
 ## Prerequisites
 
@@ -58,29 +58,28 @@ The IPC listener defaults to `127.0.0.1:7776`. The MCP Streamable HTTP endpoint 
 
 Both listeners only accept loopback addresses. Authoritative game state is atomically persisted as `game_state.json` beneath the platform-local Substrate data directory. Simulation time advances only while the daemon runs.
 
-The current game uses save schema 10. Schema-9 saves expand each region's six established sites into a 4-by-4 field while preserving their identifiers, knowledge, deposits, bases, projects, and active operations. Schema-8 saves also gain the approved archive progression while preserving accepted extractor configurations; schema-7 saves migrate active extraction into the balanced rig with accepted mission capacity, cycle, and rebuild values fixed at load; schema-6 saves migrate module power modes and accepted logistics support, while schema-5 saves gain deterministic local terrain without erasing planetary progress. Because the planet previously expanded from 24 to 200 regions, schema-1 through schema-4 alpha saves are deliberately replaced with fresh graphical onboarding and a new planet. Malformed and future-version saves still stop startup with an error.
+The current game uses save schema 11. Schema-11 adds durable discovery-transmission presentation tracking so unreviewed archive transmissions survive reconnects, log eviction, and return-summary dismissal; schema-10 saves migrate cleanly without replaying previously recorded transmissions. Schema-9 saves expand each region's six established sites into a 4-by-4 field while preserving their identifiers, knowledge, deposits, bases, projects, and active operations. Schema-8 saves also gain the approved archive progression while preserving accepted extractor configurations; schema-7 saves migrate active extraction into the balanced rig with accepted mission capacity, cycle, and rebuild values fixed at load; schema-6 saves migrate module power modes and accepted logistics support, while schema-5 saves gain deterministic local terrain without erasing planetary progress. Because the planet previously expanded from 24 to 200 regions, schema-1 through schema-4 alpha saves are deliberately replaced with fresh graphical onboarding and a new planet. Malformed and future-version saves still stop startup with an error.
 
 ## How to play
 
-Substrate is designed to be learned from the interface. The objective at the top of
-every workspace tells you what the Mind is currently trying to accomplish, the
-selected-region inspector lists the actions available there, and unavailable actions
-state their exact blocker. `Enter` performs the highlighted contextual action, while
-the letter shortcuts shown in the inspector are useful once the basic loop is familiar.
+Substrate is designed to be learned from the interface. The persistent campaign header at the top of every workspace shows the active chapter (`CH I`–`CH V`), step pips, the Mind's current open question, and the next concrete action. Press `n` on **Planet** to focus the globe on the current campaign lead, or `c` at any time to open the full Chapter Briefing. The selected-region inspector lists available actions and explains exact blockers, while newly discovered archive records arrive as full-screen Discovery Transmissions. `Enter` performs the highlighted contextual action, while letter shortcuts shown in the inspector speed up familiar routines.
 
 ### A first-session route
 
-1. Complete Coherence by aligning the three signal gaps. There is no timer or failure
-   state. The first permanent observation appears in **Archive** after awakening.
-2. On **Planet**, move from the core to a reachable unknown region and deploy the survey
-   scout with `Enter` or `s`.
-3. Watch its journey and survey progress in that region's inspector. The scout holds at
-   its destination when finished; select that region and press `r` to recall it before
-   surveying somewhere else.
-4. Survey several nearby regions. Each completed survey permanently records terrain,
-   conditions, any deposit, and its extraction risk.
-5. When a deposit appears, press `x` to review and confirm an extraction. Returned raw
-   material is refined automatically at the core.
+1. Complete Coherence by aligning the three signal gaps until the oscilloscope locks.
+   There is no timer or failure state. Awakening delivers the first permanent observation
+   as a full-screen Discovery Transmission (`Space`/`Enter` to reveal and file it in
+   **Archive**).
+2. On **Planet**, press `n` to jump to the highlighted campaign lead (or move from the
+   core to a reachable unknown region) and deploy the survey scout with `Enter` or `s`.
+3. Watch its journey and live telemetry strip in the inspector. When the scout finishes
+   and holds, you can either press `v` immediately to inspect the region's 4-by-4 local
+   field and run focused sector surveys (`s`), redeploy the holding scout directly to
+   another reachable region (`s`), or recall it to the core (`r`).
+4. Complete three focused sector surveys including a sheltered shelf to earn the second
+   permanent observation and its Discovery Transmission early in the campaign.
+5. Survey nearby regions to expose deposits, then press `x` to review and confirm an
+   extraction. Returned raw material is refined automatically at the core.
 6. Gather all three material families. The first relay requires 8 structural,
    6 conductive, and 6 silicate units; build it with `b` in a suitable surveyed region
    to extend the network by two hops.
@@ -91,11 +90,8 @@ the letter shortcuts shown in the inspector are useful once the basic loop is fa
    automation you have earned. `a` can queue eligible surveys, while repeat extraction
    becomes available only after you have completed that route manually once.
 9. The first successful earned automated operation completes the foundation chapter and
-   opens local planetary planning. Select a surveyed region and press `v` to enter its
-   4-by-4 local field. A regional survey detects the landing cross; hold the scout there
-   and use `s` to resolve a sector's energy, hazard, deposits, and terrain while detecting
-   its adjacent frontier. Three focused surveys including a sheltered sector establish the
-   first cross-site archive comparison.
+   unlocks foothold construction (`b`) and local extraction (`x`) inside surveyed regions'
+   4-by-4 local fields.
 10. Establish a foothold with `b`, then build power (`p`) and communications (`c`). A
     powered communications node extends field reach by three hops; chains can cross the
     original relay envelope. Site choice matters: exposed sites offer more energy but
@@ -107,13 +103,15 @@ the letter shortcuts shown in the inspector are useful once the basic loop is fa
     again to suspend or restore it when demand threatens reserve or communications. Use
     `m` to fund maintenance when environmental wear lowers integrity or disconnects a node.
 12. After two research directions and a powered laboratory are ready, open **Archive**
-    and press `Enter` to run the timing comparison. It takes 75 seconds, pauses if the
-    laboratory loses power, and leaves field operations available. Then complete focused
-    surveys in three separate regions to finish the planetary comparison.
+    and press `Enter` to run the timing comparison. It takes 75 seconds with live twin-trace
+    waveform telemetry, pauses if the laboratory loses power, and leaves field operations
+    available. Then complete focused surveys in three separate regions to finish the
+    planetary comparison.
 13. Resolve at least 18 regions and 12 local sectors, connect three nodes including one
     beyond the original envelope, and operate a laboratory plus two observation arrays.
-    **System Map** then opens automatically with the final demo observation as the
-    read-only end of play; no system-scale action is available.
+    **System Map** then opens automatically with an animated pullback, the final approved
+    observation, and the read-only **Solar Horizon** closing frame; no system-scale action
+    is available yet.
 
 ### Useful hints
 
@@ -151,9 +149,11 @@ Global controls:
 - session-menu **Save & Stop**: checkpoint progress, stop the daemon, and exit
 - session-menu **New Playthrough**: confirm and replace current progress with a fresh world
 - `r`: reconnect immediately while disconnected
+- `c`: toggle the Chapter Briefing overlay showing the current open question and checklist
 - `?`: show help
 - `Tab` or Shift-Tab: cycle Planet, Overview, Research, Archive, and System workspaces;
   System Map joins the cycle only after the concluding milestone
+- `Space` / `Enter` on a Discovery Transmission: complete typewriter reveal, then acknowledge and file in Archive
 - `Enter` in Archive: start the visible timing comparison when its research and powered
   laboratory requirements are met
 
@@ -161,14 +161,15 @@ Planet controls:
 
 - arrow keys: navigate one region on the 10-by-20 globe
 - Shift-arrow keys: jump two latitude bands or five longitude sectors
+- `n`: focus the globe on the active campaign lead region
 - Enter: use the selected region's primary available action
-- `s`: deploy the protected survey scout
+- `s`: deploy the protected survey scout (also redeploys directly while holding)
 - `x`: prepare a risky extraction from a surveyed deposit
 - `g`: cycle the extractor between balanced, cargo, and shielded rigs
 - `b`: prepare relay construction at a surveyed site once materials are ready
 - `r`: recall the scout when its active operation belongs to the selected region
 - `a`: queue or clear the earned routine available in the selected region
-- `v`: enter the selected region's 4-by-4 local field; before it is available, the footer and region inspector explain the remaining foundation or regional-survey requirement
+- `v`: enter the selected region's 4-by-4 local field once that region has been surveyed; before it is available, the footer and region inspector explain the regional-survey requirement
 - Page Up/Page Down: scroll the persistent region inspector
 - Esc: cancel an extraction or construction confirmation
 
@@ -195,7 +196,7 @@ Unicode and the Substrate Dark truecolor theme are enabled by default. Its deep 
 
 ## IPC contract
 
-IPC protocol version 13 uses newline-delimited JSON-RPC 2.0 over loopback TCP. In addition to lifecycle, status, onboarding, diagnostics, graceful shutdown, and atomic new-playthrough creation, it provides separate revisioned planet query/subscription methods and typed scout, extractor-rig configuration, regional and local extraction, focused-site survey, relay, foothold, base-module construction and power-mode, maintenance, research, archive-experiment, profile, routine-automation, and visible-activity acknowledgement operations. Planet DTOs publish local field dimensions and coordinates, the configured rig and accepted visible mission statistics, discovered local sectors, bases, module modes, projects, construction capacity and accepted logistics support, visible power and horizon progress, permanent discovered archive records, the currently visible archive experiment, topology dimensions, and only the player-visible availability of the concluding map while omitting undiscovered truth, hidden eligibility and guarantee progress, accepted random outcomes, and unresolved system details. `mind-core` provides the shared DTOs and reusable client.
+IPC protocol version 14 uses newline-delimited JSON-RPC 2.0 over loopback TCP. In addition to lifecycle, status, onboarding, diagnostics, graceful shutdown, and atomic new-playthrough creation, it provides separate revisioned planet query/subscription methods and typed scout, extractor-rig configuration, regional and local extraction, focused-site survey, relay, foothold, base-module construction and power-mode, maintenance, research, archive-experiment, profile, routine-automation, visible-activity acknowledgement, and archive-presentation acknowledgement operations. Planet DTOs publish local field dimensions and coordinates, the daemon-owned five-chapter campaign summary and lead region, unpresented archive record IDs, the configured rig and accepted visible mission statistics, discovered local sectors, bases, module modes, projects, construction capacity and accepted logistics support, visible power and horizon progress, permanent discovered archive records, the currently visible archive experiment, topology dimensions, and only the player-visible availability of the concluding map while omitting undiscovered truth, hidden eligibility and guarantee progress, accepted random outcomes, and unresolved system details. `mind-core` provides the shared DTOs and reusable client.
 
 ## MCP access
 

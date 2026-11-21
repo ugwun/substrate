@@ -141,6 +141,7 @@ pub struct App {
     globe_target_yaw: f64,
     globe_target_pitch: f64,
     last_seen_chapter: Option<u8>,
+    suppress_initial_return_summary: bool,
 }
 
 impl Default for App {
@@ -188,6 +189,7 @@ impl Default for App {
             globe_target_yaw: 0.0,
             globe_target_pitch: 0.0,
             last_seen_chapter: None,
+            suppress_initial_return_summary: false,
         }
     }
 }
@@ -265,6 +267,8 @@ impl App {
             return;
         }
         let initial_planet = self.planet.is_none();
+        let suppress_return_summary = std::mem::take(&mut self.suppress_initial_return_summary)
+            || self.onboarding_view == OnboardingView::Submitting;
         let system_map_was_available = self
             .planet
             .as_ref()
@@ -300,6 +304,7 @@ impl App {
             self.show_chapter_card = true;
         }
         if initial_planet
+            && !suppress_return_summary
             && self
                 .planet
                 .as_ref()
@@ -1195,11 +1200,13 @@ impl App {
     pub fn onboarding_completed(&mut self, result: OnboardingCompletionResult) {
         if result.ok {
             self.notice = Some("ONBOARDING COMPLETE".into());
+            self.suppress_initial_return_summary = true;
         } else {
             self.notice = Some(format!(
                 "ONBOARDING NOT COMPLETED: {}",
                 result.code.as_deref().unwrap_or("unknown_error")
             ));
+            self.suppress_initial_return_summary = false;
         }
         self.onboarding_view = OnboardingView::Adjusting;
     }
@@ -1516,6 +1523,25 @@ mod tests {
         assert_eq!(
             app.notice.as_deref(),
             Some("LOCAL FIELD UNAVAILABLE // Complete a regional survey here first.")
+        );
+    }
+
+    #[test]
+    fn live_onboarding_completion_opens_transmission_without_return_summary() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.begin_submission();
+        let result = engine.complete_onboarding([2, 2, 2]);
+        app.onboarding_completed(result);
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+
+        assert!(!app.show_return_summary);
+        assert_eq!(
+            app.active_transmission_id.as_deref(),
+            Some("observation_001")
         );
     }
 }

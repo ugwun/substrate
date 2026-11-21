@@ -331,33 +331,40 @@ repository skills.
 
 ## 9. Roadmap
 
-### Current: multi-hour planetary demo
+### Current: story-driven multi-hour planetary campaign
 
 The repository has completed Phase 0's technical foundation, Phase 1's globe-survey
 loop, focused Phase 2 and Phase 3 economy, research, loss, and automation systems, and
-the first Phase 4 planetary-network slice. They form one multi-hour demo arc:
+the first Phase 4 planetary-network slice, unified as a five-chapter campaign:
 
-- a startup/session menu, one-command startup, and graphical onboarding;
-- a persistent regional planet with fog, surveys, probes, and mission progress;
+- a startup/session menu, one-command startup, and graphical Coherence onboarding with
+  a live signal-lock oscilloscope;
+- a daemon-owned five-chapter campaign spine with foreground questions, step checklists,
+  campaign lead guidance, and full-screen Discovery Transmissions that separate
+  permanent observations from current interpretations;
+- a persistent regional planet with fog, surveys, direct scout redeployment from hold,
+  and live mission telemetry;
 - variable deposits, risky extraction, rebuilding, refining, and initial range
   infrastructure;
 - balanced, cargo, and shielded extraction rigs whose capacity, exposure, timing, and
   recovery tradeoffs combine with research and local support;
 - competing research directions and operational profiles;
 - earned survey and extraction automation;
-- sixteen stable sectors in a 4-by-4 local field per region, with adjacency-driven
-  focused-survey frontiers, energy, hazards, deposits, and base-placement tradeoffs;
+- sixteen stable sectors in a 4-by-4 pixel-art local field per surveyed region, with
+  early focused-survey frontiers unlocked right after regional survey alongside
+  energy, hazards, deposits, and base-placement tradeoffs;
 - footholds, player-controlled module load shedding, geographic communication chains,
   depot-backed construction throughput, local extraction support, environmental wear,
   workshops, and funded recovery;
 - five ordered, creator-approved permanent observations integrated with onboarding,
-  focused local surveys, a powered-laboratory comparison, and independent regions;
+  early focused local surveys, a powered-laboratory comparison with live waveform
+  telemetry, and independent regions;
 - broad regional and local coverage, distributed analysis, and observation as the
   concluding planetary objective;
-- local-first Planet interaction, global Overview detail, return summaries, and
-  contextual guidance;
-- a daemon-owned concluding milestone that opens a read-only solar-horizon map and
-  stops before system-scale play.
+- local-first Planet interaction, global Overview detail, return summaries that quote
+  newly recorded evidence verbatim, and contextual guidance;
+- a daemon-owned concluding milestone that opens an animated read-only Solar Horizon
+  map and in-fiction closing frame, stopping cleanly before system-scale play.
 
 The README is the authority for the exact behavior and controls available in the
 current build.
