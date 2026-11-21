@@ -146,24 +146,6 @@ async fn serves_status_subscription_and_shutdown() {
     );
     assert_eq!(
         client
-            .queue_survey(target.clone())
-            .await
-            .unwrap()
-            .code
-            .as_deref(),
-        Some("automation_locked")
-    );
-    assert_eq!(
-        client
-            .remove_queued_survey(target.clone())
-            .await
-            .unwrap()
-            .code
-            .as_deref(),
-        Some("survey_not_queued")
-    );
-    assert_eq!(
-        client
             .set_extraction_route(target.clone())
             .await
             .unwrap()
@@ -190,7 +172,40 @@ async fn serves_status_subscription_and_shutdown() {
         Some("base_required")
     );
     assert!(client.acknowledge_activity(0).await.unwrap().ok);
-    assert!(client.deploy_scout(target).await.unwrap().ok);
+    assert!(client.deploy_scout(target.clone()).await.unwrap().ok);
+    let mut other_targets = planet
+        .regions
+        .iter()
+        .filter(|region| region.hop_distance_from_core == 1 && region.id != target)
+        .map(|region| region.id.clone());
+    let second_target = other_targets.next().unwrap();
+    let third_target = other_targets.next().unwrap();
+    assert!(client.queue_survey(second_target.clone()).await.unwrap().ok);
+    assert_eq!(
+        client
+            .queue_survey(third_target)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("survey_queue_full")
+    );
+    assert!(
+        client
+            .remove_queued_survey(second_target.clone())
+            .await
+            .unwrap()
+            .ok
+    );
+    assert_eq!(
+        client
+            .remove_queued_survey(second_target)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("survey_not_queued")
+    );
     let pulse = client.trigger_diagnostic_pulse().await.unwrap();
     assert_eq!(pulse.pulse_id, 1);
     assert_eq!(client.status().await.unwrap().last_diagnostic, Some(pulse));

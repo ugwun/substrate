@@ -5,7 +5,7 @@
 
 use crate::protocol::{
     ArchiveExperimentSnapshot, CampaignSnapshot, CampaignStepSnapshot, HorizonProgressSnapshot,
-    OperationalProfile, RegionKnowledge, RegionSnapshot, ResourceStock, ScoutState,
+    OperationalProfile, RegionKnowledge, RegionSnapshot, ResourceKind, ResourceStock, ScoutState,
     SubregionKnowledge, SubregionSnapshot,
 };
 
@@ -26,6 +26,9 @@ pub(crate) struct CampaignInput<'a> {
     pub refined_inventory: ResourceStock,
     pub scout_state: ScoutState,
     pub scout_region_id: &'a str,
+    pub scout_target_region_id: Option<&'a str>,
+    pub queued_survey_region_id: Option<&'a str>,
+    pub extractor_ready: bool,
     pub active_site_survey: bool,
     pub active_base_projects: usize,
     pub observed_subregions: usize,
@@ -87,9 +90,19 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         .filter(|region| !region.core && region.knowledge >= RegionKnowledge::Surveyed)
         .count();
 
+    let sheltered_note = if input.has_observed_sheltered {
+        "sheltered shelf observed"
+    } else {
+        "include one sheltered shelf"
+    };
+    let local_progress = format!(
+        "{}/3 local sectors; {sheltered_note}",
+        input.observed_subregions.min(3)
+    );
+
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
-            "Focused local survey is resolving. You can monitor the field or let it finish in the background.".into(),
+            format!("Focused local survey resolving ({local_progress}). Monitor the field or let it finish in the background."),
             Some("V".into()),
             Some(input.scout_region_id.to_owned()),
         )
@@ -101,7 +114,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         if holding_has_detected {
             (
                 format!(
-                    "Press V in {} to open the 4x4 local field and press S on a detected sector.",
+                    "Open 4x4 local field (V) in {} and press S on a FRONTIER sector ({local_progress}).",
                     region_label(input.regions, input.scout_region_id)
                 ),
                 Some("V".into()),
@@ -114,7 +127,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 .map_or("a nearby region", |id| region_label(input.regions, id));
             (
                 format!(
-                    "Select {label} and press S to redeploy the scout directly for another survey."
+                    "Select {label} and press S to redeploy the scout directly ({local_progress})."
                 ),
                 Some("S".into()),
                 next_region,
@@ -124,20 +137,85 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         input.scout_state,
         ScoutState::Outbound | ScoutState::Surveying | ScoutState::Returning
     ) {
-        (
-            format!(
-                "Scout is active near {}. Let it complete, or inspect nearby regions on the globe.",
-                region_label(input.regions, input.scout_region_id)
-            ),
-            None,
-            Some(input.scout_region_id.to_owned()),
-        )
+        let active_target = input
+            .scout_target_region_id
+            .unwrap_or(input.scout_region_id);
+        let parallel_deposit = input
+            .extractor_ready
+            .then(|| first_surveyed_deposit(input.regions, input.refined_inventory))
+            .flatten();
+        if let Some(deposit_region) = parallel_deposit {
+            (
+                format!(
+                    "Scout busy at {}. Run parallel extraction (X at {}) while it resolves.",
+                    region_label(input.regions, active_target),
+                    region_label(input.regions, &deposit_region),
+                ),
+                Some("X".into()),
+                Some(deposit_region),
+            )
+        } else if let Some(queued_id) = input.queued_survey_region_id {
+            let phase_verb = match input.scout_state {
+                ScoutState::Outbound => "en route to",
+                ScoutState::Surveying => "surveying",
+                ScoutState::Returning => "returning from",
+                _ => "active at",
+            };
+            (
+                format!(
+                    "Scout {phase_verb} {} · next waypoint {} queued (A on {} to clear).",
+                    region_label(input.regions, active_target),
+                    region_label(input.regions, queued_id),
+                    region_label(input.regions, queued_id),
+                ),
+                Some("A".into()),
+                Some(active_target.to_owned()),
+            )
+        } else {
+            let phase_verb = match input.scout_state {
+                ScoutState::Outbound => "en route to",
+                ScoutState::Surveying => "surveying",
+                ScoutState::Returning => "returning from",
+                _ => "active at",
+            };
+            let next_waypoint = input
+                .regions
+                .iter()
+                .filter(|r| {
+                    !r.core
+                        && r.within_scout_range
+                        && r.knowledge < RegionKnowledge::Surveyed
+                        && r.id != active_target
+                })
+                .min_by_key(|r| r.hop_distance_from_core)
+                .map(|r| r.id.clone());
+            if let Some(wp_id) = next_waypoint {
+                (
+                    format!(
+                        "Scout {phase_verb} {} — select {} and press A to queue your next waypoint (1/1).",
+                        region_label(input.regions, active_target),
+                        region_label(input.regions, &wp_id),
+                    ),
+                    Some("A".into()),
+                    Some(wp_id),
+                )
+            } else {
+                (
+                    format!(
+                        "Scout is {phase_verb} {}. Let it resolve, or inspect nearby regions on the globe.",
+                        region_label(input.regions, active_target)
+                    ),
+                    None,
+                    Some(active_target.to_owned()),
+                )
+            }
+        }
     } else if let Some(region_id) =
         first_surveyed_with_detected_site(input.regions, input.subregions)
     {
         (
             format!(
-                "Redeploy the scout to {} (S), then press V to inspect its local field and resolve a sheltered sector.",
+                "Redeploy the scout to {} (S), then press V for its local field ({local_progress}).",
                 region_label(input.regions, &region_id)
             ),
             Some("S".into()),
@@ -157,12 +235,6 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
             Some("S".into()),
             next_region,
         )
-    };
-
-    let sheltered_note = if input.has_observed_sheltered {
-        "sheltered sector observed"
-    } else {
-        "include one sheltered shelf"
     };
 
     CampaignSnapshot {
@@ -236,7 +308,9 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 Some("B".into()),
                 target,
             )
-        } else if let Some(deposit_region) = first_surveyed_deposit(input.regions) {
+        } else if let Some(deposit_region) =
+            first_surveyed_deposit(input.regions, input.refined_inventory)
+        {
             (
                     format!(
                         "Extract deposits (X at {}) to gather S {}/8 C {}/6 Si {}/6 for the first relay.",
@@ -516,24 +590,30 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 first_unsurveyed_beyond_core_range(input.regions),
             )
     } else if h.surveyed_regions < h.required_regions {
+        let remaining = h.required_regions - h.surveyed_regions;
+        let noun = if remaining == 1 { "region" } else { "regions" };
         let target = first_unsurveyed_reachable(input.regions);
         (
             format!(
-                "Survey {} more region(s) (S or A queue) to complete planetary coverage.",
-                h.required_regions - h.surveyed_regions
+                "Survey {remaining} more {noun} (S or A queue) to complete planetary coverage."
             ),
             Some("A".into()),
             target,
         )
     } else if h.observation_sites < h.required_observation_sites {
+        let remaining = h.required_observation_sites - h.observation_sites;
+        let noun = if remaining == 1 {
+            "Observation Array"
+        } else {
+            "Observation Arrays"
+        };
         (
-                format!(
-                    "Build {} more powered Observation Array(s) (O) at connected nodes to resolve parallax.",
-                    h.required_observation_sites - h.observation_sites
-                ),
-                Some("O".into()),
-                first_base_region(input.subregions),
-            )
+            format!(
+                "Build {remaining} more powered {noun} (O) at connected nodes to resolve parallax."
+            ),
+            Some("O".into()),
+            first_base_region(input.subregions),
+        )
     } else {
         (
             "Keep the laboratory and both observation arrays powered and connected simultaneously."
@@ -633,7 +713,24 @@ fn first_surveyed_reachable(regions: &[RegionSnapshot]) -> Option<String> {
         .map(|region| region.id.clone())
 }
 
-fn first_surveyed_deposit(regions: &[RegionSnapshot]) -> Option<String> {
+fn first_surveyed_deposit(regions: &[RegionSnapshot], refined: ResourceStock) -> Option<String> {
+    let needs_any = refined.structural < 8 || refined.conductive < 6 || refined.silicate < 6;
+    let missing_resource = |kind: ResourceKind| match kind {
+        ResourceKind::Structural => refined.structural < 8,
+        ResourceKind::Conductive => refined.conductive < 6,
+        ResourceKind::Silicate => refined.silicate < 6,
+    };
+    let needed = regions.iter().find(|region| {
+        region.within_scout_range
+            && region.knowledge >= RegionKnowledge::Surveyed
+            && region
+                .deposit
+                .as_ref()
+                .is_some_and(|deposit| deposit.remaining > 0 && missing_resource(deposit.resource))
+    });
+    if needed.is_some() || needs_any {
+        return needed.map(|region| region.id.clone());
+    }
     regions
         .iter()
         .find(|region| {

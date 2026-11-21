@@ -31,7 +31,7 @@ const CORE_LATITUDE_BAND: u8 = 4;
 const CORE_LONGITUDE_SECTOR: u8 = 0;
 const SCOUT_RANGE_HOPS: u8 = 2;
 const TRAVEL_MS_PER_HOP: u64 = 15_000;
-const SURVEY_MS: u64 = 30_000;
+const SURVEY_MS: u64 = 20_000;
 const REPORT_CAPACITY: usize = 64;
 const EXTRACTION_MS: u64 = 30_000;
 const EXTRACTOR_REBUILD_MS: u64 = 60_000;
@@ -45,13 +45,14 @@ const RELAY_COST: ResourceStock = ResourceStock {
     silicate: 6,
 };
 const RESEARCH_ANALYSIS_COST: u32 = 3;
-const RESEARCH_DURATION_MS: u64 = 120_000;
+const RESEARCH_DURATION_MS: u64 = 75_000;
+const PRE_AUTOMATION_WAYPOINT_CAPACITY: usize = 1;
 const SURVEY_QUEUE_CAPACITY: usize = 8;
 const ACTIVITY_CAPACITY: usize = 64;
 const SUBREGION_ROWS: u8 = 4;
 const SUBREGION_COLUMNS: u8 = 4;
 const SUBREGIONS_PER_REGION: u8 = SUBREGION_ROWS * SUBREGION_COLUMNS;
-const SITE_SURVEY_MS: u64 = 45_000;
+const SITE_SURVEY_MS: u64 = 25_000;
 const BASE_PROJECT_CAPACITY: usize = 2;
 const MAX_DEPOT_PROJECT_BONUS: usize = 2;
 const BASE_COMMUNICATION_RANGE_HOPS: u8 = 3;
@@ -758,6 +759,14 @@ impl GameState {
                 refined_inventory: self.refined_inventory,
                 scout_state: phase,
                 scout_region_id: &region_id,
+                scout_target_region_id: self
+                    .active_mission
+                    .as_ref()
+                    .map(|mission| mission.target_region_id.as_str()),
+                queued_survey_region_id: self.survey_queue.first().map(String::as_str),
+                extractor_ready: self.extractor_available
+                    && self.active_extraction.is_none()
+                    && self.extractor_rebuild_remaining_ms == 0,
                 active_site_survey: self.active_site_survey.is_some(),
                 active_base_projects: self.base_projects.len(),
                 observed_subregions,
@@ -834,7 +843,7 @@ impl GameState {
                 research: self.research_snapshot(),
                 survey_queue: SurveyQueueSnapshot {
                     unlocked: self.automation_unlocked(),
-                    capacity: SURVEY_QUEUE_CAPACITY,
+                    capacity: self.survey_queue_capacity(),
                     queued_region_ids: self.survey_queue.clone(),
                 },
                 extraction_route: ExtractionRouteSnapshot {
@@ -914,7 +923,6 @@ impl GameState {
                 return self.action_rejected("site_survey_in_progress");
             }
             let previous_region_id = current.target_region_id.clone();
-            let previous_mission_id = current.mission_id;
             if let Some(previous_region) = self
                 .world
                 .regions
@@ -929,11 +937,6 @@ impl GameState {
                     previous_region.knowledge = RegionKnowledge::Surveyed;
                 }
             }
-            self.push_report(MissionReport {
-                mission_id: previous_mission_id,
-                region_id: previous_region_id,
-                outcome: MissionReportOutcome::Returned,
-            });
         }
         let mission_id = self.next_mission_id;
         self.next_mission_id += 1;
@@ -1180,7 +1183,7 @@ impl GameState {
         let designation = subregion.designation.clone();
         let mission_id = mission.mission_id;
         let duration_ms = if self.operational_profile == OperationalProfile::Reach {
-            30_000
+            18_000
         } else {
             SITE_SURVEY_MS
         };
@@ -1504,8 +1507,8 @@ impl GameState {
     }
 
     pub fn queue_survey(&mut self, region_id: &str) -> PlanetActionResult {
-        if !self.automation_unlocked() {
-            return self.action_rejected("automation_locked");
+        if !self.onboarding_complete {
+            return self.action_rejected("onboarding_required");
         }
         let Some(region) = self
             .world
@@ -1529,14 +1532,19 @@ impl GameState {
         {
             return self.action_rejected("survey_already_queued");
         }
-        if self.survey_queue.len() >= SURVEY_QUEUE_CAPACITY {
+        if self.survey_queue.len() >= self.survey_queue_capacity() {
             return self.action_rejected("survey_queue_full");
         }
+        let designation = region.designation.clone();
         self.survey_queue.push(region_id.to_owned());
         self.push_activity(
             ActivityKind::Automation,
             Some(region_id.to_owned()),
-            format!("Automated survey queued for {}.", region.designation),
+            if self.automation_unlocked() {
+                format!("Automated survey queued for {designation}.")
+            } else {
+                format!("Next survey waypoint queued for {designation}.")
+            },
         );
         self.changed();
         self.action_accepted(None)
@@ -1653,7 +1661,14 @@ impl GameState {
     }
 
     pub fn advance(&mut self, elapsed_ms: u64) -> Vec<GameAdvanceEvent> {
-        if self.active_mission.is_none() {
+        let scout_ready_for_queue = self.active_mission.is_none()
+            || (!self.survey_queue.is_empty()
+                && self.active_site_survey.is_none()
+                && self
+                    .active_mission
+                    .as_ref()
+                    .is_some_and(|mission| mission.phase == ScoutState::Holding));
+        if scout_ready_for_queue {
             self.dispatch_next_queued_survey();
         }
         if self.active_extraction.is_none()
@@ -2326,19 +2341,45 @@ impl GameState {
             {
                 continue;
             }
-            let travel_ms = u64::from(hop_distance(&region.position)) * TRAVEL_MS_PER_HOP;
+            let target_position = region.position.clone();
+            let network_hops = self.travel_hops_to_network(&target_position).max(1);
+            let travel_ms = u64::from(network_hops) * TRAVEL_MS_PER_HOP;
+            let mut outbound_ms = travel_ms;
+
+            if let Some(current) = &self.active_mission {
+                if current.phase != ScoutState::Holding || self.active_site_survey.is_some() {
+                    self.survey_queue.insert(0, region_id);
+                    return;
+                }
+                let previous_region_id = current.target_region_id.clone();
+                if let Some(previous_region) = self
+                    .world
+                    .regions
+                    .iter_mut()
+                    .find(|candidate| candidate.id == previous_region_id)
+                {
+                    let direct_hops = graph_distance(&previous_region.position, &target_position)
+                        .min(network_hops)
+                        .max(1);
+                    outbound_ms = u64::from(direct_hops) * TRAVEL_MS_PER_HOP;
+                    if previous_region.knowledge == RegionKnowledge::Observed {
+                        previous_region.knowledge = RegionKnowledge::Surveyed;
+                    }
+                }
+            }
+
             let mission_id = self.next_mission_id;
             self.next_mission_id += 1;
             self.active_mission = Some(MissionState {
                 mission_id,
                 target_region_id: region_id,
                 phase: ScoutState::Outbound,
-                remaining_ms: travel_ms,
-                phase_total_ms: travel_ms,
+                remaining_ms: outbound_ms,
+                phase_total_ms: outbound_ms,
                 travel_ms,
                 survey_required: true,
                 survey_completed: false,
-                auto_return: true,
+                auto_return: self.automation_unlocked(),
             });
             self.changed();
             return;
@@ -3307,9 +3348,17 @@ impl GameState {
         RELAY_RANGE_HOPS + u8::from(self.operational_profile == OperationalProfile::Reach)
     }
 
+    fn survey_queue_capacity(&self) -> usize {
+        if self.automation_unlocked() {
+            SURVEY_QUEUE_CAPACITY
+        } else {
+            PRE_AUTOMATION_WAYPOINT_CAPACITY
+        }
+    }
+
     fn survey_duration_ms(&self) -> u64 {
         if self.operational_profile == OperationalProfile::Reach {
-            20_000
+            14_000
         } else {
             SURVEY_MS
         }
@@ -3741,7 +3790,8 @@ impl GameState {
         if self.active_research.as_ref().is_some_and(|research| {
             !self.reach_milestone_complete
                 || research.remaining_ms == 0
-                || research.phase_total_ms != RESEARCH_DURATION_MS
+                || research.phase_total_ms == 0
+                || research.remaining_ms > research.phase_total_ms
                 || self.completed_research.contains(&research.project)
         }) {
             return Err(GameError::Invariant("active research is inconsistent"));
@@ -3749,7 +3799,7 @@ impl GameState {
         if !self.profile_unlocked(self.operational_profile) {
             return Err(GameError::Invariant("active profile is locked"));
         }
-        if self.survey_queue.len() > SURVEY_QUEUE_CAPACITY
+        if self.survey_queue.len() > self.survey_queue_capacity()
             || self.survey_queue.iter().any(|region_id| {
                 !self
                     .world
@@ -4380,7 +4430,9 @@ fn profile_title(profile: OperationalProfile) -> &'static str {
 fn profile_summary(profile: OperationalProfile) -> &'static str {
     match profile {
         OperationalProfile::Balanced => "Baseline survey, extraction, and refining behavior.",
-        OperationalProfile::Reach => "+1 operational hop; focused surveys resolve in 20 seconds.",
+        OperationalProfile::Reach => {
+            "+1 operational hop; regional surveys take 14s and local surveys 18s."
+        }
         OperationalProfile::Resilience => "Published extraction risk is reduced by one tier.",
         OperationalProfile::Throughput => {
             "+2 extractor capacity; refining takes 3 seconds per unit."
@@ -6909,5 +6961,48 @@ mod tests {
             .archive
             .unpresented_record_ids
             .is_empty());
+    }
+
+    #[test]
+    fn pre_automation_survey_waypoint_chains_without_unlocking_automation() {
+        let mut state = GameState::with_seed(61);
+        awaken(&mut state);
+        let snapshot = state.planet_snapshot().unwrap();
+        assert!(!snapshot.survey_queue.unlocked);
+        assert_eq!(snapshot.survey_queue.capacity, 1);
+
+        let reachable: Vec<String> = snapshot
+            .regions
+            .iter()
+            .filter(|r| !r.core && r.hop_distance_from_core == 1)
+            .map(|r| r.id.clone())
+            .collect();
+        assert!(reachable.len() >= 3);
+
+        // Deploy to first region, then queue one waypoint while outbound/surveying.
+        assert!(state.deploy_scout(&reachable[0]).ok);
+        assert!(state.queue_survey(&reachable[1]).ok);
+        // Second waypoint exceeds the pre-automation 1-slot limit.
+        assert_eq!(
+            state.queue_survey(&reachable[2]).code.as_deref(),
+            Some("survey_queue_full")
+        );
+
+        // Finish first survey: scout transitions to Holding at reachable[0].
+        state.advance(TRAVEL_MS_PER_HOP + SURVEY_MS);
+        // Next tick dispatches the queued waypoint directly from Holding without auto_return.
+        state.advance(1_000);
+        let active = state.active_mission.as_ref().unwrap();
+        assert_eq!(active.target_region_id, reachable[1]);
+        assert!(!active.auto_return);
+        assert!(state.survey_queue.is_empty());
+
+        // Complete second survey: scout holds at reachable[1] and does not count as earned automation.
+        state.advance(TRAVEL_MS_PER_HOP * 2 + SURVEY_MS);
+        let active = state.active_mission.as_ref().unwrap();
+        assert_eq!(active.target_region_id, reachable[1]);
+        assert_eq!(active.phase, ScoutState::Holding);
+        assert!(!state.automated_survey_completed);
+        assert!(state.validate().is_ok());
     }
 }

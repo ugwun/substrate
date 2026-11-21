@@ -5946,7 +5946,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_intro_renders_cold_boot_and_quick_power_on_in_unicode_and_ascii() {
+    fn boot_intro_renders_full_boot_and_quick_power_on_in_unicode_and_ascii() {
         let now = Instant::now();
         let mut app = App::default();
         app.enable_boot_intro();
@@ -5971,7 +5971,7 @@ mod tests {
             lines.join("\n")
         };
 
-        let cold_unicode = render_at(
+        let full_unicode = render_at(
             &app,
             now + std::time::Duration::from_millis(1_800),
             RenderOptions {
@@ -5980,13 +5980,13 @@ mod tests {
             },
         );
         assert!(
-            cold_unicode.contains("COLD INITIALIZATION"),
-            "{cold_unicode}"
+            full_unicode.contains("SYSTEM INITIALIZATION"),
+            "{full_unicode}"
         );
-        assert!(cold_unicode.contains("CORE BUS"), "{cold_unicode}");
-        assert!(cold_unicode.contains("PRESS ANY KEY"), "{cold_unicode}");
+        assert!(full_unicode.contains("CORE BUS"), "{full_unicode}");
+        assert!(full_unicode.contains("PRESS ANY KEY"), "{full_unicode}");
 
-        let cold_ascii = render_at(
+        let full_ascii = render_at(
             &app,
             now + std::time::Duration::from_millis(1_800),
             RenderOptions {
@@ -5994,9 +5994,9 @@ mod tests {
                 no_color: true,
             },
         );
-        assert!(cold_ascii.is_ascii());
-        assert!(cold_ascii.contains("SUBSTRATE"), "{cold_ascii}");
-        assert!(cold_ascii.contains("COLD INITIALIZATION"), "{cold_ascii}");
+        assert!(full_ascii.is_ascii());
+        assert!(full_ascii.contains("SUBSTRATE"), "{full_ascii}");
+        assert!(full_ascii.contains("SYSTEM INITIALIZATION"), "{full_ascii}");
 
         app.skip_boot_intro();
         assert!(!app.boot_intro_active(now + std::time::Duration::from_millis(1_800)));
@@ -6225,7 +6225,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_new_playthrough_arms_cold_boot_and_return_summary_allows_quick_boot_animation() {
+    fn confirmed_new_playthrough_arms_full_boot_and_return_summary_allows_quick_boot_animation() {
         let now = Instant::now();
         let mut app = App::default();
         app.enable_boot_intro();
@@ -6233,7 +6233,7 @@ mod tests {
         app.connected();
         app.skip_boot_intro();
 
-        // Confirmed new playthrough resets local state and re-arms full cold boot.
+        // Confirmed new playthrough resets local state and re-arms full boot.
         app.new_playthrough_completed(mind_core::protocol::NewPlaythroughResult {
             ok: true,
             code: None,
@@ -6242,7 +6242,7 @@ mod tests {
         assert!(app.boot_intro_active(now + std::time::Duration::from_millis(100)));
         assert_eq!(
             app.boot_intro.map(|b| b.mode),
-            Some(crate::boot::BootMode::FullColdBoot)
+            Some(crate::boot::BootMode::FullBoot)
         );
 
         // Pending return summary must not suppress quick-boot animation frames.

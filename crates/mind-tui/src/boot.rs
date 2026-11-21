@@ -1,7 +1,7 @@
-//! Late-1980s skippable CRT cold-boot / power-on sequence.
+//! Late-1980s skippable CRT boot / power-on sequence.
 //!
-//! Strictly operational diagnostics only — introduces no unapproved lore, stays Stage-0 safe,
-//! respects ASCII/monochrome/TERM=dumb modes, and yields immediately to any player keypress.
+//! Operational diagnostics only; respects ASCII/monochrome/TERM=dumb modes and yields
+//! immediately to any player keypress.
 
 use crate::{theme::Theme, ui::RenderOptions};
 use ratatui::{
@@ -54,8 +54,8 @@ const POST_CHECKS: [(&str, &str, u128); 5] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootMode {
-    /// Full ~2.6 s CRT cold-boot sequence shown before initial Coherence onboarding.
-    FullColdBoot,
+    /// Full ~2.6 s CRT boot sequence shown before initial Coherence onboarding.
+    FullBoot,
     /// Brief ~0.75 s power-on crest shown when reattaching to an established daemon.
     QuickPowerOn,
 }
@@ -78,7 +78,7 @@ impl BootIntroState {
 
     pub fn duration(self) -> Duration {
         match self.mode {
-            BootMode::FullColdBoot => FULL_BOOT_DURATION,
+            BootMode::FullBoot => FULL_BOOT_DURATION,
             BootMode::QuickPowerOn => QUICK_BOOT_DURATION,
         }
     }
@@ -117,8 +117,8 @@ pub fn render_boot_intro(
 
     match boot.mode {
         BootMode::QuickPowerOn => render_quick_power_on(frame, area, progress, options, theme),
-        BootMode::FullColdBoot => {
-            render_full_cold_boot(frame, area, elapsed_ms, progress, options, theme)
+        BootMode::FullBoot => {
+            render_full_boot(frame, area, elapsed_ms, progress, options, theme)
         }
     }
 }
@@ -172,7 +172,7 @@ fn render_quick_power_on(
     );
 }
 
-fn render_full_cold_boot(
+fn render_full_boot(
     frame: &mut Frame<'_>,
     area: Rect,
     elapsed_ms: u128,
@@ -215,7 +215,7 @@ fn render_full_cold_boot(
         .border_set(border_set)
         .border_style(Style::default().fg(theme.cobalt_bright).bold())
         .title(Span::styled(
-            " SUBSTRATE // COLD INITIALIZATION ",
+            " SUBSTRATE // SYSTEM INITIALIZATION ",
             Style::default().fg(theme.gold).bold(),
         ))
         .style(theme.blueprint_style());

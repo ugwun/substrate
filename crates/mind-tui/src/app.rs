@@ -260,14 +260,14 @@ impl App {
             self.reset_local_playthrough_state();
             self.notice = Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED".into());
             if self.boot_intro_enabled {
-                self.boot_intro = Some(BootIntroState::start(received_at, BootMode::FullColdBoot));
+                self.boot_intro = Some(BootIntroState::start(received_at, BootMode::FullBoot));
             }
         } else if self.boot_intro_armed && self.session_menu.is_none() {
             self.boot_intro_armed = false;
             let mode = if snapshot.onboarding.complete {
                 BootMode::QuickPowerOn
             } else {
-                BootMode::FullColdBoot
+                BootMode::FullBoot
             };
             self.boot_intro = Some(BootIntroState::start(received_at, mode));
         }
@@ -463,7 +463,7 @@ impl App {
         let mode = if snapshot.onboarding.complete {
             BootMode::QuickPowerOn
         } else {
-            BootMode::FullColdBoot
+            BootMode::FullBoot
         };
         self.boot_intro = Some(BootIntroState::start(now, mode));
     }
