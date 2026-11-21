@@ -713,9 +713,13 @@ async fn handle_key(
                     app.subregion_extraction_action()
                 {
                     app.request_confirmation(action);
+                } else {
+                    app.notice = Some("EXTRACTION UNAVAILABLE HERE // SEE SITE OPERATIONS".into());
                 }
             } else if let Some(ContextAction::Extract(region_id)) = app.extraction_action() {
                 app.request_confirmation(ContextAction::Extract(region_id));
+            } else {
+                app.notice = Some("EXTRACTION UNAVAILABLE HERE // SEE REGION OPERATIONS".into());
             }
         }
         KeyCode::Char('g') if app.workspace == Workspace::Planet => {
@@ -733,10 +737,14 @@ async fn handle_key(
                     app.base_establishment_action()
                 {
                     app.request_confirmation(action);
+                } else {
+                    app.notice = Some("FOOTHOLD UNAVAILABLE HERE // SEE SITE OPERATIONS".into());
                 }
             } else if let Some(ContextAction::ConstructRelay(region_id)) = app.construction_action()
             {
                 app.request_confirmation(ContextAction::ConstructRelay(region_id));
+            } else {
+                app.notice = Some("RELAY UNAVAILABLE HERE // SEE REGION OPERATIONS".into());
             }
         }
         KeyCode::Char(key @ ('p' | 'c' | 'd' | 'w' | 'l' | 'o'))
@@ -767,11 +775,15 @@ async fn handle_key(
                     .context("connection worker stopped")?;
             } else if let Some(action) = app.base_module_action(module) {
                 app.request_confirmation(action);
+            } else {
+                app.notice = Some("MODULE UNAVAILABLE HERE // SEE SITE OPERATIONS".into());
             }
         }
         KeyCode::Char('m') if app.workspace == Workspace::Planet && app.local_view => {
             if let Some(action) = app.base_maintenance_action() {
                 app.request_confirmation(action);
+            } else {
+                app.notice = Some("MAINTENANCE UNAVAILABLE HERE // SEE SITE OPERATIONS".into());
             }
         }
         KeyCode::Char('r') if app.workspace == Workspace::Planet => {

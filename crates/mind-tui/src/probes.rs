@@ -604,7 +604,20 @@ fn render_telemetry_panel(
     let inner_h = usize::from(area.height.saturating_sub(2));
     // Pre-wrap with hanging indents so values continue under the value column and the overflow
     // cue counts real rendered rows.
-    let lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
+    let mut lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
+    // Keep a section heading with its first row instead of stranding it on the last visible row.
+    let first_scroll = usize::from(app.probe_panel_scroll).min(lines.len().saturating_sub(inner_h));
+    let last_visible = first_scroll + inner_h;
+    if inner_h > 1 && last_visible < lines.len() {
+        let plain: String = lines[last_visible - 1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        if plain.trim_end().ends_with(" //") {
+            lines.insert(last_visible - 1, Line::raw(""));
+        }
+    }
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(inner_h);
     app.scroll_limits

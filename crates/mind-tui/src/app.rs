@@ -182,6 +182,8 @@ pub struct App {
     pub archive_selection: usize,
     pub archive_detail_scroll: u16,
     pub scroll_limits: ScrollLimits,
+    /// The System Map became available while its introducing transmission was still queued.
+    pub system_map_deferred: bool,
     pub show_return_summary: bool,
     pub active_transmission_id: Option<String>,
     pub replay_transmission_id: Option<String>,
@@ -252,6 +254,7 @@ impl Default for App {
             archive_selection: 0,
             archive_detail_scroll: 0,
             scroll_limits: ScrollLimits::default(),
+            system_map_deferred: false,
             show_return_summary: false,
             active_transmission_id: None,
             replay_transmission_id: None,
@@ -471,7 +474,17 @@ impl App {
         if operation_resolved {
             self.notice = None;
         }
-        if system_map_became_available {
+        // Hold the System Map until the final observation's transmission has been presented, so
+        // the map never pre-empts the record that introduces it.
+        let final_record_pending = self
+            .planet
+            .as_ref()
+            .is_some_and(|planet| !planet.archive.unpresented_record_ids.is_empty());
+        if system_map_became_available && final_record_pending {
+            self.system_map_deferred = true;
+        } else if system_map_became_available || (self.system_map_deferred && !final_record_pending)
+        {
+            self.system_map_deferred = false;
             self.workspace = Workspace::SystemMap;
             self.system_map_opened_at = Some(received_at);
             self.pending_action = None;
@@ -2291,8 +2304,13 @@ mod tests {
         app.cycle_workspace(true);
         assert_eq!(app.workspace, Workspace::Archive);
 
+        // The map waits for its introducing transmission, then opens.
         let mut completed = engine.planet().unwrap();
         completed.system_map.available = true;
+        completed.archive.unpresented_record_ids = vec!["observation_005".into()];
+        app.apply_planet(completed.clone(), Instant::now());
+        assert_eq!(app.workspace, Workspace::Archive);
+        completed.archive.unpresented_record_ids.clear();
         app.apply_planet(completed, Instant::now());
         assert_eq!(app.workspace, Workspace::SystemMap);
         app.cycle_workspace(false);

@@ -380,7 +380,16 @@ fn format_status_line(status: &StatusSnapshot, planet: Option<&PlanetSnapshot>) 
     if let Some(res) = &planet.research.active {
         active_ops.push((
             res.remaining_ms,
-            format!("Research {}s", res.remaining_ms.div_ceil(1_000)),
+            format!(
+                "Research {} {}s",
+                planet
+                    .research
+                    .options
+                    .iter()
+                    .find(|option| option.project == res.project)
+                    .map_or("direction", |option| option.title.as_str()),
+                res.remaining_ms.div_ceil(1_000)
+            ),
         ));
     }
     for proj in &planet.network.active_projects {

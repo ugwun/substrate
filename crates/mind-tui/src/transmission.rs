@@ -647,8 +647,9 @@ pub fn render_chapter_card(
 ) {
     let width = area.width.saturating_sub(6).clamp(40, 78).min(area.width);
     let inner_w = usize::from(width.saturating_sub(2));
-    // Two border rows plus the fixed close prompt.
-    let max_body = usize::from(area.height.saturating_sub(2)).saturating_sub(3);
+    // Keep the workspace header and two-row footer clear (as Help does); then two border rows
+    // plus the fixed close prompt.
+    let max_body = usize::from(area.height.saturating_sub(4)).saturating_sub(3);
 
     let heading = |text: &'static str, color| Line::styled(text, Style::default().fg(color).bold());
     let question = Line::styled(
@@ -699,7 +700,42 @@ pub fn render_chapter_card(
 
     // Progressively compact so NEXT and the steps always fit: full card, then without the
     // narrative voice, then without headings and spacers, then without the question.
-    let layouts: [&dyn Fn() -> Vec<Line<'static>>; 4] = [
+    // Each step on one row (truncated), for the tightest layout.
+    let steps_one_row: Vec<Line<'static>> = campaign
+        .steps
+        .iter()
+        .map(|step| {
+            let marker = match (options.ascii, step.complete) {
+                (true, true) => "[#] ",
+                (true, false) => "[ ] ",
+                (false, true) => " ●  ",
+                (false, false) => " ○  ",
+            };
+            Line::from(vec![
+                Span::styled(
+                    marker,
+                    Style::default().fg(if step.complete {
+                        theme.success
+                    } else {
+                        theme.amber
+                    }),
+                ),
+                Span::styled(
+                    crate::ui::truncate_for_width(
+                        &terminal_text(&step.label, options.ascii),
+                        inner_w.saturating_sub(4),
+                        options.ascii,
+                    ),
+                    Style::default().fg(if step.complete {
+                        theme.muted
+                    } else {
+                        theme.text_strong
+                    }),
+                ),
+            ])
+        })
+        .collect();
+    let layouts: [&dyn Fn() -> Vec<Line<'static>>; 5] = [
         &|| {
             let mut lines = vec![
                 heading("OPEN QUESTION //", theme.amber),
@@ -731,28 +767,58 @@ pub fn render_chapter_card(
             lines
         },
         &|| {
-            let mut lines: Vec<Line<'static>> = steps.to_vec();
+            // Tightest form: the question shrinks to one line so it is never lost entirely.
+            let mut lines = vec![Line::styled(
+                crate::ui::truncate_for_width(
+                    &terminal_text(&campaign.question, options.ascii),
+                    inner_w,
+                    options.ascii,
+                ),
+                Style::default().fg(theme.text_strong).bold(),
+            )];
+            lines.extend(steps.iter().cloned());
+            lines.push(next.clone());
+            lines
+        },
+        &|| {
+            let mut lines = vec![Line::styled(
+                crate::ui::truncate_for_width(
+                    &terminal_text(&campaign.question, options.ascii),
+                    inner_w,
+                    options.ascii,
+                ),
+                Style::default().fg(theme.text_strong).bold(),
+            )];
+            lines.extend(steps_one_row.iter().cloned());
             lines.push(next.clone());
             lines
         },
     ];
+    let cue_text = match (inner_w >= 46, options.ascii) {
+        (true, true) => "... enlarge the terminal for the full briefing",
+        (true, false) => "… enlarge the terminal for the full briefing",
+        (false, true) => "... larger terminal shows more",
+        (false, false) => "… larger terminal shows more",
+    };
+    let cue = Line::styled(
+        crate::ui::truncate_for_width(cue_text, inner_w, options.ascii),
+        Style::default().fg(theme.muted),
+    );
     let mut body = Vec::new();
-    for build in layouts {
+    for (index, build) in layouts.iter().enumerate() {
         body = crate::textwrap::hang_wrap(build(), inner_w);
-        if body.len() <= max_body {
+        // Any compacted layout drops text, so it must leave a row for the cue.
+        let needed = body.len() + usize::from(index > 0);
+        if needed <= max_body {
+            if index > 0 {
+                body.push(cue.clone());
+            }
             break;
         }
     }
     if body.len() > max_body && max_body > 0 {
         body.truncate(max_body - 1);
-        body.push(Line::styled(
-            if options.ascii {
-                "... enlarge the terminal for the full briefing"
-            } else {
-                "… enlarge the terminal for the full briefing"
-            },
-            Style::default().fg(theme.muted),
-        ));
+        body.push(cue);
     }
 
     let height = u16::try_from(body.len() + 3)

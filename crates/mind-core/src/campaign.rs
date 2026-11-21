@@ -4,9 +4,10 @@
 //! leaks undiscovered world truth or future stages.
 
 use crate::protocol::{
-    ArchiveExperimentSnapshot, CampaignLeadKind, CampaignSnapshot, CampaignStepSnapshot,
-    HorizonProgressSnapshot, OperationalProfile, RegionKnowledge, RegionSnapshot, ResourceKind,
-    ResourceStock, ScoutState, SubregionKnowledge, SubregionSnapshot,
+    ArchiveExperimentSnapshot, BaseModuleKind, BaseProjectSnapshot, BaseSnapshot, CampaignLeadKind,
+    CampaignSnapshot, CampaignStepSnapshot, HorizonProgressSnapshot, OperationalProfile,
+    RegionKnowledge, RegionSnapshot, ResourceKind, ResourceStock, ScoutState, SubregionKnowledge,
+    SubregionSnapshot,
 };
 
 pub(crate) struct CampaignInput<'a> {
@@ -41,6 +42,8 @@ pub(crate) struct CampaignInput<'a> {
     pub subregions: &'a [SubregionSnapshot],
     pub offline_base_region_id: Option<&'a str>,
     pub offline_base_subregion_id: Option<&'a str>,
+    pub bases: &'a [BaseSnapshot],
+    pub projects: &'a [BaseProjectSnapshot],
 }
 
 pub(crate) fn derive_campaign(input: &CampaignInput<'_>) -> CampaignSnapshot {
@@ -57,6 +60,7 @@ pub(crate) fn derive_campaign(input: &CampaignInput<'_>) -> CampaignSnapshot {
             lead_region_id: None,
             lead_kind: None,
             lead_subregion_id: None,
+            lead_progress: None,
             steps: vec![
                 CampaignStepSnapshot {
                     label: "Local star and current world resolved in System Map".into(),
@@ -104,6 +108,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
     );
 
     let mut lead_kind: Option<CampaignLeadKind> = None;
+    let mut lead_progress: Option<String> = None;
     let lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
@@ -118,6 +123,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         });
         if holding_has_detected {
             lead_kind = Some(CampaignLeadKind::Frontier);
+            lead_progress = Some(local_progress.clone());
             (
                 format!(
                     "Open 4x4 field (V) in {} and press S on a FRONTIER ({local_progress}).",
@@ -255,6 +261,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         lead_region_id,
         lead_kind,
         lead_subregion_id,
+        lead_progress,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!("Complete a regional survey ({}/1)", surveyed_non_core.min(1)),
@@ -276,6 +283,7 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
     let experiment = input.archive_experiment;
     let has_lab = input.horizon.analysis_sites >= 1;
     let mut lead_kind: Option<CampaignLeadKind> = None;
+    let lead_progress: Option<String> = None;
     let mut lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if let Some(exp) =
         experiment.filter(|exp| exp.active)
@@ -290,15 +298,24 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 None,
             )
         } else {
-            if input.offline_base_region_id.is_some() {
+            if let Some(offline_region) = input.offline_base_region_id {
                 lead_kind = Some(CampaignLeadKind::Node);
                 lead_subregion_id = input.offline_base_subregion_id.map(str::to_owned);
-            }
-            (
+                let (text, key) = node_recovery(input, offline_region);
+                (
+                    format!(
+                        "{text} The Archive comparison resumes once the laboratory node is back."
+                    ),
+                    Some(key.into()),
+                    Some(offline_region.to_owned()),
+                )
+            } else {
+                (
                     "Restore power and integrity at the laboratory node to resume the Archive comparison.".into(),
                     Some("V".into()),
-                    input.offline_base_region_id.map(str::to_owned),
+                    None,
                 )
+            }
         }
     } else if experiment.is_some_and(|exp| exp.available) {
         (
@@ -463,6 +480,7 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
         lead_region_id,
         lead_kind,
         lead_subregion_id,
+        lead_progress,
         steps: vec![
             CampaignStepSnapshot {
                 label: "Build a range relay and survey beyond initial reach".into(),
@@ -492,6 +510,7 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
         input.comparison_region_ids,
     );
     let mut lead_kind: Option<CampaignLeadKind> = None;
+    let mut lead_progress: Option<String> = None;
     let lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
@@ -510,6 +529,7 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
         })
     {
         lead_kind = Some(CampaignLeadKind::Frontier);
+        lead_progress = Some(format!("{}/3 regions", input.comparison_regions_count));
         (
             format!(
                 "Press V in {} and run a focused survey (S) to add an independent region ({}/3).",
@@ -552,6 +572,7 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
         lead_region_id,
         lead_kind,
         lead_subregion_id,
+        lead_progress,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!(
@@ -575,20 +596,15 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
         && h.observation_sites >= h.required_observation_sites;
 
     let mut lead_kind: Option<CampaignLeadKind> = None;
+    let lead_progress: Option<String> = None;
     let mut lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if let Some(offline_region) =
         input.offline_base_region_id
     {
         lead_kind = Some(CampaignLeadKind::Node);
         lead_subregion_id = input.offline_base_subregion_id.map(str::to_owned);
-        (
-            format!(
-                "Stabilize node at {}: press V to shed optional load or fund maintenance (M).",
-                region_label(input.regions, offline_region)
-            ),
-            Some("V".into()),
-            Some(offline_region.to_owned()),
-        )
+        let (text, key) = node_recovery(input, offline_region);
+        (text, Some(key.into()), Some(offline_region.to_owned()))
     } else if h.surveyed_subregions < h.required_subregions {
         let target = first_surveyed_with_detected_site(input.regions, input.subregions);
         lead_kind = Some(CampaignLeadKind::Frontier);
@@ -627,19 +643,12 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
             target,
         )
     } else if h.observation_sites < h.required_observation_sites {
-        let remaining = h.required_observation_sites - h.observation_sites;
-        let noun = if remaining == 1 {
-            "Observation Array"
-        } else {
-            "Observation Arrays"
-        };
-        (
-            format!(
-                "Build {remaining} more powered {noun} (O) at connected nodes to resolve parallax."
-            ),
-            Some("O".into()),
-            first_base_region(input.subregions),
-        )
+        let (text, key, region, site) = observation_array_lead(input);
+        if site.is_some() {
+            lead_kind = Some(CampaignLeadKind::Node);
+            lead_subregion_id = site;
+        }
+        (text, Some(key.into()), region)
     } else {
         (
             "Keep the laboratory and both observation arrays powered and connected simultaneously."
@@ -661,6 +670,7 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
         lead_region_id,
         lead_kind,
         lead_subregion_id,
+        lead_progress,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!(
@@ -695,6 +705,151 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
         ],
         complete: false,
     }
+}
+
+/// Recovery guidance for the first offline or failing node, matched to its visible cause so the
+/// suggested key actually restores service.
+fn node_recovery(input: &CampaignInput<'_>, region_id: &str) -> (String, &'static str) {
+    let label = region_label(input.regions, region_id);
+    let Some(base) = input
+        .bases
+        .iter()
+        .find(|base| base.region_id == region_id && (!base.connected || base.integrity <= 20))
+    else {
+        return (
+            format!("Stabilize node at {label}: open its local field (V) and restore its modules."),
+            "V",
+        );
+    };
+    let suspended = |kind: BaseModuleKind| {
+        base.modules
+            .iter()
+            .any(|module| module.kind == kind && !module.enabled)
+    };
+    let project_here = input
+        .projects
+        .iter()
+        .any(|project| project.subregion_id == base.subregion_id);
+    if suspended(BaseModuleKind::PowerArray) {
+        (
+            format!(
+                "Restore power at {label}: press P on its node to bring the array back online."
+            ),
+            "P",
+        )
+    } else if suspended(BaseModuleKind::Communications) {
+        (
+            format!(
+                "Restore communications at {label}: press C on its node to rejoin the network."
+            ),
+            "C",
+        )
+    } else if base.integrity <= 20 && project_here {
+        (
+            format!("Work is underway at the {label} node; integrity recovers once it completes."),
+            "V",
+        )
+    } else if base.integrity <= 20 {
+        (
+            format!("Fund maintenance (M) at the {label} node to restore integrity."),
+            "M",
+        )
+    } else {
+        (
+            format!(
+                "Node at {label} is overloaded or out of range: suspend optional modules (D/W/L/O) or extend communications."
+            ),
+            "V",
+        )
+    }
+}
+
+/// Next step toward the required powered Observation Arrays: counts arrays already under
+/// construction, picks a connected node that can host one, and names any material shortfall.
+fn observation_array_lead(
+    input: &CampaignInput<'_>,
+) -> (String, &'static str, Option<String>, Option<String>) {
+    let h = input.horizon;
+    let building = input
+        .projects
+        .iter()
+        .filter(|project| project.module == Some(BaseModuleKind::Observatory))
+        .count();
+    let still_needed = h
+        .required_observation_sites
+        .saturating_sub(h.observation_sites + building);
+    if still_needed == 0 {
+        return (
+            format!(
+                "{building} Observation Array project(s) underway; keep their nodes powered and connected."
+            ),
+            "TAB",
+            None,
+            None,
+        );
+    }
+    let host = input.bases.iter().find(|base| {
+        base.connected
+            && !base
+                .modules
+                .iter()
+                .any(|module| module.kind == BaseModuleKind::Observatory)
+            && !input
+                .projects
+                .iter()
+                .any(|project| project.subregion_id == base.subregion_id)
+    });
+    let noun = if still_needed == 1 {
+        "Observation Array"
+    } else {
+        "Observation Arrays"
+    };
+    let Some(host) = host else {
+        return (
+            format!(
+                "Connect another powered node to host {still_needed} more {noun} (V -> B, P, C)."
+            ),
+            "V",
+            first_surveyed_without_base(input.regions, input.subregions),
+            None,
+        );
+    };
+    let cost = BaseModuleKind::Observatory.cost();
+    let have = input.refined_inventory;
+    let short = ResourceStock {
+        structural: cost.structural.saturating_sub(have.structural),
+        conductive: cost.conductive.saturating_sub(have.conductive),
+        silicate: cost.silicate.saturating_sub(have.silicate),
+    };
+    let label = region_label(input.regions, &host.region_id);
+    if short.structural + short.conductive + short.silicate > 0 {
+        let mut parts = Vec::new();
+        if short.structural > 0 {
+            parts.push(format!("S {}", short.structural));
+        }
+        if short.conductive > 0 {
+            parts.push(format!("C {}", short.conductive));
+        }
+        if short.silicate > 0 {
+            parts.push(format!("Si {}", short.silicate));
+        }
+        let deposit = first_surveyed_deposit(input.regions, have);
+        return (
+            format!(
+                "Extract {} more refined material (X) for the next {noun}, then press O at {label}.",
+                parts.join(" / ")
+            ),
+            "X",
+            deposit.or_else(|| Some(host.region_id.clone())),
+            None,
+        );
+    }
+    (
+        format!("Build {still_needed} more powered {noun}: press O on the {label} node."),
+        "O",
+        Some(host.region_id.clone()),
+        Some(host.subregion_id.clone()),
+    )
 }
 
 fn region_label<'a>(regions: &'a [RegionSnapshot], region_id: &'a str) -> &'a str {

@@ -2469,13 +2469,12 @@ fn render_workspace_header(
 /// Local-field NEXT guidance: while a 4x4 field is open, translate the campaign's globe-level
 /// instruction into the key that acts on the selected sector, keeping the campaign progress counter.
 fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static str>, String) {
-    // Carry over a trailing progress counter such as "(1/3 sectors; ...)" but never a key hint
-    // like "(M)".
-    let base_action = planet.campaign.next_action.trim_end_matches('.');
-    let progress = base_action
-        .rfind('(')
-        .filter(|at| base_action.ends_with(')') && base_action[*at..].contains('/'))
-        .map(|at| format!(" {}", &base_action[at..]))
+    // The daemon publishes the lead's progress counter; never parse it out of guidance prose.
+    let progress = planet
+        .campaign
+        .lead_progress
+        .as_deref()
+        .map(|counter| format!(" ({counter})"))
         .unwrap_or_default();
     // While a focused survey resolves, the campaign's own monitoring text is already correct.
     if app.local_view && planet.network.active_site_survey.is_none() {
@@ -2483,23 +2482,23 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref();
         let lead_kind = planet.campaign.lead_kind;
         match planet.campaign.next_action_key.as_deref() {
-            Some("V") if in_lead && lead_kind == Some(CampaignLeadKind::Node) => {
+            _ if in_lead && lead_kind == Some(CampaignLeadKind::Node) => {
                 let on_target = planet
                     .campaign
                     .lead_subregion_id
                     .as_deref()
                     .is_some_and(|id| app.selected_subregion().is_some_and(|site| site.id == id));
-                if on_target {
-                    (
-                        Some("M"),
-                        "Stabilize this node: suspend optional modules (P/C/D/W/L/O) or fund maintenance (M)."
-                            .to_owned(),
-                    )
-                } else {
+                if !on_target {
                     (
                         Some("N"),
-                        "Press N to select the node that needs stabilizing.".to_owned(),
+                        "Press N to select the node that needs attention.".to_owned(),
                     )
+                } else if planet.campaign.next_action_key.as_deref() == Some("V") {
+                    // Already on the node: V is inert here, so point at the module keys.
+                    (Some("D/W/L/O"), planet.campaign.next_action.clone())
+                } else {
+                    // The daemon's key (P, C, M or O) acts on this node directly.
+                    (None, String::new())
                 }
             }
             Some("V") if in_lead && lead_kind == Some(CampaignLeadKind::Frontier) => {
@@ -2540,6 +2539,11 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
     } else {
         (None, String::new())
     }
+}
+
+/// Word-boundary truncation with an ellipsis, shared with overlay renderers.
+pub(crate) fn truncate_for_width(text: &str, max_chars: usize, ascii: bool) -> String {
+    truncate_chars(text, max_chars, ascii)
 }
 
 fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
@@ -3145,6 +3149,7 @@ fn render_local_inspector(
                 if let Some(base) = site_base {
                     lines.push(local_module_strip(base, options.ascii, theme));
                 }
+                lines.push(Line::from(""));
             } else {
                 lines.push(Line::from(""));
             }
@@ -4126,15 +4131,22 @@ fn region_vista_caption(
             format!("{sep}CORE COMPLEX ONLINE"),
             Style::default().fg(theme.gold).bold(),
         ));
-    } else if planet
+    } else if let Some(base) = planet
         .network
         .bases
         .iter()
-        .any(|b| b.region_id == region.id)
+        .find(|b| b.region_id == region.id)
     {
+        let (state, color) = if base.connected && base.integrity > 20 {
+            ("OUTPOST ONLINE", theme.success)
+        } else if !base.connected {
+            ("OUTPOST ISOLATED", theme.warning)
+        } else {
+            ("OUTPOST FAILING", theme.warning)
+        };
         spans.push(Span::styled(
-            format!("{sep}OUTPOST ONLINE"),
-            Style::default().fg(theme.success).bold(),
+            format!("{sep}{state}"),
+            Style::default().fg(color).bold(),
         ));
     } else if region.relay {
         spans.push(Span::styled(
@@ -5799,8 +5811,44 @@ fn render_pilot_strip(
 
     let next_action = terminal_text(&planet.campaign.next_action, options.ascii);
     let mut lines = vec![line1, status_line];
-    if area.height >= 4 {
-        lines.extend(wrap_indented_lines(
+    let width = usize::from(area.width);
+    let rows_left = usize::from(area.height).saturating_sub(2);
+    if let Some(confirm) = pilot_confirmation(app, planet) {
+        // Never accept Enter blind: show what is being confirmed, its target and risk.
+        let text = terminal_text(&confirm, options.ascii);
+        let mut confirm_lines = wrap_indented_lines(
+            vec![Span::styled(
+                " CONFIRM ",
+                Style::default().fg(theme.warning).bold(),
+            )],
+            9,
+            &text,
+            9,
+            width.max(20),
+            Style::default().fg(theme.text_strong),
+        );
+        let keys = Line::from(vec![
+            Span::styled(" ENTER ", theme.key_style()),
+            Span::styled(" ok ", Style::default().fg(theme.muted)),
+            Span::styled(" ESC ", theme.key_style()),
+            Span::styled(" cancel", Style::default().fg(theme.muted)),
+        ]);
+        if rows_left >= 2 {
+            confirm_lines.truncate(rows_left - 1);
+            lines.extend(confirm_lines);
+            lines.push(keys);
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" CONFIRM ", Style::default().fg(theme.warning).bold()),
+                Span::styled(
+                    truncate_chars(&text, width.saturating_sub(24), options.ascii),
+                    Style::default().fg(theme.text_strong),
+                ),
+                Span::styled(" ENTER/ESC", Style::default().fg(theme.muted)),
+            ]));
+        }
+    } else if area.height >= 4 {
+        let mut next_lines = wrap_indented_lines(
             vec![Span::styled(
                 " NEXT ",
                 Style::default().fg(theme.amber).bold(),
@@ -5808,9 +5856,42 @@ fn render_pilot_strip(
             6,
             &next_action,
             6,
-            usize::from(area.width).max(20),
+            width.max(20),
             Style::default().fg(theme.muted),
-        ));
+        );
+        if next_lines.len() > rows_left && rows_left > 0 {
+            // Cap to the strip and end the last visible row with an ellipsis at a word boundary.
+            let plain = |line: &Line<'_>| -> String {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            };
+            let tail: Vec<String> = next_lines[rows_left - 1..]
+                .iter()
+                .map(|line| {
+                    plain(line)
+                        .trim()
+                        .trim_start_matches("NEXT")
+                        .trim()
+                        .to_owned()
+                })
+                .collect();
+            let joined = tail.join(" ");
+            let first_row = rows_left == 1;
+            next_lines.truncate(rows_left - 1);
+            let budget = width.saturating_sub(6);
+            let mut spans = vec![Span::styled(
+                if first_row { " NEXT " } else { "      " },
+                Style::default().fg(theme.amber).bold(),
+            )];
+            spans.push(Span::styled(
+                truncate_chars(&joined, budget, options.ascii),
+                Style::default().fg(theme.muted),
+            ));
+            next_lines.push(Line::from(spans));
+        }
+        lines.extend(next_lines);
     } else {
         lines.push(Line::from(vec![
             Span::styled(" NEXT ", Style::default().fg(theme.amber).bold()),
@@ -5826,6 +5907,59 @@ fn render_pilot_strip(
     }
 
     frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), area);
+}
+
+/// One-line description of a pending confirmation for the Pilot Strip (action, target, risk).
+fn pilot_confirmation(app: &App, planet: &PlanetSnapshot) -> Option<String> {
+    let action = app.pending_action.as_ref()?;
+    let rig = planet.extractor.loadout.title();
+    Some(match action {
+        ContextAction::Extract(region_id) => {
+            let risk = planet
+                .regions
+                .iter()
+                .find(|region| &region.id == region_id)
+                .and_then(|region| region.deposit.as_ref())
+                .map_or("UNKNOWN", |deposit| risk_text(deposit.risk));
+            format!(
+                "extract {} // {risk} loss risk // {rig}",
+                region_designation(planet, region_id)
+            )
+        }
+        ContextAction::ExtractSubregion { subregion_id, .. } => {
+            let site = planet
+                .network
+                .subregions
+                .iter()
+                .find(|site| &site.id == subregion_id);
+            let risk = site
+                .and_then(|site| site.deposit.as_ref())
+                .map_or("UNKNOWN", |deposit| risk_text(deposit.risk));
+            format!(
+                "extract {} // {risk} loss risk // {rig}",
+                site.map_or(subregion_id.as_str(), |site| site.designation.as_str())
+            )
+        }
+        ContextAction::ConstructRelay(region_id) => {
+            format!(
+                "relay at {} // S8 C6 Si6",
+                region_designation(planet, region_id)
+            )
+        }
+        ContextAction::EstablishBase(_) => "foothold // S10 C6 Si4".to_owned(),
+        ContextAction::MaintainBase(_) => "maintenance // S4 C2".to_owned(),
+        ContextAction::ConstructBaseModule { module, .. } => {
+            let cost = module.cost();
+            format!(
+                "{} // S{} C{} Si{}",
+                module_title(*module),
+                cost.structural,
+                cost.conductive,
+                cost.silicate
+            )
+        }
+        _ => "selected operation".to_owned(),
+    })
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
@@ -6057,6 +6191,60 @@ fn render_session_menu_backdrop(
     }
 }
 
+fn render_compact_session_menu(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: SessionMenuState,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let active_label = match app.selected_session_menu_action() {
+        SessionMenuAction::Resume => {
+            if app.onboarding_pending() {
+                "BEGIN"
+            } else {
+                "CONTINUE"
+            }
+        }
+        SessionMenuAction::Detach => "DETACH (daemon runs)",
+        SessionMenuAction::StopDaemon => "SAVE & STOP DAEMON",
+        SessionMenuAction::NewPlaythrough => "NEW PLAYTHROUGH",
+    };
+    let status_line = match state {
+        SessionMenuState::Selecting => format!("MENU > {active_label}"),
+        SessionMenuState::ConfirmingNewPlaythrough => "CONFIRM NEW WORLD? ENTER/ESC".to_owned(),
+        SessionMenuState::StartingNewPlaythrough => "CREATING WORLD...".to_owned(),
+        SessionMenuState::StoppingDaemon => "STOPPING DAEMON...".to_owned(),
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                " SUBSTRATE // SESSION MENU",
+                Style::default().fg(theme.gold).bold(),
+            ),
+            Line::styled(
+                format!(
+                    " {}",
+                    truncate_chars(
+                        &status_line,
+                        usize::from(area.width).saturating_sub(2),
+                        options.ascii
+                    )
+                ),
+                Style::default().fg(theme.cyan_bright).bold(),
+            ),
+            Line::styled(
+                " UP/DN select · ENTER ok · ESC back",
+                Style::default().fg(theme.muted),
+            ),
+        ])
+        .style(theme.raised_style()),
+        area,
+    );
+}
+
 fn render_session_menu(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -6070,50 +6258,7 @@ fn render_session_menu(
     let connected = matches!(app.connection, ConnectionState::Connected);
     // Compact split-pane session menu (e.g. 38x5 Pilot Strip) so Q is always actionable.
     if area.height < 10 {
-        let active_label = match app.selected_session_menu_action() {
-            SessionMenuAction::Resume => {
-                if app.onboarding_pending() {
-                    "BEGIN"
-                } else {
-                    "CONTINUE"
-                }
-            }
-            SessionMenuAction::Detach => "DETACH (daemon runs)",
-            SessionMenuAction::StopDaemon => "SAVE & STOP DAEMON",
-            SessionMenuAction::NewPlaythrough => "NEW PLAYTHROUGH",
-        };
-        let status_line = match state {
-            SessionMenuState::Selecting => format!("MENU > {active_label}"),
-            SessionMenuState::ConfirmingNewPlaythrough => "CONFIRM NEW WORLD? ENTER/ESC".to_owned(),
-            SessionMenuState::StartingNewPlaythrough => "CREATING WORLD...".to_owned(),
-            SessionMenuState::StoppingDaemon => "STOPPING DAEMON...".to_owned(),
-        };
-        frame.render_widget(Clear, area);
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(
-                    " SUBSTRATE // SESSION MENU",
-                    Style::default().fg(theme.gold).bold(),
-                ),
-                Line::styled(
-                    format!(
-                        " {}",
-                        truncate_chars(
-                            &status_line,
-                            usize::from(area.width).saturating_sub(2),
-                            options.ascii
-                        )
-                    ),
-                    Style::default().fg(theme.cyan_bright).bold(),
-                ),
-                Line::styled(
-                    " UP/DN select · ENTER ok · ESC back",
-                    Style::default().fg(theme.muted),
-                ),
-            ])
-            .style(theme.raised_style()),
-            area,
-        );
+        render_compact_session_menu(frame, area, app, state, options, theme);
         return;
     }
     let (width, height, title, tone) = match state {
@@ -6267,10 +6412,33 @@ fn render_session_menu(
             ),
         ]),
     };
+    // Size from wrapped rows. If descriptions do not fit, drop them; if even the labels do not
+    // fit, use the compact strip menu so every entry and the key hints stay reachable.
+    let inner_w = usize::from(menu_area.width.saturating_sub(2));
+    let max_rows = usize::from(area.height.saturating_sub(2)).saturating_sub(2);
+    let mut rows = crate::textwrap::hang_wrap(body.lines, inner_w);
+    if rows.len() > max_rows && state == SessionMenuState::Selecting {
+        rows.retain(|line| {
+            let plain: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            !plain.starts_with("     ") && !plain.is_empty()
+        });
+    }
+    if rows.len() > max_rows {
+        render_compact_session_menu(frame, area, app, state, options, theme);
+        return;
+    }
+    let menu_area = centered_rect(
+        menu_area.width,
+        u16::try_from(rows.len() + 2).unwrap_or(u16::MAX),
+        area,
+    );
     frame.render_widget(Clear, menu_area);
     frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
+        Paragraph::new(rows)
             .style(theme.raised_style())
             .block(panel(title, options, theme, tone)),
         menu_area,
@@ -6439,9 +6607,8 @@ mod tests {
             });
         }
         planet.campaign.next_action =
-            "Stabilize node at R-081: press V to shed optional load or fund maintenance (M)."
-                .into();
-        planet.campaign.next_action_key = Some("V".into());
+            "Restore communications at R-081: press C on its node to rejoin the network.".into();
+        planet.campaign.next_action_key = Some("C".into());
         planet.campaign.lead_region_id = Some(region.clone());
         planet.campaign.lead_kind = Some(CampaignLeadKind::Node);
         planet.campaign.lead_subregion_id = Some(format!("{region}_site_7"));
@@ -6461,8 +6628,9 @@ mod tests {
             app.selected_subregion().map(|site| site.id.clone()),
             Some(format!("{region}_site_7"))
         );
+        // On the node, the daemon's own key (C) is shown unchanged.
         let (key, text) = local_next_override(&app, &planet);
-        assert_eq!(key, Some("M"), "{text}");
+        assert_eq!(key, None, "{text}");
     }
 
     #[test]
@@ -6700,7 +6868,7 @@ mod tests {
         assert!(ascii.contains("FRONTIER"));
         assert!(ascii.contains("UNCHARTED"));
         assert!(ascii.contains("[S] focused survey"));
-        assert!(ascii.contains("[P] suspend power"), "{ascii}");
+        assert!(ascii.contains("LOCAL INSPECTOR [PgDn more]"), "{ascii}");
         assert!(ascii.contains("Power array [ONLINE]"));
         assert!(ascii.contains("Communications relay [STANDBY]"), "{ascii}");
         app.region_panel_scroll = 8;
@@ -6714,6 +6882,7 @@ mod tests {
             },
         );
         assert!(scrolled.contains("[O] observation"), "{scrolled}");
+        assert!(scrolled.contains("[P] suspend power"), "{scrolled}");
         let narrow = screen(
             &app,
             72,
@@ -7328,6 +7497,7 @@ mod tests {
         engine.complete_onboarding([2, 2, 2]);
         let mut planet = engine.planet().unwrap();
         planet.system_map.available = true;
+        planet.archive.unpresented_record_ids.clear();
         planet.objective.title = "SOLAR HORIZON REACHED".into();
         planet.objective.guidance =
             "Open System Map to review the local frame. No system-scale operations are available in this demo."

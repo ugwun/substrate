@@ -501,6 +501,10 @@ pub struct CampaignSnapshot {
     /// The specific local sector the lead targets, when one is known (for example an offline node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_subregion_id: Option<String>,
+    /// Short progress counter for the current lead (for example "1/3 sectors"), published so
+    /// clients never parse it out of guidance prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_progress: Option<String>,
     pub steps: Vec<CampaignStepSnapshot>,
     pub complete: bool,
 }

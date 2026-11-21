@@ -780,6 +780,8 @@ impl GameState {
                 subregions: &network.subregions,
                 offline_base_region_id,
                 offline_base_subregion_id,
+                bases: &network.bases,
+                projects: &network.active_projects,
             });
             let unpresented_record_ids = self
                 .archive_records
@@ -2841,10 +2843,13 @@ impl GameState {
             if horizon.observation_sites < HORIZON_REQUIRED_OBSERVATORIES {
                 return ObjectiveSnapshot {
                     title: "RESOLVE THE OUTER FRAME".into(),
-                    guidance: format!(
-                        "Build {} more powered observation array(s) at connected nodes with complementary local conditions.",
-                        HORIZON_REQUIRED_OBSERVATORIES - horizon.observation_sites
-                    ),
+                    guidance: {
+                        let remaining = HORIZON_REQUIRED_OBSERVATORIES - horizon.observation_sites;
+                        format!(
+                            "Build {remaining} more powered observation {} at connected nodes with complementary local conditions.",
+                            if remaining == 1 { "array" } else { "arrays" }
+                        )
+                    },
                     complete: false,
                 };
             }

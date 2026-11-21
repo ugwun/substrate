@@ -79,7 +79,7 @@ The current game uses save schema 11. Schema-11 adds durable discovery-transmiss
 
 ## How to play
 
-Substrate is designed to be learned from the interface. The persistent campaign header at the top of every workspace shows the active chapter (`CH I`–`CH V`), step pips, the Mind's current open question, and the next concrete action. Press `n` on **Planet** to focus the globe on the current campaign lead, or `c` at any time to open the full Chapter Briefing. The selected-region inspector lists available actions and explains exact blockers, while newly discovered archive records arrive as full-screen Discovery Transmissions. `Enter` performs the highlighted contextual action, while letter shortcuts shown in the inspector speed up familiar routines.
+Substrate is designed to be learned from the interface. The persistent campaign header at the top of every workspace shows the active chapter (`CH I`–`CH V`) and step pips; wide layouts add the Mind's current open question, and **Planet** adds the next concrete action (compact layouts shorten these at word boundaries, and the Chapter Briefing always has the full text). Press `n` on **Planet** to focus the globe on the current campaign lead, or `c` at any time to open the full Chapter Briefing. The selected-region inspector lists available actions and explains exact blockers, while newly discovered archive records arrive as full-screen Discovery Transmissions. `Enter` performs the highlighted contextual action, while letter shortcuts shown in the inspector speed up familiar routines.
 
 ### A first-session route
 
