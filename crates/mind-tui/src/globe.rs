@@ -368,6 +368,32 @@ fn draw_region_markers(
         .relay_region_id
         .as_ref()
         .and_then(|id| find_region(planet, id));
+    let campaign_lead = planet
+        .campaign
+        .lead_region_id
+        .as_ref()
+        .filter(|lead_id| selected_id != Some(lead_id.as_str()))
+        .and_then(|id| find_region(planet, id));
+
+    if let Some(lead) = campaign_lead {
+        place_marker(
+            cells,
+            planet,
+            lead,
+            if (options.phase * 2.5).floor() as i64 % 2 == 0 {
+                "◎"
+            } else {
+                "◌"
+            },
+            "+",
+            options.theme.cyan_bright,
+            false,
+            options,
+            center_x,
+            center_y,
+            radius,
+        );
+    }
 
     if let Some(core) = planet.regions.iter().find(|region| region.core) {
         place_marker(

@@ -130,6 +130,7 @@ pub struct App {
     pub transmission_opened_at: Option<Instant>,
     pub transmission_revealed: bool,
     pub show_chapter_card: bool,
+    pub system_map_opened_at: Option<Instant>,
     pub pending_action: Option<ContextAction>,
     pub globe_yaw: f64,
     pub globe_pitch: f64,
@@ -176,6 +177,7 @@ impl Default for App {
             transmission_opened_at: None,
             transmission_revealed: false,
             show_chapter_card: false,
+            system_map_opened_at: None,
             pending_action: None,
             globe_yaw: 0.0,
             globe_pitch: 0.0,
@@ -291,6 +293,7 @@ impl App {
         self.planet = Some(planet);
         if system_map_became_available {
             self.workspace = Workspace::SystemMap;
+            self.system_map_opened_at = Some(received_at);
             self.pending_action = None;
             self.notice = Some("SOLAR HORIZON RESOLVED // SYSTEM MAP OPEN".into());
         } else if chapter_advanced && self.active_transmission_id.is_none() {

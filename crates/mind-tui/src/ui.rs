@@ -3,6 +3,7 @@ use crate::{
         App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
         Workspace,
     },
+    art,
     globe::{self, GlobeRenderOptions},
     theme::Theme,
     transmission,
@@ -14,12 +15,9 @@ use mind_core::protocol::{
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    symbols::{border, Marker},
+    symbols::border,
     text::{Line, Span, Text},
-    widgets::{
-        canvas::{Canvas, Circle},
-        Block, Borders, Clear, Paragraph, Wrap,
-    },
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use std::time::Instant;
@@ -1087,6 +1085,11 @@ fn render_system_map(
         .planet
         .as_ref()
         .is_some_and(|planet| planet.system_map.available);
+    let elapsed = app
+        .system_map_opened_at
+        .map_or(std::time::Duration::from_secs(10), |opened| {
+            now.saturating_duration_since(opened)
+        });
     if !available {
         frame.render_widget(
             Paragraph::new("Local-system observations are not yet resolved.")
@@ -1096,16 +1099,30 @@ fn render_system_map(
             rows[1],
         );
     } else if area.width >= 92 {
-        let columns = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
+        let columns = Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)])
             .split(rows[1]);
-        render_system_chart(frame, columns[0], options, theme);
-        render_system_horizon(frame, columns[1], options, theme);
+        art::render_system_cliffhanger_chart(
+            frame,
+            columns[0],
+            elapsed,
+            app.globe_phase,
+            options,
+            theme,
+        );
+        art::render_system_cliffhanger_panel(frame, columns[1], options, theme);
     } else if rows[1].height >= 18 {
         let body = Layout::vertical([Constraint::Min(8), Constraint::Length(10)]).split(rows[1]);
-        render_system_chart(frame, body[0], options, theme);
-        render_system_horizon(frame, body[1], options, theme);
+        art::render_system_cliffhanger_chart(
+            frame,
+            body[0],
+            elapsed,
+            app.globe_phase,
+            options,
+            theme,
+        );
+        art::render_system_cliffhanger_panel(frame, body[1], options, theme);
     } else {
-        render_system_horizon(frame, rows[1], options, theme);
+        art::render_system_cliffhanger_panel(frame, rows[1], options, theme);
     }
 
     render_workspace_footer(
@@ -1274,6 +1291,17 @@ fn render_archive(
                 Line::from(""),
                 section_line("ARCHIVE EXPERIMENT", theme),
                 field_line("STATE", state.into(), theme),
+            ]);
+            if experiment.active {
+                detail_lines.extend(art::archive_experiment_waveform(
+                    experiment.running,
+                    operation_progress(experiment.remaining_ms, experiment.phase_total_ms),
+                    app.globe_phase,
+                    options.ascii,
+                    theme,
+                ));
+            }
+            detail_lines.extend([
                 Line::styled(experiment.status.clone(), Style::default().fg(theme.muted)),
                 field_line(
                     "PROGRESS",
@@ -1362,135 +1390,6 @@ fn terminal_text(value: &str, ascii: bool) -> String {
         }
     }
     rendered
-}
-
-fn render_system_chart(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
-    let marker = if options.ascii {
-        Marker::Custom('.')
-    } else {
-        Marker::Braille
-    };
-    let star_marker = if options.ascii { "*" } else { "✦" };
-    let world_marker = if options.ascii { "o" } else { "●" };
-    let chart = Canvas::default()
-        .block(panel(
-            " LOCAL SYSTEM // OBSERVATION FRAME ",
-            options,
-            theme,
-            PanelTone::Focused,
-        ))
-        .marker(marker)
-        .x_bounds([-58.0, 58.0])
-        .y_bounds([-30.0, 30.0])
-        .paint(move |context| {
-            context.draw(&Circle::new(-12.0, 0.0, 3.0, theme.amber));
-            context.draw(&Circle::new(-12.0, 0.0, 4.6, theme.warning));
-            context.draw(&Circle::new(-12.0, 0.0, 24.0, theme.faint));
-            context.print(
-                -12.8,
-                0.8,
-                Line::styled(star_marker, Style::default().fg(theme.amber).bold()),
-            );
-            context.print(
-                -18.0,
-                -7.0,
-                Line::styled("LOCAL STAR", Style::default().fg(theme.muted)),
-            );
-            context.draw(&Circle::new(7.2, 14.4, 1.2, theme.cyan_bright));
-            context.print(
-                6.3,
-                15.2,
-                Line::styled(world_marker, Style::default().fg(theme.cyan_bright).bold()),
-            );
-            context.print(
-                11.0,
-                16.0,
-                Line::styled(
-                    "CURRENT WORLD",
-                    Style::default().fg(theme.text_strong).bold(),
-                ),
-            );
-            context.print(
-                -50.0,
-                -24.0,
-                Line::styled("REFERENCE TRACK", Style::default().fg(theme.faint)),
-            );
-            context.print(
-                12.0,
-                -24.0,
-                Line::styled(
-                    "OUTER RETURNS // UNRESOLVED",
-                    Style::default().fg(theme.cyan),
-                ),
-            );
-        });
-    frame.render_widget(chart, area);
-}
-
-fn render_system_horizon(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
-    let lines = if area.height < 16 {
-        vec![
-            Line::styled(
-                "SOLAR HORIZON REACHED",
-                Style::default().fg(theme.success).bold(),
-            ),
-            Line::styled(
-                "Local star centered // current world tracked",
-                Style::default().fg(theme.text),
-            ),
-            Line::styled(
-                "Outer returns remain unresolved.",
-                Style::default().fg(theme.muted),
-            ),
-            Line::raw(""),
-            Line::styled(
-                "PLANETARY DEMONSTRATION COMPLETE",
-                Style::default().fg(theme.amber).bold(),
-            ),
-            Line::styled(
-                "No system-scale actions in this demo.",
-                Style::default().fg(theme.text_strong),
-            ),
-        ]
-    } else {
-        vec![
-            Line::styled(
-                "SOLAR HORIZON REACHED",
-                Style::default().fg(theme.success).bold(),
-            ),
-            Line::raw(""),
-            section_line("FRAME RESOLVED", theme),
-            Line::styled("  Local star centered", Style::default().fg(theme.text)),
-            Line::styled("  Current world tracked", Style::default().fg(theme.text)),
-            Line::raw(""),
-            section_line("BEYOND CURRENT RESOLUTION", theme),
-            Line::styled(
-                "  Outer returns remain unclassified.",
-                Style::default().fg(theme.muted),
-            ),
-            Line::raw(""),
-            Line::styled(
-                "PLANETARY DEMONSTRATION COMPLETE",
-                Style::default().fg(theme.amber).bold(),
-            ),
-            Line::styled(
-                "No system-scale operations are available in this demo.",
-                Style::default().fg(theme.text_strong),
-            ),
-            Line::raw(""),
-            Line::styled(
-                "You may review the planet, research, and daemon state before detaching.",
-                Style::default().fg(theme.muted),
-            ),
-        ]
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(theme.raised_style())
-            .block(panel(" DEMO HORIZON ", options, theme, PanelTone::Modal)),
-        area,
-    );
 }
 
 fn render_return_summary(
@@ -1980,49 +1879,52 @@ fn render_local_sites(
                 continue;
             };
             let selected = selected_id == Some(site.id.as_str());
-            let class_art = match (options.ascii, site.class) {
-                (true, Some(mind_core::protocol::SubregionClass::ShelteredShelf)) => "_/^\\_",
-                (true, Some(mind_core::protocol::SubregionClass::BasinFloor)) => "\\___/",
-                (true, Some(mind_core::protocol::SubregionClass::OpenPlain)) => "_____",
-                (true, Some(mind_core::protocol::SubregionClass::ExposedRidge)) => "_/|\\_",
-                (true, Some(mind_core::protocol::SubregionClass::FractureField)) => "_/\\_/",
-                (true, Some(mind_core::protocol::SubregionClass::PolarMargin)) => "_/^^_",
-                (true, None) => "? ? ?",
-                (false, Some(mind_core::protocol::SubregionClass::ShelteredShelf)) => "▂▃▅▃▂",
-                (false, Some(mind_core::protocol::SubregionClass::BasinFloor)) => "▆▂▁▂▆",
-                (false, Some(mind_core::protocol::SubregionClass::OpenPlain)) => "▁▁▂▁▁",
-                (false, Some(mind_core::protocol::SubregionClass::ExposedRidge)) => "▁▃▇▃▁",
-                (false, Some(mind_core::protocol::SubregionClass::FractureField)) => "▅▁▆▂▇",
-                (false, Some(mind_core::protocol::SubregionClass::PolarMargin)) => "▃▅▆▅▃",
-                (false, None) => "░░░░░",
-            };
+            let base = site.base_id.as_ref().and_then(|base_id| {
+                planet
+                    .network
+                    .bases
+                    .iter()
+                    .find(|candidate| &candidate.id == base_id)
+            });
+            let active_survey = planet
+                .network
+                .active_site_survey
+                .as_ref()
+                .is_some_and(|survey| survey.subregion_id == site.id);
+            let scout_present = planet.active_mission.as_ref().is_some_and(|mission| {
+                mission.target_region_id == site.region_id && mission.phase == ScoutState::Holding
+            });
             let coordinate = format!(
                 "{}{}",
                 char::from(b'A'.saturating_add(site.row)),
                 site.column + 1
             );
-            let mut lines = vec![
-                Line::styled(
-                    class_art,
-                    Style::default()
-                        .fg(if selected {
-                            theme.cyan_bright
-                        } else {
-                            theme.border
-                        })
-                        .bold(),
+            let mut art_lines = art::local_sector_art(art::LocalSectorArtParams {
+                site,
+                base,
+                active_survey,
+                scout_present,
+                selected,
+                phase: app.globe_phase,
+                options,
+                theme,
+            });
+            let inner_rows = cell.height.saturating_sub(2);
+            if inner_rows < 5 && art_lines.len() > 1 {
+                art_lines.truncate(1);
+            }
+            let mut lines = art_lines;
+            let sep = if options.ascii { "-" } else { "·" };
+            lines.push(Line::styled(
+                format!(
+                    "{coordinate} {sep} {}",
+                    site.designation
+                        .split(" / ")
+                        .last()
+                        .unwrap_or(site.designation.as_str())
                 ),
-                Line::styled(
-                    format!(
-                        "{coordinate} · {}",
-                        site.designation
-                            .split(" / ")
-                            .last()
-                            .unwrap_or(site.designation.as_str())
-                    ),
-                    Style::default().fg(theme.text_strong).bold(),
-                ),
-            ];
+                Style::default().fg(theme.text_strong).bold(),
+            ));
             if let (Some(energy), Some(hazard)) = (site.energy_yield, site.hazard) {
                 lines.push(Line::styled(
                     format!("E{energy} // {}", risk_text(hazard)),
@@ -2034,22 +1936,28 @@ fn render_local_sites(
                 ));
             } else {
                 lines.push(Line::styled(
-                    match site.knowledge {
-                        SubregionKnowledge::Unknown => "UNCHARTED",
-                        SubregionKnowledge::Detected => "FRONTIER",
-                        SubregionKnowledge::Surveyed => "SURVEYED",
-                        SubregionKnowledge::Observed => "OBSERVED",
+                    if active_survey {
+                        "SCANNING"
+                    } else {
+                        match site.knowledge {
+                            SubregionKnowledge::Unknown => "UNCHARTED",
+                            SubregionKnowledge::Detected => "FRONTIER",
+                            SubregionKnowledge::Surveyed => "SURVEYED",
+                            SubregionKnowledge::Observed => "OBSERVED",
+                        }
                     },
-                    Style::default().fg(theme.muted),
+                    Style::default().fg(if active_survey {
+                        theme.amber
+                    } else {
+                        theme.muted
+                    }),
                 ));
             }
-            if let Some(base_id) = &site.base_id {
-                let base = planet.network.bases.iter().find(|base| &base.id == base_id);
+            if let Some(base) = base {
                 lines.push(Line::styled(
-                    base.map_or("NODE", |base| base.designation.as_str())
-                        .to_owned(),
+                    base.designation.clone(),
                     Style::default()
-                        .fg(if base.is_some_and(|base| base.connected) {
+                        .fg(if base.connected {
                             theme.success
                         } else {
                             theme.warning
@@ -2073,6 +1981,8 @@ fn render_local_sites(
                     .block(panel(
                         if selected {
                             " SELECTED "
+                        } else if active_survey {
+                            " SCAN "
                         } else if site.knowledge == SubregionKnowledge::Unknown {
                             " FOG "
                         } else {
@@ -2082,6 +1992,8 @@ fn render_local_sites(
                         theme,
                         if selected {
                             PanelTone::Focused
+                        } else if active_survey {
+                            PanelTone::Modal
                         } else {
                             PanelTone::Standard
                         },
@@ -2748,7 +2660,7 @@ fn render_region_inspector(
                 lines.extend(region_data_lines(region, theme));
                 lines.push(Line::from(""));
                 lines.push(section_line("ACTIVE IN REGION", theme));
-                lines.extend(local_operation_lines(planet, region, theme));
+                lines.extend(local_operation_lines(planet, region, options.ascii, theme));
                 lines.push(Line::from(""));
                 lines.push(section_line("REGION OPERATIONS", theme));
                 lines.extend(region_action_lines(app, planet, region, theme));
@@ -2758,7 +2670,7 @@ fn render_region_inspector(
             } else {
                 lines.push(Line::from(""));
                 lines.push(section_line("ACTIVE IN REGION", theme));
-                lines.extend(local_operation_lines(planet, region, theme));
+                lines.extend(local_operation_lines(planet, region, options.ascii, theme));
                 if area.height >= 14 {
                     lines.push(Line::from(""));
                     lines.push(section_line("LOCAL PRESENCE", theme));
@@ -2864,6 +2776,7 @@ fn region_data_lines(
 fn local_operation_lines(
     planet: &PlanetSnapshot,
     region: &mind_core::protocol::RegionSnapshot,
+    ascii: bool,
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -2881,15 +2794,22 @@ fn local_operation_lines(
             mission.phase,
             theme,
         ));
+        let pct = operation_progress(mission.remaining_ms, mission.phase_total_ms);
         lines.push(field_line(
             "PROGRESS",
-            format!(
-                "{}% // {}",
-                operation_progress(mission.remaining_ms, mission.phase_total_ms),
-                scout_remaining_text(mission)
-            ),
+            format!("{pct}% // {}", scout_remaining_text(mission)),
             theme,
         ));
+        if matches!(mission.phase, ScoutState::Outbound | ScoutState::Returning) {
+            lines.push(art::operation_telemetry_strip(
+                "CORE",
+                &region.designation,
+                pct,
+                mission.phase == ScoutState::Outbound,
+                ascii,
+                theme,
+            ));
+        }
         lines.push(field_line(
             "CONTROL",
             if mission.automated {
@@ -2913,15 +2833,28 @@ fn local_operation_lines(
             mission.phase,
             theme,
         ));
+        let pct = operation_progress(mission.remaining_ms, mission.phase_total_ms);
         lines.push(field_line(
             "PROGRESS",
             format!(
-                "{}% // {}s remaining",
-                operation_progress(mission.remaining_ms, mission.phase_total_ms),
+                "{pct}% // {}s remaining",
                 mission.remaining_ms.div_ceil(1_000)
             ),
             theme,
         ));
+        if matches!(
+            mission.phase,
+            ExtractorState::Outbound | ExtractorState::Returning
+        ) {
+            lines.push(art::operation_telemetry_strip(
+                "CORE",
+                &region.designation,
+                pct,
+                mission.phase == ExtractorState::Outbound,
+                ascii,
+                theme,
+            ));
+        }
         lines.push(field_line(
             "EXPOSURE",
             risk_text(mission.risk).to_owned(),
@@ -3609,7 +3542,7 @@ fn render_onboarding(
     frame.render_widget(title, chunks[0]);
     frame.render_widget(footer, chunks[2]);
 
-    let panel_area = centered_rect(58.min(area.width.saturating_sub(2)), 20, chunks[1]);
+    let panel_area = centered_rect(58.min(area.width.saturating_sub(2)), 22, chunks[1]);
     let panel = panel(" AWAKENING ", options, theme, PanelTone::Focused);
     let inner = panel.inner(panel_area);
     frame.render_widget(panel, panel_area);
@@ -3618,7 +3551,8 @@ fn render_onboarding(
         OnboardingView::Adjusting => {
             let rows = Layout::vertical([
                 Constraint::Length(2),
-                Constraint::Min(9),
+                Constraint::Min(11),
+                Constraint::Length(1),
                 Constraint::Length(2),
                 Constraint::Length(2),
             ])
@@ -3639,6 +3573,17 @@ fn render_onboarding(
                 .alignment(Alignment::Center)
                 .style(theme.panel_style()),
                 rows[1],
+            );
+            frame.render_widget(
+                Paragraph::new(art::coherence_oscilloscope(
+                    app.band_positions,
+                    app.globe_phase,
+                    options.ascii,
+                    theme,
+                ))
+                .alignment(Alignment::Center)
+                .style(theme.panel_style()),
+                rows[2],
             );
             frame.render_widget(
                 Paragraph::new(Line::from(hint_spans(
@@ -3664,14 +3609,14 @@ fn render_onboarding(
                 )))
                 .alignment(Alignment::Center)
                 .style(theme.panel_style()),
-                rows[2],
+                rows[3],
             );
             if let Some(notice) = &app.notice {
                 frame.render_widget(
                     Paragraph::new(notice.as_str())
                         .alignment(Alignment::Center)
                         .style(theme.panel_style().fg(theme.warning).bold()),
-                    rows[3],
+                    rows[4],
                 );
             }
         }
@@ -5348,8 +5293,10 @@ mod tests {
         assert!(unicode.contains("LOCAL SYSTEM // OBSERVATION FRAME"));
         assert!(unicode.contains("CURRENT WORLD"));
         assert!(unicode.contains("OUTER RETURNS // UNRESOLVED"));
-        assert!(unicode.contains("PLANETARY DEMONSTRATION COMPLETE"));
-        assert!(unicode.contains("No system-scale operations"));
+        assert!(unicode.contains("SOLAR HORIZON"));
+        assert!(unicode.contains("PLANETARY CHAPTER COMPLETE"));
+        assert!(unicode.contains("not the whole of"));
+        assert!(unicode.contains("reachable environment"));
 
         let ascii = screen(
             &app,
@@ -5363,8 +5310,8 @@ mod tests {
         assert!(ascii.is_ascii());
         assert!(ascii.contains("SYSTEM MAP"));
         assert!(ascii.contains("CURRENT WORLD"));
-        assert!(ascii.contains("DEMO HORIZON"));
-        assert!(ascii.contains("PLANETARY DEMONSTRATION COMPLETE"));
+        assert!(ascii.contains("SOLAR HORIZON"));
+        assert!(ascii.contains("PLANETARY CHAPTER COMPLETE"));
         assert!(ascii.contains("No system-scale actions"));
 
         let narrow = screen(
@@ -5379,7 +5326,7 @@ mod tests {
         assert!(narrow.contains("SOLAR HORIZON REACHED"));
         assert!(narrow.contains("current world tracked"));
         assert!(narrow.contains("Outer returns remain unresolved"));
-        assert!(narrow.contains("PLANETARY DEMONSTRATION COMPLETE"));
+        assert!(narrow.contains("PLANETARY CHAPTER COMPLETE"));
         assert!(narrow.contains("No system-scale actions"));
     }
 
@@ -5560,5 +5507,203 @@ mod tests {
             output.contains("1 full discovery transmission(s) queued next"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn coherence_onboarding_renders_signal_oscilloscope_and_lock_state() {
+        let mut app = App::default();
+        app.apply_snapshot(status(false), Instant::now());
+        app.connected();
+
+        let drifting = screen(
+            &app,
+            96,
+            30,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(drifting.contains("SIGNAL DRIFT"), "{drifting}");
+        assert!(
+            drifting.contains('▁') || drifting.contains('▃') || drifting.contains('▅'),
+            "{drifting}"
+        );
+
+        app.band_positions = [5, 5, 5];
+        let locked = screen(
+            &app,
+            96,
+            30,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(locked.is_ascii());
+        assert!(locked.contains("SIGNAL LOCK"), "{locked}");
+        assert!(locked.contains("ENTER  observe"), "{locked}");
+    }
+
+    #[test]
+    fn archive_experiment_renders_live_waveform_in_running_and_paused_states() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let mut planet = engine.planet().unwrap();
+        planet.archive.experiment = Some(mind_core::protocol::ArchiveExperimentSnapshot {
+            available: false,
+            active: true,
+            running: true,
+            remaining_ms: 42_000,
+            phase_total_ms: 75_000,
+            status: "Comparing recovered timing intervals against internal cadence.".into(),
+        });
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(planet.clone(), Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Archive;
+
+        let running = screen(
+            &app,
+            104,
+            36,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(running.contains("RUNNING"), "{running}");
+        assert!(running.contains("BLOCK A"), "{running}");
+        assert!(running.contains("CADENCE"), "{running}");
+        assert!(running.contains("LOCK 44%"), "{running}");
+
+        if let Some(exp) = planet.archive.experiment.as_mut() {
+            exp.running = false;
+        }
+        app.apply_planet(planet, Instant::now());
+        let paused = screen(
+            &app,
+            104,
+            36,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(paused.is_ascii());
+        assert!(paused.contains("PAUSED"), "{paused}");
+        assert!(paused.contains("BLOCK A"), "{paused}");
+        assert!(paused.contains("CADENCE"), "{paused}");
+    }
+
+    #[test]
+    fn local_field_renders_pixel_art_terrain_sprites_and_survey_sweep_with_ascii_fallback() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let mut planet = engine.planet().unwrap();
+        let region_id = planet.core_region_id.clone();
+        planet.network.subregions.clear();
+        for slot in 0..16_u8 {
+            let (knowledge, class, base_id) = match slot {
+                0 => (
+                    SubregionKnowledge::Observed,
+                    Some(SubregionClass::ShelteredShelf),
+                    Some("node_01".into()),
+                ),
+                1 => (
+                    SubregionKnowledge::Detected,
+                    Some(SubregionClass::ExposedRidge),
+                    None,
+                ),
+                2 => (
+                    SubregionKnowledge::Observed,
+                    Some(SubregionClass::BasinFloor),
+                    None,
+                ),
+                _ => (SubregionKnowledge::Unknown, None, None),
+            };
+            planet.network.subregions.push(SubregionSnapshot {
+                id: format!("{region_id}_site_{}", slot + 1),
+                designation: format!("R-081 / S-{}", slot + 1),
+                region_id: region_id.clone(),
+                slot,
+                row: slot / 4,
+                column: slot % 4,
+                knowledge,
+                class,
+                hazard: (knowledge == SubregionKnowledge::Observed).then_some(RiskLevel::Low),
+                energy_yield: (knowledge == SubregionKnowledge::Observed).then_some(4),
+                deposit: (slot == 2).then_some(DepositSnapshot {
+                    resource: ResourceKind::Conductive,
+                    remaining: 18,
+                    risk: RiskLevel::Low,
+                }),
+                base_id,
+            });
+        }
+        planet.network.active_site_survey = Some(mind_core::protocol::SiteSurveySnapshot {
+            subregion_id: planet.network.subregions[1].id.clone(),
+            remaining_ms: 8_000,
+            phase_total_ms: 14_000,
+        });
+        planet
+            .network
+            .bases
+            .push(mind_core::protocol::BaseSnapshot {
+                id: "node_01".into(),
+                designation: "Node 01".into(),
+                region_id: region_id.clone(),
+                subregion_id: planet.network.subregions[0].id.clone(),
+                integrity: 92,
+                generation: 9,
+                demand: 3,
+                stored_energy: 64,
+                energy_capacity: 100,
+                connected: true,
+                modules: vec![mind_core::protocol::BaseModuleSnapshot {
+                    kind: BaseModuleKind::PowerArray,
+                    enabled: true,
+                    active: true,
+                    generation: 8,
+                    demand: 0,
+                }],
+            });
+
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(planet, Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        app.local_view = true;
+
+        let unicode = screen(
+            &app,
+            120,
+            40,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(unicode.contains("LOCAL FIELD"), "{unicode}");
+        assert!(unicode.contains("SCAN"), "{unicode}");
+
+        let ascii = screen(
+            &app,
+            120,
+            40,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(ascii.is_ascii());
+        assert!(ascii.contains("LOCAL FIELD"), "{ascii}");
+        assert!(ascii.contains("SCAN"), "{ascii}");
     }
 }
