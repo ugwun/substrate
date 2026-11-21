@@ -1741,7 +1741,9 @@ fn terminal_text(value: &str, ascii: bool) -> String {
         match character {
             '“' | '”' => rendered.push('"'),
             '‘' | '’' => rendered.push('\''),
-            '—' | '–' => rendered.push('-'),
+            '—' | '–' | '·' | '•' => rendered.push('-'),
+            '…' => rendered.push_str("..."),
+            '✓' => rendered.push_str("OK"),
             _ if character.is_ascii() => rendered.push(character),
             _ => rendered.push('?'),
         }
@@ -5423,16 +5425,21 @@ fn render_session_menu_backdrop(
         );
         buf.fill_circle(cx, cy, r + 1.5, crate::raster::Rgb(42, 168, 178), 0.72);
         buf.fill_circle(cx, cy, r, crate::raster::Rgb(3, 24, 36), 1.0);
+        if area.height >= 6 {
+            let mask_w = 48.min(area.width);
+            let mask_x = area.width.saturating_sub(mask_w) / 2;
+            buf.mask_rect(
+                usize::from(mask_x),
+                0,
+                usize::from(mask_x + mask_w),
+                8,
+                crate::raster::Rgb(1, 14, 22),
+            );
+        }
         crate::raster::blit_to_frame(&buf, frame, area, tier);
     }
     if area.height >= 6 {
         let title_area = Rect::new(area.x, area.y + 1, area.width, 2);
-        let mask_w = 46.min(area.width);
-        let mask_x = area.x + area.width.saturating_sub(mask_w) / 2;
-        frame.render_widget(
-            Block::default().style(theme.canvas_style()),
-            Rect::new(mask_x, area.y + 1, mask_w, 2),
-        );
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![

@@ -80,7 +80,7 @@ async fn run() -> Result<()> {
     } else {
         (true, false)
     };
-    let enable_boot_intro = !term_is_dumb;
+    let enable_boot_intro = !term_is_dumb && !args.resume;
 
     let (command_tx, command_rx) = mpsc::channel(8);
     let (update_tx, mut update_rx) = mpsc::channel(32);

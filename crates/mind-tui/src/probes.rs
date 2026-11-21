@@ -439,8 +439,10 @@ fn render_telemetry_panel(
             "SURVEY QUEUE",
             if queued == 0 {
                 "idle".to_owned()
+            } else if queued == 1 {
+                "1 region queued".to_owned()
             } else {
-                format!("{queued} region(s) queued")
+                format!("{queued} regions queued")
             },
             theme,
         ));

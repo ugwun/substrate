@@ -702,7 +702,9 @@ fn terminal_text(value: &str, ascii: bool) -> String {
         match character {
             '“' | '”' => rendered.push('"'),
             '‘' | '’' => rendered.push('\''),
-            '—' | '–' => rendered.push('-'),
+            '—' | '–' | '·' | '•' => rendered.push('-'),
+            '…' => rendered.push_str("..."),
+            '✓' => rendered.push_str("OK"),
             _ if character.is_ascii() => rendered.push(character),
             _ => rendered.push('?'),
         }

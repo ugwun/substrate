@@ -94,8 +94,35 @@ pub fn render_boot_intro(
     let quick_mode = boot.mode == BootMode::QuickPowerOn;
 
     // Full-bleed edge-to-edge planetary horizon backdrop.
-    let buf =
+    let mut buf =
         cinematic::build_awakening_buffer(area.width, area.height, progress as f32, quick_mode);
+    // Reserve the title rectangle before drawing stars.
+    let sky_mask = crate::raster::Rgb(1, 14, 22);
+    if quick_mode {
+        let overlay_h = 5.min(area.height);
+        let overlay_y = area.height.saturating_sub(overlay_h) / 2;
+        let mask_w = 52.min(area.width);
+        let mask_x = area.width.saturating_sub(mask_w) / 2;
+        buf.mask_rect(
+            usize::from(mask_x),
+            usize::from(overlay_y.saturating_sub(1)) * 2,
+            usize::from(mask_x + mask_w),
+            usize::from((overlay_y + overlay_h + 1).min(area.height)) * 2,
+            sky_mask,
+        );
+    } else if elapsed_ms >= 360 {
+        let title_y = (area.height / 7).max(1);
+        let title_h = 4.min(area.height.saturating_sub(2));
+        let mask_w = 46.min(area.width);
+        let mask_x = area.width.saturating_sub(mask_w) / 2;
+        buf.mask_rect(
+            usize::from(mask_x),
+            usize::from(title_y.saturating_sub(1)) * 2,
+            usize::from(mask_x + mask_w),
+            usize::from((title_y + title_h + 1).min(area.height)) * 2,
+            sky_mask,
+        );
+    }
     blit_to_frame(&buf, frame, area, tier);
 
     if quick_mode {
@@ -183,19 +210,6 @@ fn render_boot_overlay(
             Style::default().fg(theme.amber).bold(),
         ),
     ];
-    // Reserve the title rectangle before drawing stars.
-    let mask_w = 43.min(area.width);
-    let mask_x = area.x + area.width.saturating_sub(mask_w) / 2;
-    let mask_rect = Rect::new(
-        mask_x,
-        title_y.saturating_sub(1).max(area.y),
-        mask_w,
-        (title_h + 1).min(
-            area.height
-                .saturating_sub(title_y.saturating_sub(1).saturating_sub(area.y)),
-        ),
-    );
-    frame.render_widget(Block::default().style(theme.canvas_style()), mask_rect);
     frame.render_widget(
         Paragraph::new(title_lines).alignment(Alignment::Center),
         title_rect,
