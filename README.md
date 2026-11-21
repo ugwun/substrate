@@ -4,12 +4,12 @@ Substrate is an atmospheric terminal game about an awakening machine intelligenc
 
 ![Animated Substrate terminal gameplay showing the 200-region globe, a live scout mission, Overview, Research, and System workspaces](docs/assets/substrate-terminal-demo.gif)
 
-The repository currently implements a complete multi-hour story-driven planetary campaign: graphical Coherence onboarding with a live signal oscilloscope; a five-chapter narrative arc with foreground questions, chapter briefings (`c`), and full-screen Discovery Transmissions; a lit, smoothly rotating 200-region globe with campaign lead beacons (`n`); fog and surveys with direct scout redeployment; variable geological deposits; concurrent survey and extraction probes; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a pixel-art 4-by-4 explorable local field in every surveyed region; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment with live waveform telemetry; and an animated Solar Horizon cliffhanger map. All progression remains daemon-owned and is presented through the Substrate Dark TUI. The system map is the end of this planetary chapter and provides no system-scale actions.
+The repository currently implements a complete multi-hour story-driven planetary campaign: a skippable late-1980s cold-boot / power-on sequence; graphical Coherence onboarding with a live signal oscilloscope; a five-chapter narrative arc with foreground questions, chapter briefings (`c`), and full-screen Discovery Transmissions with carrier-acquire lock; a lit, smoothly rotating 200-region globe with O(1) surface caching, knowledge-change radar flashes, and campaign lead beacons (`n`); pixel-art regional terrain horizon dioramas; fog and surveys with direct scout redeployment; variable geological deposits; concurrent survey and extraction probes; a dedicated **Probe Bay** schematic workspace with live rig-morphing blueprints (`g`) and assembly-gantry rebuild progress; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a pixel-art 4-by-4 explorable local field in every surveyed region with grounded outpost cutaways; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment with live waveform telemetry; and an animated Solar Horizon cliffhanger map. All progression remains daemon-owned and is presented through the event-driven Substrate Dark EGA TUI. The system map is the end of this planetary chapter and provides no system-scale actions.
 
 ## Prerequisites
 
 - Stable Rust with Cargo, rustfmt, and Clippy
-- Linux for the currently supported and tested runtime target
+- Linux and Windows (CI-verified; Linux is the primary runtime acceptance target)
 
 The checked-in toolchain file installs the required Rust components when using rustup.
 
@@ -20,6 +20,13 @@ cargo build --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+For the smoothest terminal responsiveness during play, build and launch the release binaries:
+
+```sh
+cargo build --release --workspace
+./target/release/mind-cli play
 ```
 
 Build the complete workspace before using managed startup so that `mind-cli` can find the adjacent `mind-daemon` executable.
@@ -151,11 +158,17 @@ Global controls:
 - `r`: reconnect immediately while disconnected
 - `c`: toggle the Chapter Briefing overlay showing the current open question and checklist
 - `?`: show help
-- `Tab` or Shift-Tab: cycle Planet, Overview, Research, Archive, and System workspaces;
+- `Tab` or Shift-Tab: cycle Planet, Overview, Probes, Research, Archive, and System workspaces;
   System Map joins the cycle only after the concluding milestone
 - `Space` / `Enter` on a Discovery Transmission: complete typewriter reveal, then acknowledge and file in Archive
 - `Enter` in Archive: start the visible timing comparison when its research and powered
   laboratory requirements are met
+
+Probe Bay controls:
+
+- Left/Right, Up/Down, or `1`/`2`: switch between the Survey Scout and Extraction Probe blueprints
+- `g`: swap the extractor between balanced, cargo, and shielded rigs live while ready
+- Enter: jump to the selected probe's current or target region on **Planet**
 
 Planet controls:
 
@@ -192,7 +205,7 @@ The starting scout can initially reach regions up to two graph hops from the cor
 
 Every surveyed region contains sixteen stable local sectors arranged in a 4-by-4 field, for 3,200 explorable subregions across the planet. The regional survey detects a five-sector landing cross rather than revealing the whole field. A focused sector survey takes 45 seconds, requires the scout to hold locally, permanently resolves that sector, detects its orthogonal neighbors, and contributes analysis. This creates paths toward energy, safer construction ground, and deposits without requiring tile-by-tile travel between globe regions. A foothold costs S10/C6/Si4; modules then draw local power and provide communication, extraction capacity, risk reduction and upkeep, analysis, or observation. Individual modules can be suspended to shed load: an overloaded node drains its reserve and loses consumer functions, so protecting communications may require deferring workshop, laboratory, or observation demand. Powered communication chains extend reach geographically. Each active connected depot adds one construction crew, up to two, and cuts accepted project time by 25% within three regional hops. Moderate and high hazards slowly weather node integrity while the daemon runs; a powered workshop repairs routine wear, and a S4/C2 maintenance project restores 35 integrity in 60 seconds. Knowledge, research, and survey results persist through these material setbacks. Mission, research, automation, energy, construction, wear, maintenance, and production time advance only while the daemon runs.
 
-Unicode and the Substrate Dark truecolor theme are enabled by default. Its deep blue-black canvas, layered teal surfaces, restrained cyan focus, amber actions, and explicit semantic states remain consistent across onboarding and every workspace. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically, and `NO_COLOR` disables color without removing the symbol, border, text, or modifier hierarchy.
+Unicode and the Substrate Dark truecolor theme (with 1980s EGA cobalt blueprint, gold phosphor, bright cyan, and telemetry magenta accents) are enabled by default, automatically falling back to a 16-color indexed EGA ANSI palette on 16-color terminals (`--truecolor` / `SUBSTRATE_TRUECOLOR=true` forces 24-bit RGB; `--ansi16` / `SUBSTRATE_ANSI16=true` forces 16-color EGA). Its deep blue-black canvas, layered teal surfaces, double-bordered focused panels, restrained cyan focus, amber/gold actions, and explicit semantic states remain consistent across the skippable boot sequence, onboarding, and every workspace. Use `--ascii` or `--no-color` for explicit fallback; `TERM=dumb` enables both fallbacks automatically and bypasses the boot sequence and transition wipes, and `NO_COLOR` disables color without removing the symbol, border, text, or modifier hierarchy.
 
 ## IPC contract
 
@@ -231,6 +244,6 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-daemon`: simulation loop, local JSON-RPC server, persistence checkpoints, and embedded MCP HTTP lifecycle
 - `mind-cli`: one-command game launch, managed daemon lifecycle, and status inspection
 - `mind-mcp`: shared MCP tools, embedded HTTP service, and stdio bridge
-- `mind-tui`: daemon-attached session menu, graphical onboarding, and Planet, Overview, Research, Archive, concluding System Map, and System workspaces
+- `mind-tui`: event-driven daemon-attached session menu, skippable boot sequence, graphical onboarding, and Planet, Overview, Probes, Research, Archive, concluding System Map, and System workspaces
 
 See [`GAME_PLAN.md`](GAME_PLAN.md) for the public game vision and future roadmap. [`AGENTS.md`](AGENTS.md) defines repository conventions.
