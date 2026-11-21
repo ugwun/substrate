@@ -6254,6 +6254,25 @@ mod tests {
         assert!(returning
             .next_frame_deadline(now + std::time::Duration::from_millis(100))
             .is_some());
+
+        // Same-batch Resume + boot skip resets a queued transmission timer so its reveal starts fresh.
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let old_arrival = now - std::time::Duration::from_secs(5);
+        let mut batched = App::default();
+        batched.enable_boot_intro();
+        batched.open_session_menu();
+        batched.apply_snapshot(engine.status(), old_arrival);
+        batched.apply_planet(engine.planet().unwrap(), old_arrival);
+        batched.show_return_summary = false;
+        assert!(batched.active_transmission_id.is_some());
+        batched.close_session_menu();
+        batched.skip_boot_intro();
+        let opened_at = batched.transmission_opened_at.unwrap();
+        assert!(
+            opened_at > old_arrival,
+            "transmission timer should reset after resume+skip batch"
+        );
     }
 
     #[test]

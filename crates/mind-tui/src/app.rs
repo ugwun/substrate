@@ -442,9 +442,13 @@ impl App {
 
     pub fn close_session_menu(&mut self) {
         if self.session_menu == Some(SessionMenuState::Selecting) {
+            let now = Instant::now();
             self.session_menu = None;
             self.session_menu_message = None;
-            self.start_armed_boot_intro(Instant::now());
+            if self.active_transmission_id.is_some() {
+                self.transmission_opened_at = Some(now);
+            }
+            self.start_armed_boot_intro(now);
         }
     }
 
@@ -546,6 +550,9 @@ impl App {
     pub fn skip_boot_intro(&mut self) {
         if let Some(boot) = self.boot_intro.as_mut() {
             boot.skip();
+        }
+        if self.active_transmission_id.is_some() {
+            self.transmission_opened_at = Some(Instant::now());
         }
     }
 
@@ -775,7 +782,9 @@ impl App {
             .as_secs_f64();
         self.last_animation_frame = now;
         self.globe_phase = (self.globe_phase + elapsed * 0.42).rem_euclid(1.0);
-        if self.boot_intro_active(now) && self.active_transmission_id.is_some() {
+        if (self.session_menu.is_some() || self.boot_intro_active(now) || self.show_return_summary)
+            && self.active_transmission_id.is_some()
+        {
             self.transmission_opened_at = Some(now);
         }
         if self.workspace != Workspace::Planet
