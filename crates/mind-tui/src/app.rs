@@ -108,6 +108,39 @@ pub enum ContextAction {
     },
 }
 
+/// Largest useful scroll offset per panel, recorded by the renderer from real wrapped content so
+/// stored offsets never run past the end (PgUp then responds immediately).
+#[derive(Debug)]
+pub struct ScrollLimits {
+    pub help: std::cell::Cell<u16>,
+    pub region_panel: std::cell::Cell<u16>,
+    pub probe_panel: std::cell::Cell<u16>,
+    pub archive_detail: std::cell::Cell<u16>,
+    pub overview_status: std::cell::Cell<u16>,
+}
+
+impl Default for ScrollLimits {
+    fn default() -> Self {
+        let open = || std::cell::Cell::new(u16::MAX);
+        Self {
+            help: open(),
+            region_panel: open(),
+            probe_panel: open(),
+            archive_detail: open(),
+            overview_status: open(),
+        }
+    }
+}
+
+fn clamped_scroll(current: u16, amount: i16, limit: u16) -> u16 {
+    let current = current.min(limit);
+    if amount.is_negative() {
+        current.saturating_sub(amount.unsigned_abs())
+    } else {
+        current.saturating_add(amount as u16).min(limit)
+    }
+}
+
 #[derive(Debug)]
 pub struct App {
     pub connection: ConnectionState,
@@ -148,6 +181,7 @@ pub struct App {
     pub research_selection: usize,
     pub archive_selection: usize,
     pub archive_detail_scroll: u16,
+    pub scroll_limits: ScrollLimits,
     pub show_return_summary: bool,
     pub active_transmission_id: Option<String>,
     pub replay_transmission_id: Option<String>,
@@ -217,6 +251,7 @@ impl Default for App {
             research_selection: 0,
             archive_selection: 0,
             archive_detail_scroll: 0,
+            scroll_limits: ScrollLimits::default(),
             show_return_summary: false,
             active_transmission_id: None,
             replay_transmission_id: None,
@@ -640,14 +675,11 @@ impl App {
     }
 
     pub fn scroll_probe_panel(&mut self, amount: i16) {
-        self.probe_panel_scroll = if amount.is_negative() {
-            self.probe_panel_scroll
-                .saturating_sub(amount.unsigned_abs())
-        } else {
-            self.probe_panel_scroll
-                .saturating_add(amount as u16)
-                .min(48)
-        };
+        self.probe_panel_scroll = clamped_scroll(
+            self.probe_panel_scroll,
+            amount,
+            self.scroll_limits.probe_panel.get(),
+        );
     }
 
     pub fn focus_selected_probe_region(&mut self) -> bool {
@@ -1367,6 +1399,11 @@ impl App {
     }
 
     pub fn planet_action_completed(&mut self, kind: PlanetActionKind, result: PlanetActionResult) {
+        // Background auto-acknowledgement of live-watched activity is silent: it must not replace
+        // the result notice of the player's last action or cancel an open confirmation.
+        if kind == PlanetActionKind::Review && result.ok {
+            return;
+        }
         self.pending_action = None;
         self.notice = Some(if result.ok {
             match kind {
@@ -1417,14 +1454,11 @@ impl App {
     }
 
     pub fn scroll_region_panel(&mut self, amount: i16) {
-        self.region_panel_scroll = if amount.is_negative() {
-            self.region_panel_scroll
-                .saturating_sub(amount.unsigned_abs())
-        } else {
-            self.region_panel_scroll
-                .saturating_add(amount as u16)
-                .min(96)
-        };
+        self.region_panel_scroll = clamped_scroll(
+            self.region_panel_scroll,
+            amount,
+            self.scroll_limits.region_panel.get(),
+        );
     }
 
     pub fn move_overview_selection(&mut self, delta: i8) {
@@ -1438,14 +1472,11 @@ impl App {
     }
 
     pub fn scroll_overview_status(&mut self, amount: i16) {
-        self.overview_status_scroll = if amount.is_negative() {
-            self.overview_status_scroll
-                .saturating_sub(amount.unsigned_abs())
-        } else {
-            self.overview_status_scroll
-                .saturating_add(amount as u16)
-                .min(64)
-        };
+        self.overview_status_scroll = clamped_scroll(
+            self.overview_status_scroll,
+            amount,
+            self.scroll_limits.overview_status.get(),
+        );
     }
 
     pub fn move_research_selection(&mut self, delta: i8) {
@@ -1834,11 +1865,8 @@ impl App {
     }
 
     pub fn scroll_help(&mut self, delta: isize) {
-        if delta.is_negative() {
-            self.help_scroll = self.help_scroll.saturating_sub(delta.unsigned_abs() as u16);
-        } else {
-            self.help_scroll = self.help_scroll.saturating_add(delta as u16).min(64);
-        }
+        let amount = i16::try_from(delta).unwrap_or(if delta < 0 { i16::MIN } else { i16::MAX });
+        self.help_scroll = clamped_scroll(self.help_scroll, amount, self.scroll_limits.help.get());
     }
 
     pub fn rig_morph_progress(&self, now: Instant) -> Option<f32> {
@@ -1860,11 +1888,20 @@ impl App {
         if sites.is_empty() {
             return None;
         }
+        // A daemon-published lead sector (for example an offline node) wins outright.
+        if let Some(target) = planet.campaign.lead_subregion_id.as_deref() {
+            if let Some((idx, site)) = sites.iter().enumerate().find(|(_, s)| s.id == target) {
+                return Some((idx, site.designation.clone()));
+            }
+        }
+        let lead_kind = planet.campaign.lead_kind;
         // Prefer an established node in this region when campaign asks for node/module work.
-        if matches!(
-            planet.campaign.next_action_key.as_deref(),
-            Some("O" | "L" | "P" | "C" | "D" | "W" | "M")
-        ) {
+        if lead_kind == Some(mind_core::protocol::CampaignLeadKind::Node)
+            || matches!(
+                planet.campaign.next_action_key.as_deref(),
+                Some("O" | "L" | "P" | "C" | "D" | "W" | "M")
+            )
+        {
             if let Some(base) = planet
                 .network
                 .bases
@@ -1911,14 +1948,11 @@ impl App {
     }
 
     pub fn scroll_archive_detail(&mut self, amount: i16) {
-        self.archive_detail_scroll = if amount.is_negative() {
-            self.archive_detail_scroll
-                .saturating_sub(amount.unsigned_abs())
-        } else {
-            self.archive_detail_scroll
-                .saturating_add(amount as u16)
-                .min(64)
-        };
+        self.archive_detail_scroll = clamped_scroll(
+            self.archive_detail_scroll,
+            amount,
+            self.scroll_limits.archive_detail.get(),
+        );
     }
 
     pub fn archive_experiment_action(&self) -> Option<ContextAction> {

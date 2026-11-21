@@ -14,7 +14,7 @@ use ratatui::{
     style::{Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use std::time::Duration;
@@ -1093,9 +1093,10 @@ pub fn render_system_cliffhanger_panel(
             ),
         ]
     };
+    // Pre-wrap so indented lines keep their indent on continuation rows.
+    let lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
     frame.render_widget(
         Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
             .style(theme.raised_style())
             .block(block),
         area,

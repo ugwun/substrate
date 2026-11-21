@@ -737,11 +737,12 @@ impl GameState {
                         && site.knowledge == SubregionKnowledge::Observed
                 })
             });
-            let offline_base_region_id = network
+            let offline_base = network
                 .bases
                 .iter()
-                .find(|base| !base.connected || base.integrity <= 20)
-                .map(|base| base.region_id.as_str());
+                .find(|base| !base.connected || base.integrity <= 20);
+            let offline_base_region_id = offline_base.map(|base| base.region_id.as_str());
+            let offline_base_subregion_id = offline_base.map(|base| base.subregion_id.as_str());
             let campaign = crate::campaign::derive_campaign(&crate::campaign::CampaignInput {
                 has_observation_002: self.has_archive_observation(OBSERVATION_002),
                 has_observation_003: self.has_archive_observation(OBSERVATION_003),
@@ -778,6 +779,7 @@ impl GameState {
                 regions: &regions,
                 subregions: &network.subregions,
                 offline_base_region_id,
+                offline_base_subregion_id,
             });
             let unpresented_record_ids = self
                 .archive_records

@@ -495,8 +495,24 @@ pub struct CampaignSnapshot {
     pub next_action_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_region_id: Option<String>,
+    /// What the lead asks for inside its region's local field, so clients never infer it from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_kind: Option<CampaignLeadKind>,
+    /// The specific local sector the lead targets, when one is known (for example an offline node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_subregion_id: Option<String>,
     pub steps: Vec<CampaignStepSnapshot>,
     pub complete: bool,
+}
+
+/// Local-field intent of the campaign lead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignLeadKind {
+    /// Run a focused survey on a detected frontier sector.
+    Frontier,
+    /// Stabilize an offline or failing node by shedding load or funding maintenance.
+    Node,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

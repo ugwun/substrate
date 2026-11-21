@@ -4,9 +4,9 @@
 //! leaks undiscovered world truth or future stages.
 
 use crate::protocol::{
-    ArchiveExperimentSnapshot, CampaignSnapshot, CampaignStepSnapshot, HorizonProgressSnapshot,
-    OperationalProfile, RegionKnowledge, RegionSnapshot, ResourceKind, ResourceStock, ScoutState,
-    SubregionKnowledge, SubregionSnapshot,
+    ArchiveExperimentSnapshot, CampaignLeadKind, CampaignSnapshot, CampaignStepSnapshot,
+    HorizonProgressSnapshot, OperationalProfile, RegionKnowledge, RegionSnapshot, ResourceKind,
+    ResourceStock, ScoutState, SubregionKnowledge, SubregionSnapshot,
 };
 
 pub(crate) struct CampaignInput<'a> {
@@ -40,6 +40,7 @@ pub(crate) struct CampaignInput<'a> {
     pub regions: &'a [RegionSnapshot],
     pub subregions: &'a [SubregionSnapshot],
     pub offline_base_region_id: Option<&'a str>,
+    pub offline_base_subregion_id: Option<&'a str>,
 }
 
 pub(crate) fn derive_campaign(input: &CampaignInput<'_>) -> CampaignSnapshot {
@@ -54,6 +55,8 @@ pub(crate) fn derive_campaign(input: &CampaignInput<'_>) -> CampaignSnapshot {
             next_action: "Review System Map and Archive; the planetary campaign ends at this horizon.".into(),
             next_action_key: Some("TAB".into()),
             lead_region_id: None,
+            lead_kind: None,
+            lead_subregion_id: None,
             steps: vec![
                 CampaignStepSnapshot {
                     label: "Local star and current world resolved in System Map".into(),
@@ -91,7 +94,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         .count();
 
     let sheltered_note = if input.has_observed_sheltered {
-        "shelf ok"
+        "shelf observed"
     } else {
         "incl. 1 sheltered shelf"
     };
@@ -100,6 +103,8 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         input.observed_subregions.min(3)
     );
 
+    let mut lead_kind: Option<CampaignLeadKind> = None;
+    let lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
             format!("Focused survey resolving ({local_progress}). Monitor or let it finish in background."),
@@ -112,6 +117,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 && site.knowledge == SubregionKnowledge::Detected
         });
         if holding_has_detected {
+            lead_kind = Some(CampaignLeadKind::Frontier);
             (
                 format!(
                     "Open 4x4 field (V) in {} and press S on a FRONTIER ({local_progress}).",
@@ -247,6 +253,8 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         next_action,
         next_action_key,
         lead_region_id,
+        lead_kind,
+        lead_subregion_id,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!("Complete a regional survey ({}/1)", surveyed_non_core.min(1)),
@@ -267,6 +275,8 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
 fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
     let experiment = input.archive_experiment;
     let has_lab = input.horizon.analysis_sites >= 1;
+    let mut lead_kind: Option<CampaignLeadKind> = None;
+    let mut lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if let Some(exp) =
         experiment.filter(|exp| exp.active)
     {
@@ -280,6 +290,10 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 None,
             )
         } else {
+            if input.offline_base_region_id.is_some() {
+                lead_kind = Some(CampaignLeadKind::Node);
+                lead_subregion_id = input.offline_base_subregion_id.map(str::to_owned);
+            }
             (
                     "Restore power and integrity at the laboratory node to resume the Archive comparison.".into(),
                     Some("V".into()),
@@ -447,6 +461,8 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
         next_action,
         next_action_key,
         lead_region_id,
+        lead_kind,
+        lead_subregion_id,
         steps: vec![
             CampaignStepSnapshot {
                 label: "Build a range relay and survey beyond initial reach".into(),
@@ -475,6 +491,8 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
         input.subregions,
         input.comparison_region_ids,
     );
+    let mut lead_kind: Option<CampaignLeadKind> = None;
+    let lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
             "Focused comparative survey is resolving. You can manage nodes or research concurrently.".into(),
@@ -491,6 +509,7 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 && site.knowledge == SubregionKnowledge::Detected
         })
     {
+        lead_kind = Some(CampaignLeadKind::Frontier);
         (
             format!(
                 "Press V in {} and run a focused survey (S) to add an independent region ({}/3).",
@@ -531,6 +550,8 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
         next_action,
         next_action_key,
         lead_region_id,
+        lead_kind,
+        lead_subregion_id,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!(
@@ -553,9 +574,13 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
     let array_done = h.analysis_sites >= h.required_analysis_sites
         && h.observation_sites >= h.required_observation_sites;
 
+    let mut lead_kind: Option<CampaignLeadKind> = None;
+    let mut lead_subregion_id: Option<String> = None;
     let (next_action, next_action_key, lead_region_id) = if let Some(offline_region) =
         input.offline_base_region_id
     {
+        lead_kind = Some(CampaignLeadKind::Node);
+        lead_subregion_id = input.offline_base_subregion_id.map(str::to_owned);
         (
             format!(
                 "Stabilize node at {}: press V to shed optional load or fund maintenance (M).",
@@ -566,6 +591,7 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
         )
     } else if h.surveyed_subregions < h.required_subregions {
         let target = first_surveyed_with_detected_site(input.regions, input.subregions);
+        lead_kind = Some(CampaignLeadKind::Frontier);
         (
             format!(
                 "Resolve {} more local sector(s) via V -> S to widen the surface baseline.",
@@ -633,6 +659,8 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
         next_action,
         next_action_key,
         lead_region_id,
+        lead_kind,
+        lead_subregion_id,
         steps: vec![
             CampaignStepSnapshot {
                 label: format!(

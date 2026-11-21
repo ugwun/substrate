@@ -15,7 +15,7 @@ use ratatui::{
     style::{Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use std::time::Duration;
@@ -58,7 +58,77 @@ pub fn step_pips(campaign: &CampaignSnapshot, ascii: bool) -> String {
         .collect()
 }
 
+/// Per-record measurement diagram, fitted to `max_width` cells. Diagram rows never wrap: when a
+/// row is too wide its caption switches to a compact form, then trailing captions are dropped.
 pub fn record_diagram(
+    record_id: &str,
+    ascii: bool,
+    phase: f64,
+    theme: Theme,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    fit_diagram(
+        record_diagram_full(record_id, ascii, phase, theme),
+        max_width,
+    )
+}
+
+const COMPACT_CAPTIONS: &[(&str, &str)] = &[
+    ("ONE SOURCE SIGNATURE", "ONE SIGNATURE"),
+    ("SYM·WARM·ENC·VIEW", "4 TRAITS"),
+    ("SYM/WARM/ENC/VIEW", "4 TRAITS"),
+    ("UNRELATED DEVICE", "UNRELATED"),
+    ("Δ0.00 // MEASURED OFFSET", "Δ0.00 OFFSET"),
+    ("d0.00 // MEASURED OFFSET", "d0.00 OFFSET"),
+    ("RETAINED INTERVAL", "RETAINED"),
+    ("6 RECESSED CONTROLS", "6 CONTROLS"),
+    ("2 SURFACE HEIGHTS", "2 HEIGHTS"),
+    ("PASSIVE ENCLOSURE", "ENCLOSURE"),
+    ("STAR + CURRENT WORLD", "STAR + WORLD"),
+    ("OUTER RETURNS UNRESOLVED", "OUTER RETURNS"),
+    ("PAUSE CLUSTERS ALIGN ACROSS BLOCKS", "PAUSES ALIGN"),
+    ("PAUSE CLUSTERS ALIGN", "PAUSES ALIGN"),
+    ("BLOCK TIMING", "BLOCKS"),
+    ("MIND CADENCE", "CADENCE"),
+];
+
+fn fit_diagram(lines: Vec<Line<'static>>, max_width: usize) -> Vec<Line<'static>> {
+    let width_of = |line: &Line<'_>| -> usize {
+        line.spans
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum()
+    };
+    lines
+        .into_iter()
+        .map(|mut line| {
+            if width_of(&line) <= max_width {
+                return line;
+            }
+            for span in &mut line.spans {
+                let mut text = span.content.to_string();
+                for (long, short) in COMPACT_CAPTIONS {
+                    text = text.replace(long, short);
+                }
+                span.content = text.into();
+            }
+            while width_of(&line) > max_width && line.spans.len() > 1 {
+                line.spans.pop();
+            }
+            if width_of(&line) > max_width {
+                if let Some(span) = line.spans.first_mut() {
+                    let text = span.content.to_string();
+                    let head: String = text.chars().take(max_width).collect();
+                    let cut = head.rfind("  ").map_or(head.as_str(), |at| &head[..at]);
+                    span.content = cut.trim_end().to_owned().into();
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+fn record_diagram_full(
     record_id: &str,
     ascii: bool,
     phase: f64,
@@ -488,6 +558,9 @@ pub fn render_discovery_transmission(
         }
     }
 
+    // The heading and chapter rows are composed spans; wrap them too so narrow viewports never
+    // cut "TITLE // MEDIUM" mid-word, and so scroll bounds count real rows.
+    let lines = crate::textwrap::hang_wrap(lines, wrap_cols);
     let total_lines = lines.len() as u16;
     let view_h = text_area.height;
     let max_scroll = total_lines.saturating_sub(view_h);
@@ -572,10 +645,119 @@ pub fn render_chapter_card(
     options: RenderOptions,
     theme: Theme,
 ) {
-    let width = area.width.saturating_sub(6).clamp(40, 78);
-    let height = (campaign.steps.len() as u16 + 13)
-        .min(area.height.saturating_sub(2))
-        .max(12);
+    let width = area.width.saturating_sub(6).clamp(40, 78).min(area.width);
+    let inner_w = usize::from(width.saturating_sub(2));
+    // Two border rows plus the fixed close prompt.
+    let max_body = usize::from(area.height.saturating_sub(2)).saturating_sub(3);
+
+    let heading = |text: &'static str, color| Line::styled(text, Style::default().fg(color).bold());
+    let question = Line::styled(
+        terminal_text(&campaign.question, options.ascii),
+        Style::default().fg(theme.text_strong).bold(),
+    );
+    let voice = Line::styled(
+        terminal_text(&campaign.voice, options.ascii),
+        Style::default().fg(theme.text),
+    );
+    let steps: Vec<Line<'static>> = campaign
+        .steps
+        .iter()
+        .map(|step| {
+            let marker = match (options.ascii, step.complete) {
+                (true, true) => "[#] ",
+                (true, false) => "[ ] ",
+                (false, true) => " ●  ",
+                (false, false) => " ○  ",
+            };
+            Line::from(vec![
+                Span::styled(
+                    marker,
+                    Style::default().fg(if step.complete {
+                        theme.success
+                    } else {
+                        theme.amber
+                    }),
+                ),
+                Span::styled(
+                    terminal_text(&step.label, options.ascii),
+                    Style::default().fg(if step.complete {
+                        theme.muted
+                    } else {
+                        theme.text_strong
+                    }),
+                ),
+            ])
+        })
+        .collect();
+    let next = Line::from(vec![
+        Span::styled("NEXT  ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            terminal_text(&campaign.next_action, options.ascii),
+            Style::default().fg(theme.text_strong),
+        ),
+    ]);
+
+    // Progressively compact so NEXT and the steps always fit: full card, then without the
+    // narrative voice, then without headings and spacers, then without the question.
+    let layouts: [&dyn Fn() -> Vec<Line<'static>>; 4] = [
+        &|| {
+            let mut lines = vec![
+                heading("OPEN QUESTION //", theme.amber),
+                question.clone(),
+                Line::raw(""),
+                voice.clone(),
+                Line::raw(""),
+                heading("CHAPTER STEPS //", theme.cyan),
+            ];
+            lines.extend(steps.iter().cloned());
+            lines.extend([Line::raw(""), next.clone()]);
+            lines
+        },
+        &|| {
+            let mut lines = vec![
+                heading("OPEN QUESTION //", theme.amber),
+                question.clone(),
+                Line::raw(""),
+                heading("CHAPTER STEPS //", theme.cyan),
+            ];
+            lines.extend(steps.iter().cloned());
+            lines.extend([Line::raw(""), next.clone()]);
+            lines
+        },
+        &|| {
+            let mut lines = vec![question.clone()];
+            lines.extend(steps.iter().cloned());
+            lines.push(next.clone());
+            lines
+        },
+        &|| {
+            let mut lines: Vec<Line<'static>> = steps.to_vec();
+            lines.push(next.clone());
+            lines
+        },
+    ];
+    let mut body = Vec::new();
+    for build in layouts {
+        body = crate::textwrap::hang_wrap(build(), inner_w);
+        if body.len() <= max_body {
+            break;
+        }
+    }
+    if body.len() > max_body && max_body > 0 {
+        body.truncate(max_body - 1);
+        body.push(Line::styled(
+            if options.ascii {
+                "... enlarge the terminal for the full briefing"
+            } else {
+                "… enlarge the terminal for the full briefing"
+            },
+            Style::default().fg(theme.muted),
+        ));
+    }
+
+    let height = u16::try_from(body.len() + 3)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
     let popup = centered_rect(width, height, area);
     frame.render_widget(Clear, popup);
 
@@ -607,62 +789,8 @@ pub fn render_chapter_card(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let mut lines = vec![
-        Line::styled("OPEN QUESTION //", Style::default().fg(theme.amber).bold()),
-        Line::styled(
-            terminal_text(&campaign.question, options.ascii),
-            Style::default().fg(theme.text_strong).bold(),
-        ),
-        Line::raw(""),
-        Line::styled(
-            terminal_text(&campaign.voice, options.ascii),
-            Style::default().fg(theme.text),
-        ),
-        Line::raw(""),
-        Line::styled("CHAPTER STEPS //", Style::default().fg(theme.cyan).bold()),
-    ];
-    for step in &campaign.steps {
-        let marker = match (options.ascii, step.complete) {
-            (true, true) => "[#] ",
-            (true, false) => "[ ] ",
-            (false, true) => " ●  ",
-            (false, false) => " ○  ",
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                marker,
-                Style::default().fg(if step.complete {
-                    theme.success
-                } else {
-                    theme.amber
-                }),
-            ),
-            Span::styled(
-                terminal_text(&step.label, options.ascii),
-                Style::default().fg(if step.complete {
-                    theme.muted
-                } else {
-                    theme.text_strong
-                }),
-            ),
-        ]));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("NEXT  ", Style::default().fg(theme.amber).bold()),
-        Span::styled(
-            terminal_text(&campaign.next_action, options.ascii),
-            Style::default().fg(theme.text_strong),
-        ),
-    ]));
-
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(inner);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(theme.raised_style()),
-        chunks[0],
-    );
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    frame.render_widget(Paragraph::new(body).style(theme.raised_style()), chunks[0]);
     frame.render_widget(
         Paragraph::new(Line::styled(
             "ENTER / ESC  continue",

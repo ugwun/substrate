@@ -10,8 +10,8 @@ use crate::{
     transmission, vista,
 };
 use mind_core::protocol::{
-    BaseModuleKind, EngineEventKind, ExtractorLoadout, ExtractorState, MissionReportOutcome,
-    PlanetSnapshot, ScoutState, SubregionKnowledge, SubregionSnapshot,
+    BaseModuleKind, CampaignLeadKind, EngineEventKind, ExtractorLoadout, ExtractorState,
+    MissionReportOutcome, PlanetSnapshot, ScoutState, SubregionKnowledge, SubregionSnapshot,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -328,7 +328,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
     }
     if app.show_help {
         dim_backdrop(frame, area, theme, options.ascii);
-        render_help(frame, area, app.help_scroll, options, theme);
+        render_help(
+            frame,
+            area,
+            app.help_scroll,
+            &app.scroll_limits.help,
+            options,
+            theme,
+        );
     } else if let Some(progress) = app.transition_progress(now) {
         art::render_crt_wipe(frame, area, progress, options, theme);
     }
@@ -1161,6 +1168,9 @@ fn render_overview(
     ));
     let summary_total = summary_lines.len();
     let summary_visible = usize::from(columns[1].height.saturating_sub(2));
+    app.scroll_limits
+        .overview_status
+        .set(u16::try_from(summary_total.saturating_sub(summary_visible)).unwrap_or(u16::MAX));
     let status_overflow = summary_total > summary_visible;
     let status_title = if status_overflow {
         if app.overview_status_scroll > 0 {
@@ -1431,10 +1441,11 @@ fn render_research(
     let more_below = scroll + body_height < lines.len();
     let block = if scroll > 0 || more_below {
         panel(
-            if more_below {
-                " RESEARCH & SPECIALIZATION [more ▼] "
-            } else {
-                " RESEARCH & SPECIALIZATION [▲] "
+            match (more_below, options.ascii) {
+                (true, true) => " RESEARCH & SPECIALIZATION [more v] ",
+                (true, false) => " RESEARCH & SPECIALIZATION [more ▼] ",
+                (false, true) => " RESEARCH & SPECIALIZATION [^] ",
+                (false, false) => " RESEARCH & SPECIALIZATION [▲] ",
             },
             options,
             theme,
@@ -1739,6 +1750,19 @@ fn render_archive(
                 })
                 .collect::<Vec<_>>(),
         );
+        let panels = if rows[1].width >= 76 {
+            let (l, r) = if rows[1].width >= 96 {
+                (34, 66)
+            } else {
+                (32, 68)
+            };
+            Layout::horizontal([Constraint::Percentage(l), Constraint::Percentage(r)])
+                .split(rows[1])
+        } else {
+            Layout::vertical([Constraint::Percentage(34), Constraint::Percentage(66)])
+                .split(rows[1])
+        };
+        let detail_inner_width = usize::from(panels[1].width.saturating_sub(2));
         let source = archive_source_label(planet, record);
         let mut detail_lines = vec![
             Line::styled(
@@ -1754,6 +1778,7 @@ fn render_archive(
             options.ascii,
             app.globe_phase,
             theme,
+            detail_inner_width,
         ));
         detail_lines.extend([Line::from(""), section_line("OBSERVATION", theme)]);
         detail_lines.extend(paragraph_lines(
@@ -1822,18 +1847,6 @@ fn render_archive(
             }
         }
         let detail = Text::from(detail_lines);
-        let panels = if rows[1].width >= 76 {
-            let (l, r) = if rows[1].width >= 96 {
-                (34, 66)
-            } else {
-                (32, 68)
-            };
-            Layout::horizontal([Constraint::Percentage(l), Constraint::Percentage(r)])
-                .split(rows[1])
-        } else {
-            Layout::vertical([Constraint::Percentage(34), Constraint::Percentage(66)])
-                .split(rows[1])
-        };
         frame.render_widget(
             Paragraph::new(list)
                 .wrap(Wrap { trim: false })
@@ -1851,6 +1864,7 @@ fn render_archive(
             panels[1],
             detail,
             app.archive_detail_scroll,
+            &app.scroll_limits.archive_detail,
             "OBSERVATION",
             false,
             options,
@@ -2265,7 +2279,7 @@ fn render_workspace_header(
         left_spans.push(Span::raw(" "));
     }
 
-    let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
     let total_width = usize::from(area.width);
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     if let Some(planet) = &app.planet {
@@ -2296,7 +2310,45 @@ fn render_workspace_header(
         ));
     }
 
-    let right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    if left_len + right_len >= total_width && !right_spans.is_empty() {
+        // Too many tabs for the chapter badge: keep the active tab named and number the rest,
+        // so the chapter and its pips always stay visible.
+        let mut compact_spans = vec![left_spans[0].clone()];
+        for (idx, &ws) in visible.iter().enumerate() {
+            let num = idx + 1;
+            if active == ws {
+                compact_spans.push(Span::styled(
+                    format!("{num}:{}", workspace_label(ws)),
+                    theme.selection_style().fg(theme.cyan_bright),
+                ));
+            } else {
+                compact_spans.push(Span::styled(
+                    num.to_string(),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+            compact_spans.push(Span::raw(" "));
+        }
+        let compact_len: usize = compact_spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        if compact_len + right_len < total_width {
+            left_spans = compact_spans;
+            left_len = compact_len;
+        } else if let Some(first) = right_spans.first_mut() {
+            // Still too narrow: fall back to the short chapter label.
+            if let Some(planet) = &app.planet {
+                first.content = format!(
+                    "CH {} ",
+                    transmission::roman_chapter(planet.campaign.chapter_number)
+                )
+                .into();
+                right_len = right_spans.iter().map(|s| s.content.chars().count()).sum();
+            }
+        }
+    }
     if left_len + right_len < total_width {
         left_spans.push(Span::raw(" ".repeat(total_width - left_len - right_len)));
         left_spans.extend(right_spans);
@@ -2417,18 +2469,40 @@ fn render_workspace_header(
 /// Local-field NEXT guidance: while a 4x4 field is open, translate the campaign's globe-level
 /// instruction into the key that acts on the selected sector, keeping the campaign progress counter.
 fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static str>, String) {
+    // Carry over a trailing progress counter such as "(1/3 sectors; ...)" but never a key hint
+    // like "(M)".
     let base_action = planet.campaign.next_action.trim_end_matches('.');
     let progress = base_action
         .rfind('(')
-        .filter(|_| base_action.ends_with(')'))
+        .filter(|at| base_action.ends_with(')') && base_action[*at..].contains('/'))
         .map(|at| format!(" {}", &base_action[at..]))
         .unwrap_or_default();
     // While a focused survey resolves, the campaign's own monitoring text is already correct.
     if app.local_view && planet.network.active_site_survey.is_none() {
         let in_lead =
             planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref();
+        let lead_kind = planet.campaign.lead_kind;
         match planet.campaign.next_action_key.as_deref() {
-            Some("V") if in_lead => {
+            Some("V") if in_lead && lead_kind == Some(CampaignLeadKind::Node) => {
+                let on_target = planet
+                    .campaign
+                    .lead_subregion_id
+                    .as_deref()
+                    .is_some_and(|id| app.selected_subregion().is_some_and(|site| site.id == id));
+                if on_target {
+                    (
+                        Some("M"),
+                        "Stabilize this node: suspend optional modules (P/C/D/W/L/O) or fund maintenance (M)."
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        Some("N"),
+                        "Press N to select the node that needs stabilizing.".to_owned(),
+                    )
+                }
+            }
+            Some("V") if in_lead && lead_kind == Some(CampaignLeadKind::Frontier) => {
                 let selected_detected = app
                     .selected_subregion()
                     .is_some_and(|s| s.knowledge == SubregionKnowledge::Detected);
@@ -2444,12 +2518,25 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
                     )
                 }
             }
+            // Already inside the lead field: V would be inert, so point at N (lead sector) instead.
+            Some("V") if in_lead => (Some("N"), planet.campaign.next_action.clone()),
             Some("X" | "B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
                 Some("ESC"),
                 format!("Return to globe (Esc) — {}", planet.campaign.next_action),
             ),
             _ => (None, String::new()),
         }
+    } else if !app.local_view
+        && matches!(
+            planet.campaign.next_action_key.as_deref(),
+            Some("O" | "M" | "P" | "C" | "D" | "W" | "L")
+        )
+    {
+        // Module and maintenance keys act only inside a local field; on the globe, lead with V.
+        (
+            Some("V"),
+            format!("In the local field: {}", planet.campaign.next_action),
+        )
     } else {
         (None, String::new())
     }
@@ -3235,6 +3322,7 @@ fn render_local_inspector(
         area,
         text,
         app.region_panel_scroll,
+        &app.scroll_limits.region_panel,
         if confirming {
             "SITE CONFIRMATION"
         } else {
@@ -3254,6 +3342,7 @@ fn render_inspector_text(
     area: Rect,
     text: Text<'static>,
     scroll: u16,
+    limit: &std::cell::Cell<u16>,
     title: &str,
     confirming: bool,
     options: RenderOptions,
@@ -3261,8 +3350,24 @@ fn render_inspector_text(
 ) {
     let inner_width = usize::from(area.width.saturating_sub(2));
     let inner_height = usize::from(area.height.saturating_sub(2));
-    let rows = crate::textwrap::hang_wrap(text.lines, inner_width);
+    let mut rows = crate::textwrap::hang_wrap(text.lines, inner_width);
+    let is_heading = |line: &Line<'_>| {
+        let plain: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let plain = plain.trim_end();
+        plain == "UNAVAILABLE HERE" || plain.ends_with(" //")
+    };
+    // Keep a heading with the row it introduces: never leave it alone on the last visible row.
+    let first_scroll = usize::from(scroll).min(rows.len().saturating_sub(inner_height));
+    let last_visible = first_scroll + inner_height;
+    if inner_height > 1 && last_visible < rows.len() && is_heading(&rows[last_visible - 1]) {
+        rows.insert(last_visible - 1, Line::raw(""));
+    }
     let max_scroll = rows.len().saturating_sub(inner_height);
+    limit.set(u16::try_from(max_scroll).unwrap_or(u16::MAX));
     let scroll = usize::from(scroll).min(max_scroll);
     let more_above = scroll > 0;
     let more_below = scroll < max_scroll;
@@ -3474,8 +3579,12 @@ fn local_survey_blocker(app: &App, planet: &PlanetSnapshot, site: &SubregionSnap
     if site.knowledge == SubregionKnowledge::Unknown {
         return "survey an adjacent frontier sector first".into();
     }
-    if planet.network.active_site_survey.is_some() {
-        return "another local survey is active".into();
+    if let Some(active) = &planet.network.active_site_survey {
+        return if active.subregion_id == site.id {
+            "survey in progress on this sector".into()
+        } else {
+            "another local survey is active".into()
+        };
     }
     if app.selected_region().is_some_and(|region| {
         planet.active_mission.as_ref().is_none_or(|mission| {
@@ -3878,6 +3987,7 @@ fn render_region_inspector(
         area,
         text,
         app.region_panel_scroll,
+        &app.scroll_limits.region_panel,
         if confirming {
             "REGION CONFIRMATION"
         } else {
@@ -3939,7 +4049,9 @@ fn local_module_strip(
     ascii: bool,
     theme: Theme,
 ) -> Line<'static> {
-    let mut spans = Vec::new();
+    // An empty lead span stops the hanging-indent wrapper treating the first badge as a label,
+    // so a wrapped badge row starts at the left edge instead of under the first badge.
+    let mut spans = vec![Span::raw("")];
     let slots = [
         (BaseModuleKind::PowerArray, "PP", "P·PWR", "P-PWR"),
         (BaseModuleKind::Communications, "CC", "C·COM", "C-COM"),
@@ -3966,7 +4078,7 @@ fn local_module_strip(
         };
         spans.push(Span::styled(badge, Style::default().fg(color).bold()));
     }
-    if spans.is_empty() {
+    if spans.len() == 1 {
         spans.push(Span::styled(
             "FOOTHOLD FOUNDATION // NO MODULES",
             Style::default().fg(theme.muted),
@@ -4066,7 +4178,15 @@ fn region_data_lines(
         field_line("CONFIDENCE", option_debug(region.confidence), theme),
         field_line(
             "DISTANCE",
-            format!("{} hop(s)", region.hop_distance_from_core),
+            format!(
+                "{} {}",
+                region.hop_distance_from_core,
+                if region.hop_distance_from_core == 1 {
+                    "hop"
+                } else {
+                    "hops"
+                }
+            ),
             theme,
         ),
         field_line(
@@ -5259,9 +5379,10 @@ fn render_dashboard(
 ) {
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if area.width >= 72
     {
+        // Six telemetry rows plus borders.
         let rows = Layout::vertical([
             Constraint::Length(3),
-            Constraint::Length(7),
+            Constraint::Length(8),
             Constraint::Min(6),
             Constraint::Length(2),
         ])
@@ -5272,7 +5393,7 @@ fn render_dashboard(
     } else {
         let rows = Layout::vertical([
             Constraint::Length(3),
-            Constraint::Length(7),
+            Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(6),
             Constraint::Length(3),
@@ -5443,7 +5564,7 @@ fn render_dashboard(
                     format!("{:>6} ", event.tick),
                     Style::default().fg(theme.faint),
                 ),
-                Span::styled(format!("{:>5}", tag), Style::default().fg(tag_color).bold()),
+                Span::styled(format!("{tag:>7}"), Style::default().fg(tag_color).bold()),
                 Span::styled(
                     format!("  {}", event.message),
                     Style::default().fg(theme.text),
@@ -5729,6 +5850,7 @@ fn render_help(
     frame: &mut Frame<'_>,
     area: Rect,
     scroll: u16,
+    app_help_limit: &std::cell::Cell<u16>,
     options: RenderOptions,
     theme: Theme,
 ) {
@@ -5738,10 +5860,11 @@ fn render_help(
     } else {
         64.min(area.width.saturating_sub(4))
     };
+    // Leave the two-row footer and header clear so no status fragments sit beside the border.
     let height = if two_col {
         21.min(area.height.saturating_sub(4))
     } else {
-        22.min(area.height.saturating_sub(2))
+        22.min(area.height.saturating_sub(4))
     };
     let help_area = centered_rect(width, height, area);
     frame.render_widget(Clear, help_area);
@@ -5790,14 +5913,36 @@ fn render_help(
         ),
     ];
 
-    let title = if two_col {
-        " HELP // ? OR ESC TO CLOSE "
-    } else if options.ascii {
-        " HELP // UP/DN SCROLL // ESC CLOSE "
+    let inner_preview = Rect::new(0, 0, width.saturating_sub(2), height.saturating_sub(2));
+    let single_col_rows = if two_col {
+        Vec::new()
     } else {
-        " HELP // ↑↓ SCROLL // ESC CLOSE "
+        let mut combined = left_col.clone();
+        combined.push(Line::from(""));
+        combined.extend(right_col.clone());
+        crate::textwrap::hang_wrap(combined, usize::from(inner_preview.width))
     };
-    let block = panel(title, options, theme, PanelTone::Modal);
+    let max_scroll = (single_col_rows.len() as u16).saturating_sub(inner_preview.height);
+    app_help_limit.set(max_scroll);
+    let clamped = scroll.min(max_scroll);
+    let cue = match (clamped > 0, clamped < max_scroll, options.ascii) {
+        (_, _, _) if two_col => "",
+        (false, true, true) => " // MORE v",
+        (false, true, false) => " // MORE ▼",
+        (true, false, true) => " // ^",
+        (true, false, false) => " // ▲",
+        (true, true, true) => " // ^ v",
+        (true, true, false) => " // ▲▼",
+        (false, false, _) => "",
+    };
+    let title = if two_col {
+        " HELP // ? OR ESC TO CLOSE ".to_owned()
+    } else if options.ascii {
+        format!(" HELP // UP/DN SCROLL // ESC CLOSE{cue} ")
+    } else {
+        format!(" HELP // ↑↓ SCROLL // ESC CLOSE{cue} ")
+    };
+    let block = panel(&title, options, theme, PanelTone::Modal);
     let inner = block.inner(help_area);
     frame.render_widget(block, help_area);
     frame.render_widget(Block::default().style(theme.raised_style()), inner);
@@ -5818,15 +5963,8 @@ fn render_help(
             cols[1],
         );
     } else {
-        let mut combined = left_col;
-        combined.push(Line::from(""));
-        combined.extend(right_col);
-        let total = combined.len() as u16;
-        let max_scroll = total.saturating_sub(inner.height);
-        let clamped = scroll.min(max_scroll);
         frame.render_widget(
-            Paragraph::new(combined)
-                .wrap(Wrap { trim: false })
+            Paragraph::new(single_col_rows)
                 .scroll((clamped, 0))
                 .style(theme.raised_style()),
             inner,
@@ -6272,6 +6410,96 @@ mod tests {
         SubregionClass,
     };
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn node_lead_guides_to_the_node_not_a_frontier() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut planet = engine.planet().unwrap();
+        let region = planet.core_region_id.clone();
+        planet.network.subregions.clear();
+        for slot in 0..16_u8 {
+            planet.network.subregions.push(SubregionSnapshot {
+                id: format!("{region}_site_{}", slot + 1),
+                designation: format!("R-081 / S-{}", slot + 1),
+                region_id: region.clone(),
+                slot,
+                row: slot / 4,
+                column: slot % 4,
+                knowledge: if slot == 0 {
+                    SubregionKnowledge::Detected
+                } else {
+                    SubregionKnowledge::Observed
+                },
+                class: Some(SubregionClass::ShelteredShelf),
+                hazard: Some(RiskLevel::Low),
+                energy_yield: Some(2),
+                deposit: None,
+                base_id: None,
+            });
+        }
+        planet.campaign.next_action =
+            "Stabilize node at R-081: press V to shed optional load or fund maintenance (M)."
+                .into();
+        planet.campaign.next_action_key = Some("V".into());
+        planet.campaign.lead_region_id = Some(region.clone());
+        planet.campaign.lead_kind = Some(CampaignLeadKind::Node);
+        planet.campaign.lead_subregion_id = Some(format!("{region}_site_7"));
+        let mut app = App::default();
+        app.apply_snapshot(status(true), Instant::now());
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.local_view = true;
+        let planet = app.planet.clone().unwrap();
+        let (key, text) = local_next_override(&app, &planet);
+        assert_eq!(key, Some("N"), "{text}");
+        assert!(!text.contains("FRONTIER"), "{text}");
+        assert!(!text.contains("(M)"), "{text}");
+        assert!(app.focus_campaign_lead());
+        assert_eq!(
+            app.selected_subregion().map(|site| site.id.clone()),
+            Some(format!("{region}_site_7"))
+        );
+        let (key, text) = local_next_override(&app, &planet);
+        assert_eq!(key, Some("M"), "{text}");
+    }
+
+    #[test]
+    fn chapter_briefing_keeps_next_and_close_prompt_on_small_screens() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let planet = engine.planet().unwrap();
+        for (width, height) in [(48_u16, 14_u16), (80, 24), (120, 36)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    transmission::render_chapter_card(
+                        frame,
+                        frame.area(),
+                        &planet.campaign,
+                        RenderOptions {
+                            ascii: true,
+                            no_color: true,
+                        },
+                        Theme::new(true),
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let text: String = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_owned())
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect();
+            assert!(text.contains("NEXT"), "{width}x{height}\n{text}");
+            assert!(text.contains("ENTER / ESC"), "{width}x{height}\n{text}");
+        }
+    }
 
     #[test]
     fn truncation_ends_on_a_word_boundary() {

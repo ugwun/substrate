@@ -353,8 +353,9 @@ fn format_status_line(status: &StatusSnapshot, planet: Option<&PlanetSnapshot>) 
         active_ops.push((
             ext.remaining_ms,
             format!(
-                "{} → {} {}s",
+                "{} {} {} {}s",
                 planet.extractor.designation,
+                format!("{:?}", ext.phase).to_lowercase(),
                 region_label(&ext.target_region_id),
                 ext.remaining_ms.div_ceil(1_000)
             ),

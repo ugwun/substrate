@@ -273,10 +273,11 @@ fn render_blueprint_panel(
         ])
     };
 
+    let banner_width = usize::from(chunks[2].width);
     let status_banner = if selected_extractor {
-        extractor_status_banner(app, planet, now)
+        extractor_status_banner(app, planet, now, banner_width)
     } else {
-        scout_status_banner(app, planet, now)
+        scout_status_banner(app, planet, now, banner_width)
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -289,47 +290,102 @@ fn render_blueprint_panel(
     );
 }
 
-fn scout_status_banner(app: &App, planet: &PlanetSnapshot, now: Instant) -> String {
+/// The longest candidate that fits `width` cells; candidates run from most to least detailed.
+fn first_fit(candidates: Vec<String>, width: usize) -> String {
+    let fallback = candidates.last().cloned().unwrap_or_default();
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.chars().count() <= width)
+        .unwrap_or_else(|| fallback.chars().take(width).collect())
+}
+
+fn scout_status_banner(app: &App, planet: &PlanetSnapshot, now: Instant, width: usize) -> String {
     let region = region_name(planet, &planet.scout.region_id);
     if let Some(mission) = &planet.active_mission {
         let target = region_name(planet, &mission.target_region_id);
-        let remaining = if mission.phase == ScoutState::Holding {
-            "HOLDING ON STATION".to_owned()
+        let id = mission.mission_id;
+        let phase = format!("{:?}", mission.phase).to_uppercase();
+        if mission.phase == ScoutState::Holding {
+            first_fit(
+                vec![
+                    format!("MISSION #{id:03} // {phase} // {target} // HOLDING ON STATION"),
+                    format!("#{id:03} {phase} // {target} // ON STATION"),
+                    format!("#{id:03} {phase} {target}"),
+                    format!("{phase} {target}"),
+                ],
+                width,
+            )
         } else {
-            let ms = app.display_remaining_ms(mission.remaining_ms, now);
-            format!("{}s REMAINING", ms.div_ceil(1_000))
-        };
-        format!(
-            "MISSION #{:03} // {:?} // {target} // {remaining}",
-            mission.mission_id, mission.phase
-        )
-        .to_uppercase()
+            let secs = app
+                .display_remaining_ms(mission.remaining_ms, now)
+                .div_ceil(1_000);
+            first_fit(
+                vec![
+                    format!("MISSION #{id:03} // {phase} // {target} // {secs}s REMAINING"),
+                    format!("#{id:03} {phase} // {target} // {secs}s"),
+                    format!("#{id:03} {phase} {target} {secs}s"),
+                    format!("{target} {secs}s"),
+                ],
+                width,
+            )
+        }
     } else {
-        format!("STATUS // READY AT {region}").to_uppercase()
+        first_fit(
+            vec![
+                format!("STATUS // READY AT {region}"),
+                format!("READY AT {region}"),
+                "READY".to_owned(),
+            ],
+            width,
+        )
     }
 }
 
-fn extractor_status_banner(app: &App, planet: &PlanetSnapshot, now: Instant) -> String {
+fn extractor_status_banner(
+    app: &App,
+    planet: &PlanetSnapshot,
+    now: Instant,
+    width: usize,
+) -> String {
     if let Some(mission) = &planet.active_extraction {
         let target = region_name(planet, &mission.target_region_id);
-        let ms = app.display_remaining_ms(mission.remaining_ms, now);
-        format!(
-            "MISSION #{:03} // {:?} // {target} // {}s REMAINING",
-            mission.mission_id,
-            mission.phase,
-            ms.div_ceil(1_000)
+        let id = mission.mission_id;
+        let phase = format!("{:?}", mission.phase).to_uppercase();
+        let secs = app
+            .display_remaining_ms(mission.remaining_ms, now)
+            .div_ceil(1_000);
+        first_fit(
+            vec![
+                format!("MISSION #{id:03} // {phase} // {target} // {secs}s REMAINING"),
+                format!("#{id:03} {phase} // {target} // {secs}s"),
+                format!("#{id:03} {phase} {target} {secs}s"),
+                format!("{target} {secs}s"),
+            ],
+            width,
         )
-        .to_uppercase()
     } else if planet.extractor.state == ExtractorState::Rebuilding {
-        let ms = app.display_remaining_ms(planet.extractor.rebuild_remaining_ms, now);
-        format!(
-            "STATUS // REBUILDING {} // {}s REMAINING",
-            planet.extractor.loadout.title(),
-            ms.div_ceil(1_000)
+        let secs = app
+            .display_remaining_ms(planet.extractor.rebuild_remaining_ms, now)
+            .div_ceil(1_000);
+        let rig = planet.extractor.loadout.title().to_uppercase();
+        first_fit(
+            vec![
+                format!("STATUS // REBUILDING {rig} // {secs}s REMAINING"),
+                format!("REBUILDING {rig} // {secs}s"),
+                format!("REBUILDING {secs}s"),
+            ],
+            width,
         )
-        .to_uppercase()
     } else {
-        format!("STATUS // READY // {}", planet.extractor.loadout.title()).to_uppercase()
+        let rig = planet.extractor.loadout.title().to_uppercase();
+        first_fit(
+            vec![
+                format!("STATUS // READY // {rig}"),
+                format!("READY // {rig}"),
+                "READY".to_owned(),
+            ],
+            width,
+        )
     }
 }
 
@@ -550,14 +606,19 @@ fn render_telemetry_panel(
     // cue counts real rendered rows.
     let lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
     let total_lines = lines.len();
-    let title_str = if total_lines > inner_h {
-        if options.ascii {
-            " TELEMETRY & LOADOUT [PgDn] "
-        } else {
-            " TELEMETRY & LOADOUT [PgDn ▼] "
-        }
-    } else {
-        " TELEMETRY & LOADOUT "
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    app.scroll_limits
+        .probe_panel
+        .set(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+    let scroll = usize::from(app.probe_panel_scroll).min(max_scroll);
+    let title_str = match (scroll > 0, scroll < max_scroll, options.ascii) {
+        (false, false, _) => " TELEMETRY & LOADOUT ",
+        (false, true, true) => " TELEMETRY & LOADOUT [PgDn] ",
+        (false, true, false) => " TELEMETRY & LOADOUT [PgDn ▼] ",
+        (true, false, true) => " TELEMETRY & LOADOUT [PgUp] ",
+        (true, false, false) => " TELEMETRY & LOADOUT [PgUp ▲] ",
+        (true, true, true) => " TELEMETRY & LOADOUT [PgUp/PgDn] ",
+        (true, true, false) => " TELEMETRY & LOADOUT [PgUp/PgDn ▲▼] ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -578,11 +639,7 @@ fn render_telemetry_panel(
         ));
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .scroll((
-                app.probe_panel_scroll
-                    .min(u16::try_from(total_lines.saturating_sub(inner_h)).unwrap_or(u16::MAX)),
-                0,
-            ))
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .style(theme.panel_style())
             .block(block),
         area,
