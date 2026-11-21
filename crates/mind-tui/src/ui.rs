@@ -5,6 +5,7 @@ use crate::{
     },
     globe::{self, GlobeRenderOptions},
     theme::Theme,
+    transmission,
 };
 use mind_core::protocol::{
     BaseModuleKind, EngineEventKind, ExtractorLoadout, ExtractorState, MissionReportOutcome,
@@ -81,6 +82,38 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
     }
     if app.show_return_summary {
         render_return_summary(frame, area, app, options, theme);
+    } else if let (Some(planet), Some((index, record))) =
+        (&app.planet, app.active_transmission_record())
+    {
+        let source = record.region_id.as_ref().map_or_else(
+            || "Planetary context".to_owned(),
+            |region_id| region_designation(planet, region_id).to_owned(),
+        );
+        let elapsed = app
+            .transmission_opened_at
+            .map_or(std::time::Duration::from_secs(10), |opened| {
+                now.saturating_duration_since(opened)
+            });
+        transmission::render_discovery_transmission(
+            frame,
+            area,
+            transmission::DiscoveryTransmissionView {
+                record,
+                record_index: index,
+                total_records: planet.archive.records.len(),
+                source_label: &source,
+                campaign: &planet.campaign,
+                elapsed,
+                force_complete: app.transmission_revealed,
+                phase: app.globe_phase,
+                options,
+                theme,
+            },
+        );
+    } else if app.show_chapter_card {
+        if let Some(planet) = &app.planet {
+            transmission::render_chapter_card(frame, area, &planet.campaign, options, theme);
+        }
     }
     if app.show_help {
         render_help(frame, area, options, theme);
@@ -98,8 +131,9 @@ fn render_planet(
     theme: Theme,
     now: Instant,
 ) {
+    let header_height = if area.height >= 24 { 6 } else { 5 };
     let rows = Layout::vertical([
-        Constraint::Length(5),
+        Constraint::Length(header_height),
         Constraint::Min(7),
         Constraint::Length(2),
     ])
@@ -253,6 +287,14 @@ fn render_planet(
             KeyHint {
                 key: "V",
                 label: "local field",
+            },
+            KeyHint {
+                key: "N",
+                label: "lead",
+            },
+            KeyHint {
+                key: "C",
+                label: "chapter",
             },
             KeyHint {
                 key: "TAB",
@@ -1190,6 +1232,15 @@ fn render_archive(
             field_line("MEDIUM", record.medium.to_uppercase(), theme),
             field_line("SOURCE", source, theme),
             Line::from(""),
+        ];
+        detail_lines.extend(transmission::record_diagram(
+            &record.record_id,
+            options.ascii,
+            app.globe_phase,
+            theme,
+        ));
+        detail_lines.extend([
+            Line::from(""),
             section_line("OBSERVATION", theme),
             Line::styled(
                 terminal_text(&record.observation, options.ascii),
@@ -1206,7 +1257,7 @@ fn render_archive(
                 "ARCHIVE STATUS // permanent knowledge",
                 Style::default().fg(theme.success),
             ),
-        ];
+        ]);
         if let Some(experiment) = &planet.archive.experiment {
             let state = if experiment.active {
                 if experiment.running {
@@ -1452,18 +1503,52 @@ fn render_return_summary(
     let Some(planet) = &app.planet else {
         return;
     };
-    let width = area.width.saturating_sub(8).clamp(36, 84);
-    let height = (planet.unreviewed_activity.len() as u16 + 13)
-        .min(area.height.saturating_sub(4))
-        .max(10);
+    let archived_evidence: Vec<&mind_core::protocol::ArchiveRecordSnapshot> = planet
+        .unreviewed_activity
+        .iter()
+        .filter_map(|activity| activity.archive_record_id.as_deref())
+        .filter_map(|record_id| {
+            planet
+                .archive
+                .records
+                .iter()
+                .find(|record| record.record_id == record_id)
+        })
+        .collect();
+    let width = area.width.saturating_sub(6).clamp(38, 86);
+    let extra_evidence_lines = if archived_evidence.is_empty() { 0 } else { 5 };
+    let height = (planet.unreviewed_activity.len() as u16 + 15 + extra_evidence_lines)
+        .min(area.height.saturating_sub(2))
+        .max(12);
     let popup = centered_rect(width, height, area);
     frame.render_widget(Clear, popup);
     let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "CHAPTER {} // {} ",
+                    transmission::roman_chapter(planet.campaign.chapter_number),
+                    planet.campaign.title.to_uppercase()
+                ),
+                Style::default().fg(theme.cyan_bright).bold(),
+            ),
+            Span::styled(
+                format!(
+                    "[{}]",
+                    transmission::step_pips(&planet.campaign, options.ascii)
+                ),
+                Style::default().fg(theme.amber),
+            ),
+        ]),
+        Line::styled(
+            terminal_text(&planet.campaign.question, options.ascii),
+            Style::default().fg(theme.text_strong),
+        ),
+        Line::raw(""),
         Line::styled(
             "While the daemon remained active:",
             Style::default().fg(theme.text).bold(),
         ),
-        Line::raw(""),
     ];
     if planet.unreviewed_activity.is_empty() {
         lines.push(Line::styled(
@@ -1475,7 +1560,7 @@ fn render_return_summary(
             .unreviewed_activity
             .iter()
             .rev()
-            .take(height.saturating_sub(7) as usize)
+            .take(height.saturating_sub(11) as usize)
             .rev()
         {
             lines.push(Line::from(vec![
@@ -1486,6 +1571,21 @@ fn render_return_summary(
                 Span::styled(record.summary.clone(), Style::default().fg(theme.text)),
             ]));
         }
+    }
+    if let Some(evidence) = archived_evidence.last() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(
+                "NEW EVIDENCE RECORDED // {} ({})",
+                evidence.title.to_uppercase(),
+                evidence.medium.to_uppercase()
+            ),
+            Style::default().fg(theme.amber).bold(),
+        ));
+        lines.push(Line::styled(
+            terminal_text(&evidence.observation, options.ascii),
+            Style::default().fg(theme.text_strong),
+        ));
     }
     let raw = planet.raw_inventory;
     let refined = planet.refined_inventory;
@@ -1512,17 +1612,19 @@ fn render_return_summary(
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "NEXT  Planet: inspect a reachable region and choose its local operation.",
-        Style::default().fg(theme.text),
+        format!(
+            "NEXT  {}",
+            terminal_text(&planet.campaign.next_action, options.ascii)
+        ),
+        Style::default().fg(theme.text_strong),
     ));
-    lines.push(Line::styled(
-        "      Overview: review active work, stores, and visible blockers.",
-        Style::default().fg(theme.text),
-    ));
-    if planet.research.unlocked {
+    if !planet.archive.unpresented_record_ids.is_empty() {
         lines.push(Line::styled(
-            "      Research: review analysis, active work, and available profiles.",
-            Style::default().fg(theme.text),
+            format!(
+                "      {} full discovery transmission(s) queued next.",
+                planet.archive.unpresented_record_ids.len()
+            ),
+            Style::default().fg(theme.cyan_bright),
         ));
     }
     lines.push(Line::styled(
@@ -1622,28 +1724,57 @@ fn render_workspace_header(
         navigation.extend([tab(Workspace::SystemMap, "SYSTEM MAP"), Span::raw(" ")]);
     }
     navigation.push(tab(Workspace::System, "SYSTEM"));
-    let mut lines = vec![
-        Line::from(navigation),
+    if let Some(planet) = &app.planet {
+        let pips = transmission::step_pips(&planet.campaign, options.ascii);
+        navigation.extend([
+            Span::styled("  //  ", Style::default().fg(theme.faint)),
+            Span::styled(
+                format!(
+                    "CH {} {} ",
+                    transmission::roman_chapter(planet.campaign.chapter_number),
+                    planet.campaign.title
+                ),
+                Style::default().fg(theme.amber).bold(),
+            ),
+            Span::styled(format!("[{pips}]"), Style::default().fg(theme.cyan_bright)),
+        ]);
+    }
+    let second_line = if let Some(planet) = &app.planet {
+        Line::from(vec![
+            Span::styled(" QUESTION // ", Style::default().fg(theme.cyan).bold()),
+            Span::styled(
+                terminal_text(&planet.campaign.question, options.ascii),
+                Style::default().fg(theme.text_strong).bold(),
+            ),
+        ])
+    } else {
         Line::from(vec![
             Span::styled(" OBJECTIVE // ", Style::default().fg(theme.amber).bold()),
             Span::styled(
-                app.planet
-                    .as_ref()
-                    .map_or("Awaiting planetary state", |planet| {
-                        planet.objective.title.as_str()
-                    }),
+                "Awaiting planetary state",
                 Style::default().fg(theme.text_strong).bold(),
             ),
-            Span::styled(" // ", Style::default().fg(theme.faint)),
-            Span::styled(
-                app.planet
-                    .as_ref()
-                    .map_or("", |planet| planet.objective.guidance.as_str()),
-                Style::default().fg(theme.muted),
-            ),
-        ]),
-    ];
+        ])
+    };
+    let mut lines = vec![Line::from(navigation), second_line];
     if active == Workspace::Planet {
+        if area.height >= 6 {
+            if let Some(planet) = &app.planet {
+                let mut next_spans = vec![Span::styled(
+                    " NEXT // ",
+                    Style::default().fg(theme.amber).bold(),
+                )];
+                if let Some(key) = &planet.campaign.next_action_key {
+                    next_spans.push(Span::styled(format!(" {key} "), theme.key_style()));
+                    next_spans.push(Span::raw(" "));
+                }
+                next_spans.push(Span::styled(
+                    terminal_text(&planet.campaign.next_action, options.ascii),
+                    Style::default().fg(theme.text),
+                ));
+                lines.push(Line::from(next_spans));
+            }
+        }
         lines.push(planet_store_header_line(
             app.planet.as_ref(),
             area.width,
@@ -4047,6 +4178,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme:
         key_line("CTRL-C", "detach immediately; daemon keeps running", theme),
         key_line("R", "reconnect when disconnected", theme),
         key_line("TAB", "cycle workspace", theme),
+        key_line("N", "focus current campaign lead on the globe", theme),
+        key_line("C", "open current chapter briefing", theme),
         key_line("? / ESC", "close help", theme),
         Line::from(""),
         section_line("PLANET", theme),
@@ -4547,6 +4680,7 @@ mod tests {
         app.apply_snapshot(status(true), Instant::now());
         app.apply_planet(planet, Instant::now());
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.local_view = true;
         let ascii = screen(
             &app,
@@ -4616,6 +4750,7 @@ mod tests {
         app.apply_snapshot(engine.status(), now);
         app.apply_planet(engine.planet().unwrap(), now);
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         let unknown = engine
             .planet()
             .unwrap()
@@ -4708,6 +4843,7 @@ mod tests {
         app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
         app.connected();
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.workspace = Workspace::Overview;
         let overview = screen(
             &app,
@@ -4720,8 +4856,8 @@ mod tests {
         );
         assert!(overview.contains("PLANETARY ACTIVITY"));
         assert!(overview.contains("PLANET STATUS"));
-        assert!(overview.contains("MATERIALS"));
-        assert!(overview.contains("OBJECTIVE"));
+        assert!(overview.contains("QUESTION //"));
+        assert!(overview.contains("CH I Retained Interval"));
         assert!(overview.contains("BALANCED"), "{overview}");
 
         app.workspace = Workspace::Planet;
@@ -4766,6 +4902,7 @@ mod tests {
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(engine.planet().unwrap(), Instant::now());
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         let planet = screen(
             &app,
             80,
@@ -4854,6 +4991,7 @@ mod tests {
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(engine.planet().unwrap(), Instant::now());
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.workspace = Workspace::Overview;
         let output = screen(
             &app,
@@ -4897,6 +5035,7 @@ mod tests {
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(planet, Instant::now());
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.workspace = Workspace::Overview;
 
         let output = screen(
@@ -4953,6 +5092,7 @@ mod tests {
         app.apply_planet(state.planet_snapshot().unwrap(), Instant::now());
         app.connected();
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.selected_region_id = Some(target.id.clone());
         let planet = screen(
             &app,
@@ -5114,6 +5254,7 @@ mod tests {
         app.apply_planet(planet, Instant::now());
         app.connected();
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.workspace = Workspace::Research;
 
         let output = screen(
@@ -5151,6 +5292,7 @@ mod tests {
         app.apply_planet(planet, Instant::now());
         app.connected();
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         app.workspace = Workspace::Archive;
 
         let output = screen(
@@ -5190,6 +5332,7 @@ mod tests {
         app.apply_planet(planet, Instant::now());
         app.connected();
         app.show_return_summary = false;
+        app.clear_active_transmission_locally();
         assert_eq!(app.workspace, Workspace::SystemMap);
 
         let unicode = screen(
@@ -5293,5 +5436,129 @@ mod tests {
         assert!(stopping.contains("STOPPING SUBSTRATE"));
         assert!(stopping.contains("stopping all"));
         assert!(stopping.contains("services"));
+    }
+
+    #[test]
+    fn discovery_transmission_reveals_diagram_observation_and_interpretation_in_unicode_and_ascii()
+    {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        app.transmission_revealed = true;
+
+        let unicode = screen(
+            &app,
+            104,
+            34,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            unicode.contains("TRANSMISSION // RECORD 01 OF 01"),
+            "{unicode}"
+        );
+        assert!(unicode.contains("RETAINED INTERVAL"), "{unicode}");
+        assert!(unicode.contains("OBSERVATION //"), "{unicode}");
+        assert!(unicode.contains("CURRENT INTERPRETATION //"), "{unicode}");
+        assert!(unicode.contains("moving away from shelter"), "{unicode}");
+        assert!(unicode.contains("file permanently in Archive"), "{unicode}");
+
+        let ascii = screen(
+            &app,
+            78,
+            26,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(ascii.is_ascii());
+        assert!(ascii.contains("TRANSMISSION // RECORD 01 OF 01"), "{ascii}");
+        assert!(ascii.contains("RETAINED INTERVAL"), "{ascii}");
+        assert!(ascii.contains("OBSERVATION //"), "{ascii}");
+        assert!(ascii.contains("CURRENT INTERPRETATION //"), "{ascii}");
+    }
+
+    #[test]
+    fn chapter_card_and_header_present_foreground_question_pips_and_next_step() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+
+        let header_frame = screen(
+            &app,
+            132,
+            32,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            header_frame.contains("CH I Retained Interval"),
+            "{header_frame}"
+        );
+        assert!(header_frame.contains("QUESTION //"), "{header_frame}");
+        assert!(header_frame.contains("NEXT //"), "{header_frame}");
+
+        app.toggle_chapter_card();
+        let card = screen(
+            &app,
+            96,
+            28,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(card.is_ascii());
+        assert!(
+            card.contains("CHAPTER I OF 5 // RETAINED INTERVAL"),
+            "{card}"
+        );
+        assert!(card.contains("OPEN QUESTION //"), "{card}");
+        assert!(card.contains("CHAPTER STEPS //"), "{card}");
+    }
+
+    #[test]
+    fn return_summary_quotes_newly_recorded_archive_evidence_verbatim() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.connected();
+        // Initial attach after awakening has observation_001 in unreviewed_activity with archive_record_id.
+        let output = screen(
+            &app,
+            100,
+            36,
+            RenderOptions {
+                ascii: true,
+                no_color: true,
+            },
+        );
+        assert!(output.is_ascii());
+        assert!(output.contains("RETURN SUMMARY"), "{output}");
+        assert!(
+            output.contains("NEW EVIDENCE RECORDED // RETAINED INTERVAL"),
+            "{output}"
+        );
+        assert!(output.contains("moving away from shelter"), "{output}");
+        assert!(
+            output.contains("1 full discovery transmission(s) queued next"),
+            "{output}"
+        );
     }
 }

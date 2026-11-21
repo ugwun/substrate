@@ -1,9 +1,9 @@
 use crate::connection::PlanetActionKind;
 use mind_core::protocol::{
-    BaseModuleKind, DiagnosticPulseResult, EngineEvent, ExtractorLoadout, ExtractorState,
-    NewPlaythroughResult, OnboardingCompletionResult, OperationalProfile, PlanetActionResult,
-    PlanetSnapshot, RegionSnapshot, ResearchProject, ResourceStock, ScoutState, StatusSnapshot,
-    SubregionKnowledge, SubregionSnapshot,
+    ArchiveRecordSnapshot, BaseModuleKind, DiagnosticPulseResult, EngineEvent, ExtractorLoadout,
+    ExtractorState, NewPlaythroughResult, OnboardingCompletionResult, OperationalProfile,
+    PlanetActionResult, PlanetSnapshot, RegionSnapshot, ResearchProject, ResourceStock, ScoutState,
+    StatusSnapshot, SubregionKnowledge, SubregionSnapshot,
 };
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
@@ -126,6 +126,10 @@ pub struct App {
     pub research_selection: usize,
     pub archive_selection: usize,
     pub show_return_summary: bool,
+    pub active_transmission_id: Option<String>,
+    pub transmission_opened_at: Option<Instant>,
+    pub transmission_revealed: bool,
+    pub show_chapter_card: bool,
     pub pending_action: Option<ContextAction>,
     pub globe_yaw: f64,
     pub globe_pitch: f64,
@@ -135,6 +139,7 @@ pub struct App {
     last_animation_frame: Instant,
     globe_target_yaw: f64,
     globe_target_pitch: f64,
+    last_seen_chapter: Option<u8>,
 }
 
 impl Default for App {
@@ -167,6 +172,10 @@ impl Default for App {
             research_selection: 0,
             archive_selection: 0,
             show_return_summary: false,
+            active_transmission_id: None,
+            transmission_opened_at: None,
+            transmission_revealed: false,
+            show_chapter_card: false,
             pending_action: None,
             globe_yaw: 0.0,
             globe_pitch: 0.0,
@@ -176,6 +185,7 @@ impl Default for App {
             last_animation_frame: now,
             globe_target_yaw: 0.0,
             globe_target_pitch: 0.0,
+            last_seen_chapter: None,
         }
     }
 }
@@ -268,11 +278,23 @@ impl App {
             self.local_view = false;
             self.selected_subregion_slot = 0;
         }
+        let chapter_advanced = self
+            .last_seen_chapter
+            .is_some_and(|previous| planet.campaign.chapter_number > previous);
+        self.last_seen_chapter = Some(planet.campaign.chapter_number);
+        let next_unpresented = planet.archive.unpresented_record_ids.first().cloned();
+        if next_unpresented != self.active_transmission_id {
+            self.active_transmission_id = next_unpresented.clone();
+            self.transmission_opened_at = next_unpresented.as_ref().map(|_| received_at);
+            self.transmission_revealed = false;
+        }
         self.planet = Some(planet);
         if system_map_became_available {
             self.workspace = Workspace::SystemMap;
             self.pending_action = None;
-            self.notice = Some("SYSTEM MAP AVAILABLE // DEMO HORIZON REACHED".into());
+            self.notice = Some("SOLAR HORIZON RESOLVED // SYSTEM MAP OPEN".into());
+        } else if chapter_advanced && self.active_transmission_id.is_none() {
+            self.show_chapter_card = true;
         }
         if initial_planet
             && self
@@ -382,15 +404,18 @@ impl App {
             .min(MAX_FRAME_DELTA)
             .as_secs_f64();
         self.last_animation_frame = now;
+        self.globe_phase = (self.globe_phase + elapsed * 0.42).rem_euclid(1.0);
         if self.workspace != Workspace::Planet
             || self.show_help
+            || self.show_return_summary
+            || self.show_chapter_card
+            || self.active_transmission_id.is_some()
             || self.session_menu.is_some()
             || self.pending_action.is_some()
             || !matches!(self.connection, ConnectionState::Connected)
         {
             return;
         }
-        self.globe_phase = (self.globe_phase + elapsed * 0.42).rem_euclid(1.0);
         if now.saturating_duration_since(self.last_input) >= IDLE_DELAY {
             self.globe_yaw = normalize_angle(self.globe_yaw + IDLE_ROTATION_SPEED * elapsed);
             self.globe_pitch = ease(self.globe_pitch, self.globe_target_pitch * 0.45, elapsed);
@@ -834,6 +859,7 @@ impl App {
                 PlanetActionKind::Profile => "OPERATIONAL PROFILE ACTIVATED".into(),
                 PlanetActionKind::Automation => "AUTOMATION UPDATED".into(),
                 PlanetActionKind::Review => "ACTIVITY REVIEWED".into(),
+                PlanetActionKind::ArchivePresentation => "OBSERVATION FILED IN ARCHIVE".into(),
                 PlanetActionKind::LocalSurvey => "LOCAL SURVEY STARTED".into(),
                 PlanetActionKind::BaseProject => "BASE PROJECT STARTED".into(),
                 PlanetActionKind::ModuleMode => "MODULE POWER MODE UPDATED".into(),
@@ -964,11 +990,78 @@ impl App {
 
     pub fn dismiss_return_summary(&mut self) -> Option<u64> {
         self.show_return_summary = false;
+        if self.active_transmission_id.is_some() {
+            self.transmission_opened_at = Some(Instant::now());
+            self.transmission_revealed = false;
+        }
         self.planet
             .as_ref()?
             .unreviewed_activity
             .last()
             .map(|record| record.activity_id)
+    }
+
+    pub fn active_transmission_record(&self) -> Option<(usize, &ArchiveRecordSnapshot)> {
+        if self.show_return_summary {
+            return None;
+        }
+        let record_id = self.active_transmission_id.as_deref()?;
+        let records = &self.planet.as_ref()?.archive.records;
+        records
+            .iter()
+            .enumerate()
+            .find(|(_, record)| record.record_id == record_id)
+    }
+
+    pub fn reveal_or_dismiss_transmission(&mut self, now: Instant) -> Option<String> {
+        let record_id = self.active_transmission_id.clone()?;
+        let elapsed = self
+            .transmission_opened_at
+            .map_or(Duration::from_secs(10), |opened| {
+                now.saturating_duration_since(opened)
+            });
+        if !self.transmission_revealed && elapsed < Duration::from_millis(1_600) {
+            self.transmission_revealed = true;
+            return None;
+        }
+        self.active_transmission_id = None;
+        self.transmission_opened_at = None;
+        self.transmission_revealed = false;
+        Some(record_id)
+    }
+
+    pub fn clear_active_transmission_locally(&mut self) {
+        self.active_transmission_id = None;
+        self.transmission_opened_at = None;
+        self.transmission_revealed = false;
+    }
+
+    pub fn toggle_chapter_card(&mut self) {
+        self.show_chapter_card = !self.show_chapter_card;
+    }
+
+    pub fn focus_campaign_lead(&mut self) -> bool {
+        let Some((lead_id, designation)) = self.planet.as_ref().and_then(|planet| {
+            let lead_id = planet.campaign.lead_region_id.as_ref()?;
+            let designation = planet
+                .regions
+                .iter()
+                .find(|region| &region.id == lead_id)
+                .map_or(lead_id.as_str(), |region| region.designation.as_str())
+                .to_owned();
+            Some((lead_id.clone(), designation))
+        }) else {
+            self.notice = Some("NO SPECIFIC REGION LEAD // CHECK CHAPTER GUIDANCE".into());
+            return false;
+        };
+        self.workspace = Workspace::Planet;
+        self.selected_region_id = Some(lead_id);
+        self.local_view = false;
+        self.pending_action = None;
+        self.region_panel_scroll = 0;
+        self.focus_selected_region(false);
+        self.notice = Some(format!("FOCUSED CAMPAIGN LEAD // {designation}"));
+        true
     }
 
     pub fn move_archive_selection(&mut self, delta: isize) {
@@ -1249,11 +1342,13 @@ mod tests {
     fn globe_waits_thirty_seconds_then_rotates_without_changing_selection() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
         let start = Instant::now();
         let mut app = App::default();
         app.apply_snapshot(engine.status(), start);
         app.apply_planet(engine.planet().unwrap(), start);
         app.connected();
+        app.show_return_summary = false;
         app.last_input = start;
         app.last_animation_frame = start;
 

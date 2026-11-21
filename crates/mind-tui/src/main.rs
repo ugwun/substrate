@@ -154,6 +154,31 @@ async fn handle_key(
         }
         return Ok(false);
     }
+    if app.active_transmission_record().is_some() {
+        match key.code {
+            KeyCode::Char(' ') => {
+                app.transmission_revealed = true;
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                if let Some(record_id) =
+                    app.reveal_or_dismiss_transmission(std::time::Instant::now())
+                {
+                    commands
+                        .send(ConnectionCommand::AcknowledgeArchivePresentation(record_id))
+                        .await
+                        .context("connection worker stopped")?;
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+    if app.show_chapter_card {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('c')) {
+            app.show_chapter_card = false;
+        }
+        return Ok(false);
+    }
     if app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') => app.show_help = false,
@@ -315,6 +340,12 @@ async fn handle_key(
             } else {
                 app.enter_local_view();
             }
+        }
+        KeyCode::Char('n') if !app.local_view => {
+            app.focus_campaign_lead();
+        }
+        KeyCode::Char('c') if !(app.workspace == Workspace::Planet && app.local_view) => {
+            app.toggle_chapter_card();
         }
         KeyCode::Left if app.workspace == Workspace::Planet && app.local_view => {
             app.move_subregion_selection(0, -1);
@@ -801,6 +832,7 @@ mod tests {
     async fn planet_region_keys_send_typed_actions() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
@@ -841,6 +873,7 @@ mod tests {
     async fn extractor_rig_key_sends_typed_configuration() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
@@ -867,6 +900,7 @@ mod tests {
     async fn archive_enter_starts_only_the_visible_typed_experiment() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut planet = engine.planet().unwrap();
         planet.archive.experiment = Some(mind_core::protocol::ArchiveExperimentSnapshot {
             available: true,
@@ -901,6 +935,7 @@ mod tests {
     async fn overview_enter_returns_to_the_selected_operation_region() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let target = engine
             .planet()
             .unwrap()
@@ -933,6 +968,7 @@ mod tests {
     async fn shifted_arrows_jump_across_the_expanded_grid() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
@@ -957,6 +993,7 @@ mod tests {
     async fn confirmed_local_operations_send_only_typed_commands() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
@@ -1011,5 +1048,79 @@ mod tests {
             Some(ConnectionCommand::SetBaseModuleEnabled(site, BaseModuleKind::Communications, false))
                 if site == "region_082_site_2"
         ));
+    }
+
+    #[tokio::test]
+    async fn transmission_keys_reveal_then_acknowledge_and_lead_focus_jumps_globe() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([3, 3, 3]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        assert!(app.active_transmission_record().is_some());
+
+        let (commands, mut received) = mpsc::channel(4);
+        // First Enter snaps typewriter reveal to complete without dismissing yet.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(app.transmission_revealed);
+        assert!(received.try_recv().is_err());
+
+        // Second Enter acknowledges the transmission via typed IPC command.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::AcknowledgeArchivePresentation(id)) if id == "observation_001"
+        ));
+        assert!(app.active_transmission_record().is_none());
+
+        // 'c' toggles chapter briefing card.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(app.show_chapter_card);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(!app.show_chapter_card);
+
+        // 'n' jumps globe selection to the current campaign lead region.
+        let lead = app
+            .planet
+            .as_ref()
+            .unwrap()
+            .campaign
+            .lead_region_id
+            .clone()
+            .unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.selected_region_id.as_deref(), Some(lead.as_str()));
     }
 }

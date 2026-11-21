@@ -33,6 +33,7 @@ pub enum ConnectionCommand {
     SetExtractionRoute(String),
     ClearExtractionRoute,
     AcknowledgeActivity(u64),
+    AcknowledgeArchivePresentation(String),
     StartNewPlaythrough,
     StopDaemon,
     Retry,
@@ -51,6 +52,7 @@ pub enum PlanetActionKind {
     Profile,
     Automation,
     Review,
+    ArchivePresentation,
     LocalSurvey,
     BaseProject,
     ModuleMode,
@@ -419,6 +421,18 @@ pub async fn run(
                             match client.acknowledge_activity(through_activity_id).await {
                                 Ok(result) => {
                                     if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::Review, result)).await.is_err() { return; }
+                                    match client.planet().await {
+                                        Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
+                                        Err(error) => break error.to_string(),
+                                    }
+                                }
+                                Err(error) => break error.to_string(),
+                            }
+                        }
+                        Some(ConnectionCommand::AcknowledgeArchivePresentation(record_id)) => {
+                            match client.acknowledge_archive_presentation(record_id).await {
+                                Ok(result) => {
+                                    if updates.send(ConnectionUpdate::PlanetActionCompleted(PlanetActionKind::ArchivePresentation, result)).await.is_err() { return; }
                                     match client.planet().await {
                                         Ok(planet) => if updates.send(ConnectionUpdate::Planet(Box::new(planet))).await.is_err() { return; },
                                         Err(error) => break error.to_string(),
