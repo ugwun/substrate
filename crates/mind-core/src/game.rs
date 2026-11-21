@@ -631,22 +631,36 @@ impl GameState {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), GameError> {
+        #[derive(Serialize)]
+        struct SaveEnvelopeRef<'a> {
+            schema_version: u32,
+            saved_at: DateTime<Utc>,
+            state: &'a GameState,
+        }
         let parent = path.parent().ok_or(GameError::MissingParent)?;
         let mut temporary = NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(
-            &mut temporary,
-            &SaveEnvelope {
-                schema_version: SAVE_SCHEMA_VERSION,
-                saved_at: Utc::now(),
-                state: self.clone(),
-            },
-        )?;
-        temporary.write_all(b"\n")?;
+        {
+            let mut writer = std::io::BufWriter::new(&mut temporary);
+            serde_json::to_writer_pretty(
+                &mut writer,
+                &SaveEnvelopeRef {
+                    schema_version: SAVE_SCHEMA_VERSION,
+                    saved_at: Utc::now(),
+                    state: self,
+                },
+            )?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+        }
         temporary.as_file_mut().sync_all()?;
         temporary
             .persist(path)
             .map_err(|error| GameError::Io(error.error))?;
         Ok(())
+    }
+
+    pub fn planet_revision(&self) -> Option<u64> {
+        self.onboarding_complete.then_some(self.state_revision)
     }
 
     pub fn onboarding(&self) -> OnboardingSnapshot {
@@ -2017,8 +2031,8 @@ impl GameState {
 
     fn refresh_horizon_completion(&mut self) -> bool {
         if self.horizon_reached
-            || !self.horizon_progress().ready
             || !self.has_archive_observation(OBSERVATION_004)
+            || !self.horizon_progress().ready
         {
             return false;
         }

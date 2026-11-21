@@ -165,14 +165,17 @@ async fn sample_process_cpu(engine: Arc<MindEngine>, mut shutdown: watch::Receiv
     let pid = Pid::from_u32(std::process::id());
     let refresh = ProcessRefreshKind::nothing().with_cpu();
     let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                if engine.connected_clients() == 0 {
+                    engine.set_cpu_usage_percent(None);
+                    continue;
+                }
                 system.refresh_processes_specifics(
                     ProcessesToUpdate::Some(&[pid]),
                     true,
@@ -279,18 +282,8 @@ async fn handle_connection(
                         break;
                     }
                 }
-                if let (Some(subscription_id), Some(planet)) = (subscriptions.planet, engine.planet()) {
-                    if subscriptions.planet_revision != Some(planet.revision) {
-                        let revision = planet.revision;
-                        let params = PlanetNotification {
-                            subscription_id,
-                            planet,
-                        };
-                        if write_value(&writer, &notification(method::PLANET_CHANGED, params)).await.is_err() {
-                            break;
-                        }
-                        subscriptions.planet_revision = Some(revision);
-                    }
+                if !publish_planet_if_changed(&writer, &engine, &mut subscriptions).await {
+                    break;
                 }
             }
             changed = shutdown_rx.changed() => {
@@ -677,11 +670,46 @@ async fn dispatch_frame(
     if write_value(writer, &response).await.is_err() {
         return true;
     }
+    if !shutdown && !publish_planet_if_changed(writer, engine, subscriptions).await {
+        return true;
+    }
     if shutdown {
         engine.begin_shutdown();
         let _ = shutdown_tx.send(true);
     }
     shutdown
+}
+
+async fn publish_planet_if_changed(
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    engine: &Arc<MindEngine>,
+    subscriptions: &mut ClientSubscriptions,
+) -> bool {
+    let Some(subscription_id) = subscriptions.planet else {
+        return true;
+    };
+    let Some(current_revision) = engine.planet_revision() else {
+        return true;
+    };
+    if subscriptions.planet_revision == Some(current_revision) {
+        return true;
+    }
+    let Some(planet) = engine.planet() else {
+        return true;
+    };
+    let revision = planet.revision;
+    let params = PlanetNotification {
+        subscription_id,
+        planet,
+    };
+    if write_value(writer, &notification(method::PLANET_CHANGED, params))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    subscriptions.planet_revision = Some(revision);
+    true
 }
 
 async fn write_value(writer: &Arc<Mutex<OwnedWriteHalf>>, value: &Value) -> std::io::Result<()> {

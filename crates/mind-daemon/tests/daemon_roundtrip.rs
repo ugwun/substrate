@@ -387,3 +387,59 @@ async fn mcp_port_conflict_aborts_before_runtime_metadata() {
     assert!(error.to_string().contains("failed to bind MCP listener"));
     assert!(RuntimeMetadata::read(&runtime_file).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn mutating_planet_action_pushes_planet_changed_immediately() {
+    let temp = TempDir::new().unwrap();
+    let paths = paths(&temp);
+    let config = Config {
+        address: "127.0.0.1:0".parse().unwrap(),
+        mcp_address: "127.0.0.1:0".parse().unwrap(),
+        tick_rate_hz: 20,
+        status_publish_interval_ms: 5_000,
+    };
+    let runtime_file = paths.runtime_file.clone();
+    let daemon = tokio::spawn(mind_daemon::run(config, paths));
+    let metadata = wait_for_metadata(&runtime_file).await;
+
+    let mut client = IpcClient::connect(metadata.address).await.unwrap();
+    assert!(client.complete_onboarding([2, 2, 2]).await.unwrap().ok);
+    let _sub = client.subscribe_planet().await.unwrap();
+    let target = client
+        .planet()
+        .await
+        .unwrap()
+        .regions
+        .into_iter()
+        .find(|region| region.hop_distance_from_core == 1)
+        .unwrap()
+        .id;
+
+    let started = std::time::Instant::now();
+    assert!(client.deploy_scout(target.clone()).await.unwrap().ok);
+
+    // Must arrive immediately instead of waiting for the 5,000 ms publish interval.
+    let notification = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            match client.next_notification().await.unwrap() {
+                mind_core::ipc::IpcNotification::Planet(note) => return note.planet,
+                mind_core::ipc::IpcNotification::Status(_) => continue,
+            }
+        }
+    })
+    .await
+    .expect("expected immediate PLANET_CHANGED push after deploy_scout");
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(
+        notification.active_mission.unwrap().target_region_id,
+        target
+    );
+
+    assert!(client.shutdown().await.unwrap());
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), daemon)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

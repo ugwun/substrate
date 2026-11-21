@@ -380,6 +380,14 @@ impl MindEngine {
         self.game().planet_snapshot()
     }
 
+    pub fn planet_revision(&self) -> Option<u64> {
+        self.game().planet_revision()
+    }
+
+    pub fn connected_clients(&self) -> u32 {
+        self.clients.load(Ordering::Relaxed)
+    }
+
     pub fn deploy_scout(&self, region_id: &str) -> PlanetActionResult {
         let _persistence_write = self
             .game_state_file
