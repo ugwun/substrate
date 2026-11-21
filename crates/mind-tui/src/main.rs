@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
-use futures_util::{FutureExt, StreamExt};
+use futures_util::StreamExt;
 use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_core::protocol::BaseModuleKind;
 use mind_tui::{
@@ -9,10 +9,17 @@ use mind_tui::{
         App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
         Workspace,
     },
+    boot::BootMode,
     connection::{self, ConnectionCommand, ConnectionUpdate},
     ui::{self, RenderOptions},
 };
-use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    env,
+    io::{self, Write},
+    net::SocketAddr,
+    path::PathBuf,
+    time::Duration,
+};
 use tokio::{sync::mpsc, time};
 
 #[derive(Debug, Parser)]
@@ -30,6 +37,15 @@ struct Args {
     truecolor: bool,
     #[arg(long, env = "SUBSTRATE_ANSI16")]
     ansi16: bool,
+    /// Opt-in: update the terminal window/tab title with live mission status.
+    #[arg(long, env = "SUBSTRATE_TITLE")]
+    title: bool,
+    /// Opt-in: ring the terminal bell when a mission or discovery completes.
+    #[arg(long, env = "SUBSTRATE_BELL")]
+    bell: bool,
+    /// Skip the startup session menu and jump directly into the live dashboard.
+    #[arg(long, env = "SUBSTRATE_RESUME")]
+    resume: bool,
 }
 
 #[tokio::main]
@@ -53,10 +69,17 @@ async fn run() -> Result<()> {
         ascii: args.ascii || term_is_dumb,
         no_color: args.no_color || no_color_env || term_is_dumb,
     };
-    let ansi16 = !options.no_color
-        && !term_is_dumb
-        && !args.truecolor
-        && (args.ansi16 || !supports_truecolor());
+    let (ansi16, ansi256) = if options.no_color || term_is_dumb || args.truecolor {
+        (false, false)
+    } else if args.ansi16 {
+        (true, false)
+    } else if supports_truecolor() {
+        (false, false)
+    } else if supports_256color() {
+        (false, true)
+    } else {
+        (true, false)
+    };
     let enable_boot_intro = !term_is_dumb;
 
     let (command_tx, command_rx) = mpsc::channel(8);
@@ -69,9 +92,16 @@ async fn run() -> Result<()> {
         &mut update_rx,
         options,
         ansi16,
+        ansi256,
         enable_boot_intro,
+        args.title && !term_is_dumb,
+        args.bell && !term_is_dumb,
+        args.resume,
     )
     .await;
+    if args.title && !term_is_dumb {
+        let _ = write_osc_title("");
+    }
     let _ = command_tx.send(ConnectionCommand::Detach).await;
     let _ = time::timeout(Duration::from_secs(1), connection_task).await;
     let restore_result = ratatui::try_restore().context("failed to restore terminal");
@@ -100,7 +130,6 @@ fn supports_truecolor() -> bool {
         let lower = value.to_ascii_lowercase();
         lower.contains("truecolor")
             || lower.contains("24bit")
-            || lower.contains("256color")
             || lower.contains("kitty")
             || lower.contains("alacritty")
             || lower.contains("wezterm")
@@ -108,23 +137,50 @@ fn supports_truecolor() -> bool {
     })
 }
 
+fn supports_256color() -> bool {
+    env::var("TERM").is_ok_and(|value| value.to_ascii_lowercase().contains("256color"))
+}
+
+fn write_osc_title(title: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]0;{title}\x07")?;
+    stdout.flush()
+}
+
+fn ring_terminal_bell() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x07")?;
+    stdout.flush()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_dashboard(
     terminal: &mut ratatui::DefaultTerminal,
     commands: &mpsc::Sender<ConnectionCommand>,
     updates: &mut mpsc::Receiver<ConnectionUpdate>,
     options: RenderOptions,
     ansi16: bool,
+    ansi256: bool,
     enable_boot_intro: bool,
+    enable_title: bool,
+    enable_bell: bool,
+    auto_resume: bool,
 ) -> Result<()> {
     let mut app = App::default();
     app.ansi16 = ansi16;
+    app.ansi256 = ansi256;
     app.animations_enabled = enable_boot_intro;
     if enable_boot_intro {
         app.enable_boot_intro();
     }
-    app.open_session_menu();
+    if !auto_resume {
+        app.open_session_menu();
+    }
+    let mut initial_snapshot_seen = false;
     let mut events = EventStream::new();
     let mut dirty = true;
+    let mut last_window_title = String::new();
+    let mut last_bell_sig: Option<(usize, usize, usize, u64)> = None;
 
     loop {
         if dirty {
@@ -135,6 +191,16 @@ async fn run_dashboard(
                 .draw(|frame| ui::render(frame, &app, options, now))
                 .context("failed to draw dashboard")?;
             app.record_frame_metrics(draw_start.elapsed());
+            if enable_title {
+                let next_title = app.companion_window_title(now);
+                if next_title != last_window_title {
+                    let _ = write_osc_title(&next_title);
+                    last_window_title = next_title;
+                }
+            }
+            if let Some(ack_id) = app.pending_live_activity_ack(now) {
+                let _ = commands.try_send(ConnectionCommand::AcknowledgeActivity(ack_id));
+            }
             dirty = false;
         }
 
@@ -148,7 +214,8 @@ async fn run_dashboard(
             }
         };
 
-        const MAX_COALESCED_EVENTS: usize = 32;
+        // Process one event per select! iteration directly from EventStream (never calling
+        // now_or_never(), which leaves crossterm's internal wake task holding a no-op waker).
         tokio::select! {
             biased;
             maybe_event = events.next() => {
@@ -157,6 +224,11 @@ async fn run_dashboard(
                         match event {
                             Event::Key(key) => {
                                 if handle_key(&mut app, key, commands).await? {
+                                    if let Some(ack_id) = app.pending_live_activity_ack(std::time::Instant::now()) {
+                                        let _ = commands
+                                            .send(ConnectionCommand::AcknowledgeActivity(ack_id))
+                                            .await;
+                                    }
                                     return Ok(());
                                 }
                                 dirty = true;
@@ -165,27 +237,6 @@ async fn run_dashboard(
                                 dirty = true;
                             }
                             _ => {}
-                        }
-                        // Drain a bounded batch of already-queued stream events without
-                        // mixing synchronous poll/read with Crossterm's EventStream.
-                        for _ in 0..MAX_COALESCED_EVENTS {
-                            match events.next().now_or_never() {
-                                Some(Some(Ok(Event::Key(key)))) => {
-                                    if handle_key(&mut app, key, commands).await? {
-                                        return Ok(());
-                                    }
-                                    dirty = true;
-                                }
-                                Some(Some(Ok(Event::Resize(_, _)))) => {
-                                    dirty = true;
-                                }
-                                Some(Some(Ok(_))) => {}
-                                Some(Some(Err(error))) => {
-                                    return Err(error).context("failed to read terminal input");
-                                }
-                                Some(None) => return Ok(()),
-                                None => break,
-                            }
                         }
                     }
                     Some(Err(error)) => {
@@ -199,10 +250,41 @@ async fn run_dashboard(
                     Some(ConnectionUpdate::Connecting) => app.connecting(),
                     Some(ConnectionUpdate::Connected) => app.connected(),
                     Some(ConnectionUpdate::Snapshot(snapshot)) => {
+                        let onboarding_incomplete = !snapshot.onboarding.complete;
                         app.apply_snapshot(snapshot, std::time::Instant::now());
+                        // On a brand-new world, enter Awakening -> Coherence directly rather than
+                        // presenting a management menu offering "CONTINUE".
+                        if !initial_snapshot_seen {
+                            initial_snapshot_seen = true;
+                            if onboarding_incomplete
+                                && app.session_menu == Some(SessionMenuState::Selecting)
+                            {
+                                app.close_session_menu();
+                            }
+                        }
                     }
                     Some(ConnectionUpdate::Planet(planet)) => {
-                        app.apply_planet(*planet, std::time::Instant::now());
+                        let had_planet = app.planet.is_some();
+                        let now = std::time::Instant::now();
+                        app.apply_planet(*planet, now);
+                        if let Some(ack_id) = app.pending_live_activity_ack(now) {
+                            let _ = commands
+                                .try_send(ConnectionCommand::AcknowledgeActivity(ack_id));
+                        }
+                        if let Some(sig) = app.bell_milestone_signature() {
+                            if enable_bell
+                                && had_planet
+                                && last_bell_sig.is_some_and(|prev| {
+                                    sig.0 > prev.0
+                                        || sig.1 > prev.1
+                                        || sig.2 > prev.2
+                                        || sig.3 > prev.3
+                                })
+                            {
+                                let _ = ring_terminal_bell();
+                            }
+                            last_bell_sig = Some(sig);
+                        }
                     }
                     Some(ConnectionUpdate::Disconnected(error)) => app.disconnected(error),
                     Some(ConnectionUpdate::DiagnosticCompleted(result)) => {
@@ -253,8 +335,15 @@ async fn handle_key(
         return handle_session_menu(app, key, commands).await;
     }
     if app.boot_intro_active(now) {
+        let is_quick = app
+            .boot_intro
+            .is_some_and(|boot| boot.mode == BootMode::QuickPowerOn);
         app.skip_boot_intro();
-        return Ok(false);
+        // On the brief QuickPowerOn reattach wipe, only Space/Esc merely skips; intentional
+        // keys fall straight through so user input is never swallowed on reattach.
+        if !is_quick || matches!(key.code, KeyCode::Char(' ') | KeyCode::Esc) {
+            return Ok(false);
+        }
     }
     if key.code == KeyCode::Char('q') {
         app.open_session_menu();
@@ -275,6 +364,18 @@ async fn handle_key(
         match key.code {
             KeyCode::Char(' ') => {
                 app.transmission_revealed = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.scroll_transmission(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.scroll_transmission(1);
+            }
+            KeyCode::PageUp => {
+                app.scroll_transmission(-5);
+            }
+            KeyCode::PageDown => {
+                app.scroll_transmission(5);
             }
             KeyCode::Enter | KeyCode::Esc => {
                 if let Some(record_id) =
@@ -381,6 +482,12 @@ async fn handle_key(
             app.cycle_workspace(true);
             app.trigger_transition(now);
         }
+        KeyCode::Char(digit @ '1'..='7') if app.pending_action.is_none() => {
+            let idx = (digit as u8 - b'0') as usize;
+            if app.select_visible_workspace(idx) {
+                app.trigger_transition(now);
+            }
+        }
         KeyCode::Esc if app.pending_action.is_some() => app.cancel_confirmation_action(),
         KeyCode::Enter if app.pending_action.is_some() => match app.pending_action.clone() {
             Some(ContextAction::Extract(region_id)) => {
@@ -469,7 +576,7 @@ async fn handle_key(
                 app.trigger_transition(now);
             }
         }
-        KeyCode::Char('n') if !app.local_view => {
+        KeyCode::Char('n') => {
             app.focus_campaign_lead();
         }
         KeyCode::Char('c') if !(app.workspace == Workspace::Planet && app.local_view) => {
@@ -703,13 +810,8 @@ async fn handle_key(
         {
             app.move_probe_selection(1);
         }
-        KeyCode::Char('1') if app.workspace == Workspace::Probes => {
-            app.select_probe(0);
-        }
-        KeyCode::Char('2') if app.workspace == Workspace::Probes => {
-            app.select_probe(1);
-        }
         KeyCode::Char('g') if app.workspace == Workspace::Probes => {
+            app.probe_selection = 1;
             if let Some(ContextAction::ConfigureExtractor(loadout)) = app.extractor_loadout_action()
             {
                 commands
@@ -759,6 +861,9 @@ async fn handle_key(
         KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::Archive => {
             app.move_archive_selection(1);
         }
+        KeyCode::Char('v') if app.workspace == Workspace::Archive => {
+            app.open_archive_replay(now);
+        }
         KeyCode::Enter if app.workspace == Workspace::Archive => {
             if matches!(
                 app.archive_experiment_action(),
@@ -768,6 +873,8 @@ async fn handle_key(
                     .send(ConnectionCommand::StartArchiveExperiment)
                     .await
                     .context("connection worker stopped")?;
+            } else {
+                app.open_archive_replay(now);
             }
         }
         KeyCode::Char('d')

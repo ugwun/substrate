@@ -1,4 +1,7 @@
-use crate::theme::{Theme, AMBER_RGB, CYAN_RGB};
+use crate::{
+    raster::{present::to_xterm256, Rgb as RasterRgb},
+    theme::{Theme, CYAN_RGB},
+};
 use mind_core::protocol::{
     PlanetSnapshot, RegionKnowledge, RegionSnapshot, ScoutState, TerrainClass,
 };
@@ -11,7 +14,7 @@ use std::{
     f64::consts::{FRAC_PI_2, PI, TAU},
 };
 
-const REGION_EDGE_WIDTH: f64 = 0.022;
+const REGION_EDGE_WIDTH: f64 = 0.020;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GlobeRenderOptions {
@@ -22,6 +25,7 @@ pub struct GlobeRenderOptions {
     pub phase: f64,
     pub ascii: bool,
     pub no_color: bool,
+    pub ansi256: bool,
     pub theme: Theme,
 }
 
@@ -33,6 +37,7 @@ struct SurfaceSample {
     selected: bool,
     selected_edge: bool,
     region_edge: bool,
+    is_halo: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +104,7 @@ struct GlobeCacheKey {
     ascii: bool,
     no_color: bool,
     ansi16: bool,
+    ansi256: bool,
 }
 
 #[derive(Debug, Default)]
@@ -201,8 +207,8 @@ pub fn render_cached_with_flashes(
     let width = usize::from(options.width.max(1));
     let height = usize::from(options.height.max(1));
     let subpixel_height = height * 2;
-    let radius = ((width.saturating_sub(4)) as f64 / 2.0)
-        .min((subpixel_height.saturating_sub(2)) as f64 / 2.0)
+    let radius = ((width.saturating_sub(4)) as f64 / 2.16)
+        .min((subpixel_height.saturating_sub(2)) as f64 / 2.16)
         .max(2.0);
     let center_x = (width.saturating_sub(1)) as f64 / 2.0;
     let center_y = (subpixel_height.saturating_sub(1)) as f64 / 2.0;
@@ -220,6 +226,7 @@ pub fn render_cached_with_flashes(
         ascii: options.ascii,
         no_color: options.no_color,
         ansi16: options.theme.ansi16(),
+        ansi256: options.ansi256,
     };
 
     if cache.key.as_ref() == Some(&key) && cache.base_cells.len() == height {
@@ -237,10 +244,10 @@ pub fn render_cached_with_flashes(
             yaw: options.yaw,
             sin_pitch: options.pitch.sin(),
             cos_pitch: options.pitch.cos(),
-            light: normalized3((-0.38, 0.46, 0.80)),
+            light: normalized3((-0.42, 0.44, 0.79)),
             latitude_step: PI / f64::from(planet.latitude_bands.max(1)),
             longitude_step: TAU / f64::from(planet.longitude_sectors.max(1)),
-            edge_threshold: REGION_EDGE_WIDTH.max(0.48 / radius),
+            edge_threshold: REGION_EDGE_WIDTH.max(0.45 / radius),
         };
         cache.base_cells = (0..height)
             .map(|y| {
@@ -249,13 +256,14 @@ pub fn render_cached_with_flashes(
                         let top = sample_surface(&ctx, x, y * 2);
                         let bottom = sample_surface(&ctx, x, y * 2 + 1);
                         if rich_unicode {
-                            rich_cell(top, bottom, x, y, options.theme)
+                            rich_cell(top, bottom, x, y, options.ansi256, options.theme)
                         } else {
                             fallback_cell(
                                 top,
                                 bottom,
                                 options.ascii,
                                 options.no_color,
+                                options.ansi256,
                                 x,
                                 y,
                                 options.theme,
@@ -270,6 +278,7 @@ pub fn render_cached_with_flashes(
 
     let mut cells = cache.base_cells.clone();
 
+    draw_network_links(&mut cells, planet, options, center_x, center_y, radius);
     draw_mission_path(&mut cells, planet, options, center_x, center_y, radius);
     draw_extraction_path(&mut cells, planet, options, center_x, center_y, radius);
     draw_construction_path(&mut cells, planet, options, center_x, center_y, radius);
@@ -315,6 +324,28 @@ fn sample_surface(ctx: &SurfaceContext<'_>, x: usize, y: usize) -> Option<Surfac
     let screen_y = (ctx.center_y - y as f64) / ctx.radius;
     let radius_squared = screen_x.mul_add(screen_x, screen_y * screen_y);
     if radius_squared > 1.0 {
+        // Atmospheric limb halo just outside the planetary silhouette.
+        if radius_squared <= 1.18 {
+            let r = radius_squared.sqrt();
+            let falloff = (1.0 - ((r - 1.0) / 0.088)).clamp(0.0, 1.0);
+            if falloff > 0.06 {
+                let sun_side = ((screen_x * ctx.light.0 + screen_y * ctx.light.1) * 0.5 + 0.65)
+                    .clamp(0.22, 1.0);
+                let strength = falloff * falloff * sun_side * 0.68;
+                if strength > 0.04 {
+                    let halo = Rgb(1, 14, 22).mix(Rgb(52, 198, 206), strength);
+                    return Some(SurfaceSample {
+                        color: halo,
+                        knowledge: RegionKnowledge::Unknown,
+                        luminance: strength * 0.45,
+                        selected: false,
+                        selected_edge: false,
+                        region_edge: false,
+                        is_halo: true,
+                    });
+                }
+            }
+        }
         return None;
     }
 
@@ -328,31 +359,58 @@ fn sample_surface(ctx: &SurfaceContext<'_>, x: usize, y: usize) -> Option<Surfac
     let region_index = region_index_at(ctx, latitude, longitude)?;
     let region = &ctx.planet.regions[region_index];
     let selected = ctx.selected_index == Some(region_index);
-    let region_edge = near_region_edge(ctx, latitude, longitude);
-    let selected_edge = selected && region_edge;
+    let known = region.knowledge > RegionKnowledge::Unknown;
+    // Draw subtle grid edges ONLY on discovered regions, keeping the unknown planetary
+    // hemisphere smooth and free of noisy checkerboards, and avoiding harsh selection boxes.
+    let region_edge = known && near_region_edge(ctx, latitude, longitude);
+    let selected_edge = false;
 
     let diffuse = (screen_x * ctx.light.0 + screen_y * ctx.light.1 + depth * ctx.light.2).max(0.0);
-    let limb = depth.powf(0.38);
-    let mut luminance = (0.18 + diffuse * 0.70 + limb * 0.12).clamp(0.10, 1.0);
-    luminance += terrain_texture(region, latitude, longitude);
+    let limb = depth.powf(0.42);
+    // Subtle 2x2 Bayer dither smooths the planetary terminator gradient across 8-step quantization.
+    let bayer = match ((x & 1), (y & 1)) {
+        (0, 0) => -0.014,
+        (1, 1) => 0.014,
+        (1, 0) => 0.005,
+        _ => -0.005,
+    };
+    let mut luminance = (0.19 + diffuse * 0.72 + limb * 0.14 + bayer).clamp(0.12, 1.0);
+    // Faint cartographic meridian/parallel graticule gives uncharted space tactile planetary form.
+    let graticule = !known && near_region_edge(ctx, latitude, longitude);
+    if known {
+        luminance += terrain_texture(region, latitude, longitude);
+    } else {
+        // Organic atmospheric contour bands and faint high-altitude cloud relief across uncharted surface.
+        let band_a = (latitude * 7.0 + (longitude * 2.0).sin() * 0.7).sin() * 0.045;
+        let band_b = ((longitude * 3.0 - latitude * 4.0).cos()) * 0.032;
+        luminance += band_a + band_b;
+        if graticule && diffuse > 0.12 {
+            luminance += 0.055;
+        }
+    }
     if region_edge {
-        luminance *= 0.78;
+        luminance *= 0.84;
     }
     if selected {
-        luminance = (luminance + 0.045).min(1.0);
+        luminance = (luminance + 0.09).min(1.0);
     }
 
     let mut color = knowledge_color(region.knowledge);
+    if !known && graticule && diffuse > 0.12 {
+        color = color.mix(Rgb(34, 118, 134), 0.32);
+    }
     if let Some(terrain) = region.terrain {
-        color = color.mix(terrain_tint(terrain), 0.14);
+        color = color.mix(terrain_tint(terrain), 0.28);
     }
     color = color.scale(luminance);
-    if radius_squared > 0.93 {
-        color = color.mix(Rgb::from(CYAN_RGB), ((radius_squared - 0.93) / 0.07) * 0.38);
+    // Luminous Fresnel atmospheric rim inside the planetary limb.
+    if radius_squared > 0.80 {
+        let rim = ((radius_squared - 0.80) / 0.20).powf(1.65);
+        let sun_boost = 0.34 + diffuse * 0.44;
+        color = color.mix(Rgb::from(CYAN_RGB), (rim * sun_boost).min(0.72));
     }
-    if selected_edge {
-        color = Rgb::from(AMBER_RGB).scale(0.68 + diffuse * 0.32);
-        luminance = 0.86;
+    if selected {
+        color = color.mix(Rgb(84, 206, 214), 0.28);
     }
 
     Some(SurfaceSample {
@@ -362,49 +420,71 @@ fn sample_surface(ctx: &SurfaceContext<'_>, x: usize, y: usize) -> Option<Surfac
         selected,
         selected_edge,
         region_edge,
+        is_halo: false,
     })
 }
 
-fn sample_color(sample: &SurfaceSample, theme: Theme) -> Color {
-    if !theme.ansi16() {
-        return sample.color.color();
-    }
-    if sample.selected_edge {
-        return theme.gold;
-    }
-    if sample.selected {
-        return theme.amber;
-    }
-    match sample.knowledge {
-        RegionKnowledge::Unknown => {
-            if sample.luminance >= 0.45 {
-                Color::DarkGray
-            } else {
-                Color::Black
-            }
+fn sample_color(sample: &SurfaceSample, x: usize, y: usize, ansi256: bool, theme: Theme) -> Color {
+    if theme.ansi16() {
+        if sample.is_halo {
+            return Color::Cyan;
         }
-        RegionKnowledge::Detected => {
-            if sample.luminance >= 0.50 {
-                Color::LightBlue
-            } else {
-                Color::Blue
-            }
+        if sample.selected_edge {
+            return theme.gold;
         }
-        RegionKnowledge::Surveyed => {
-            if sample.luminance >= 0.55 {
-                Color::LightCyan
-            } else {
-                Color::Cyan
-            }
+        if sample.selected {
+            return theme.amber;
         }
-        RegionKnowledge::Observed => {
-            if sample.luminance >= 0.65 {
-                Color::White
-            } else {
-                Color::LightCyan
+        let dither = ((x + y) & 1) == 0;
+        return match sample.knowledge {
+            RegionKnowledge::Unknown => {
+                // Keep the entire planetary silhouette visibly attached to its cyan limb
+                // across day, terminator, and night hemispheres (blue/dark-gray/black dither).
+                if sample.luminance >= 0.60 {
+                    Color::Blue
+                } else if sample.luminance >= 0.36 {
+                    if dither {
+                        Color::DarkGray
+                    } else {
+                        Color::Blue
+                    }
+                } else if dither {
+                    Color::DarkGray
+                } else {
+                    Color::Black
+                }
             }
-        }
+            RegionKnowledge::Detected => {
+                if sample.luminance >= 0.50 {
+                    Color::LightBlue
+                } else {
+                    Color::Blue
+                }
+            }
+            RegionKnowledge::Surveyed => {
+                if sample.luminance >= 0.52 {
+                    Color::LightCyan
+                } else {
+                    Color::Cyan
+                }
+            }
+            RegionKnowledge::Observed => {
+                if sample.luminance >= 0.62 {
+                    Color::White
+                } else {
+                    Color::LightCyan
+                }
+            }
+        };
     }
+    if ansi256 {
+        return to_xterm256(
+            RasterRgb(sample.color.0, sample.color.1, sample.color.2),
+            x,
+            y,
+        );
+    }
+    sample.color.color()
 }
 
 fn rich_cell(
@@ -412,36 +492,41 @@ fn rich_cell(
     bottom: Option<SurfaceSample>,
     x: usize,
     y: usize,
+    ansi256: bool,
     theme: Theme,
 ) -> Cell {
     match (top, bottom) {
         (Some(top), Some(bottom)) => Cell {
             symbol: Cow::Borrowed("▀"),
             style: Style::default()
-                .fg(sample_color(&top, theme))
-                .bg(sample_color(&bottom, theme)),
+                .fg(sample_color(&top, x, y * 2, ansi256, theme))
+                .bg(sample_color(&bottom, x, y * 2 + 1, ansi256, theme)),
         },
         (Some(top), None) => Cell {
             symbol: Cow::Borrowed("▀"),
-            style: Style::default().fg(sample_color(&top, theme)),
+            style: Style::default().fg(sample_color(&top, x, y * 2, ansi256, theme)),
         },
         (None, Some(bottom)) => Cell {
             symbol: Cow::Borrowed("▄"),
-            style: Style::default().fg(sample_color(&bottom, theme)),
+            style: Style::default().fg(sample_color(&bottom, x, y * 2 + 1, ansi256, theme)),
         },
         (None, None) => star_cell(x, y, false, theme),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fallback_cell(
     top: Option<SurfaceSample>,
     bottom: Option<SurfaceSample>,
     ascii: bool,
     no_color: bool,
+    ansi256: bool,
     x: usize,
     y: usize,
     theme: Theme,
 ) -> Cell {
+    let top = top.filter(|s| !s.is_halo);
+    let bottom = bottom.filter(|s| !s.is_halo);
     let sample = match (top, bottom) {
         (Some(top), Some(bottom)) => Some(if top.luminance >= bottom.luminance {
             top
@@ -485,7 +570,7 @@ fn fallback_cell(
             .fg(theme.amber)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(sample_color(&sample, theme))
+        Style::default().fg(sample_color(&sample, x, y * 2, ansi256, theme))
     };
     Cell {
         symbol: Cow::Borrowed(symbol),
@@ -498,7 +583,12 @@ fn star_cell(x: usize, y: usize, ascii: bool, theme: Theme) -> Cell {
         .wrapping_mul(0x9e37)
         .wrapping_add(y.wrapping_mul(0x85eb))
         .rotate_left(7);
-    if hash % 89 == 3 {
+    if hash % 197 == 11 {
+        Cell {
+            symbol: Cow::Borrowed(if ascii { "*" } else { "·" }),
+            style: Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+        }
+    } else if hash % 67 == 3 {
         Cell {
             symbol: Cow::Borrowed(if ascii { "." } else { "·" }),
             style: Style::default().fg(theme.faint),
@@ -745,24 +835,98 @@ fn place_marker(
         style,
     };
 
-    if show_label && point.depth > 0.62 {
+    if show_label && point.depth > 0.56 {
+        // Sleek flanking reticle brackets around the selected region marker.
+        if !options.ascii && x > 0 && (x as usize + 1) < cells[0].len() {
+            let bracket_fg = if options.no_color {
+                Color::Reset
+            } else {
+                options.theme.cyan_bright
+            };
+            let left_style = overlay_style(&cells[y as usize][(x - 1) as usize], bracket_fg, true);
+            let right_style = overlay_style(&cells[y as usize][(x + 1) as usize], bracket_fg, true);
+            cells[y as usize][(x - 1) as usize] = Cell {
+                symbol: Cow::Borrowed("⟨"),
+                style: left_style,
+            };
+            cells[y as usize][(x + 1) as usize] = Cell {
+                symbol: Cow::Borrowed("⟩"),
+                style: right_style,
+            };
+        }
         let label = format!(" {} ", region.designation);
         let label_width = label.chars().count() as isize;
-        let start = if x + label_width + 1 < cells[0].len() as isize {
-            x + 1
+        let offset_x = if options.ascii { 1 } else { 2 };
+        let start = if x + offset_x + label_width < cells[0].len() as isize {
+            x + offset_x
         } else {
-            x - label_width
+            x - offset_x - label_width + 1
+        };
+        let pill_bg = if options.no_color {
+            Color::Reset
+        } else {
+            options.theme.panel
         };
         for (offset, character) in label.chars().enumerate() {
             let label_x = start + offset as isize;
             if label_x >= 0 && label_x < cells[0].len() as isize {
-                let style = overlay_style(&cells[y as usize][label_x as usize], foreground, true);
+                let mut label_style = Style::default().fg(foreground).add_modifier(Modifier::BOLD);
+                if !options.no_color {
+                    label_style = label_style.bg(pill_bg);
+                }
                 cells[y as usize][label_x as usize] = Cell {
                     symbol: Cow::Owned(character.to_string()),
-                    style,
+                    style: label_style,
                 };
             }
         }
+    }
+}
+
+fn draw_network_links(
+    cells: &mut [Vec<Cell>],
+    planet: &PlanetSnapshot,
+    options: GlobeRenderOptions,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+) {
+    let Some(core) = planet.regions.iter().find(|r| r.core) else {
+        return;
+    };
+    let mut anchors: Vec<&RegionSnapshot> = vec![core];
+    if let Some(relay_id) = &planet.relay_region_id {
+        if let Some(relay) = find_region(planet, relay_id) {
+            draw_route_between(
+                cells, planet, core, relay, options, center_x, center_y, radius, false,
+            );
+            anchors.push(relay);
+        }
+    }
+    for base in &planet.network.bases {
+        if !base.connected {
+            continue;
+        }
+        let Some(target) = find_region(planet, &base.region_id) else {
+            continue;
+        };
+        if let Some(nearest) = anchors.iter().copied().min_by_key(|anchor| {
+            let dlat = anchor
+                .position
+                .latitude_band
+                .abs_diff(target.position.latitude_band);
+            let dlon_raw = anchor
+                .position
+                .longitude_sector
+                .abs_diff(target.position.longitude_sector);
+            let dlon = dlon_raw.min(planet.longitude_sectors.saturating_sub(dlon_raw));
+            u16::from(dlat) + u16::from(dlon)
+        }) {
+            draw_route_between(
+                cells, planet, nearest, target, options, center_x, center_y, radius, false,
+            );
+        }
+        anchors.push(target);
     }
 }
 
@@ -1053,10 +1217,10 @@ fn find_region<'a>(planet: &'a PlanetSnapshot, id: &str) -> Option<&'a RegionSna
 
 fn knowledge_color(knowledge: RegionKnowledge) -> Rgb {
     match knowledge {
-        RegionKnowledge::Unknown => Rgb(18, 55, 64),
-        RegionKnowledge::Detected => Rgb(22, 75, 85),
-        RegionKnowledge::Surveyed => Rgb(28, 102, 112),
-        RegionKnowledge::Observed => Rgb(42, 145, 145),
+        RegionKnowledge::Unknown => Rgb(18, 56, 74),
+        RegionKnowledge::Detected => Rgb(26, 98, 114),
+        RegionKnowledge::Surveyed => Rgb(42, 146, 152),
+        RegionKnowledge::Observed => Rgb(66, 194, 186),
     }
 }
 
@@ -1185,6 +1349,7 @@ mod tests {
                 phase: 0.0,
                 ascii: false,
                 no_color: false,
+                ansi256: false,
                 theme: Theme::new(false),
             },
         );
@@ -1210,6 +1375,7 @@ mod tests {
                 phase: 0.0,
                 ascii: true,
                 no_color: true,
+                ansi256: false,
                 theme: Theme::new(true),
             },
         );
@@ -1254,6 +1420,7 @@ mod tests {
                 phase: 0.5,
                 ascii: true,
                 no_color: true,
+                ansi256: false,
                 theme: Theme::new(true),
             },
         );
@@ -1273,6 +1440,7 @@ mod tests {
                 phase: 0.5,
                 ascii: false,
                 no_color: false,
+                ansi256: false,
                 theme: Theme::new(false),
             },
         );
@@ -1297,6 +1465,7 @@ mod tests {
             phase: 0.25,
             ascii: false,
             no_color: false,
+            ansi256: false,
             theme: Theme::new(false),
         };
         let mut cache = GlobeCache::default();

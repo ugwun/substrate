@@ -3,11 +3,11 @@ use crate::{
         App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
         Workspace,
     },
-    art, boot,
+    art, boot, cinematic,
     globe::{self, GlobeRenderOptions},
     probes,
     theme::Theme,
-    transmission,
+    transmission, vista,
 };
 use mind_core::protocol::{
     BaseModuleKind, EngineEventKind, ExtractorLoadout, ExtractorState, MissionReportOutcome,
@@ -65,15 +65,127 @@ struct KeyHint<'a> {
     label: &'a str,
 }
 
+fn archive_source_label(
+    planet: &PlanetSnapshot,
+    record: &mind_core::protocol::ArchiveRecordSnapshot,
+) -> String {
+    if let Some(region_id) = &record.region_id {
+        return region_designation(planet, region_id).to_owned();
+    }
+    match record.record_id.as_str() {
+        "observation_004" => "MULTI-SITE".to_owned(),
+        "observation_005" => "ORBITAL FRAME".to_owned(),
+        _ => "LOCAL ARRAY".to_owned(),
+    }
+}
+
+/// Dim every cell in `area` behind a centered modal so background fragments do not visually compete.
+fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
+    if theme.no_color() {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            cell.set_style(Style::default().fg(theme.faint).bg(theme.canvas));
+        }
+    }
+}
+
+/// Wrap `text` into lines with a hanging indent of `indent` spaces on continuation rows.
+fn wrap_indented_lines(
+    prefix_spans: Vec<Span<'static>>,
+    prefix_width: usize,
+    text: &str,
+    indent: usize,
+    max_width: usize,
+    text_style: Style,
+) -> Vec<Line<'static>> {
+    let width = max_width.max(indent + 12);
+    let first_budget = width.saturating_sub(prefix_width).max(10);
+    let cont_budget = width.saturating_sub(indent).max(10);
+    let mut lines = Vec::new();
+    let mut first_line = true;
+    let mut current = String::new();
+    let mut budget = first_budget;
+
+    for word in text.split_whitespace() {
+        let wlen = word.chars().count();
+        let clen = current.chars().count();
+        if clen == 0 {
+            current.push_str(word);
+        } else if clen + 1 + wlen <= budget {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            if first_line {
+                let mut spans = prefix_spans.clone();
+                spans.push(Span::styled(std::mem::take(&mut current), text_style));
+                lines.push(Line::from(spans));
+                first_line = false;
+                budget = cont_budget;
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(std::mem::take(&mut current), text_style),
+                ]));
+            }
+            current.push_str(word);
+        }
+    }
+    if first_line {
+        let mut spans = prefix_spans;
+        spans.push(Span::styled(current, text_style));
+        lines.push(Line::from(spans));
+    } else if !current.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(current, text_style),
+        ]));
+    }
+    lines
+}
+
+fn wrapped_field_lines(
+    label: &str,
+    value: &str,
+    max_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let prefix = vec![Span::styled(
+        format!("{label:<12}"),
+        Style::default().fg(theme.muted),
+    )];
+    wrap_indented_lines(
+        prefix,
+        12,
+        value,
+        12,
+        max_width,
+        Style::default().fg(theme.text),
+    )
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Instant) {
     let area = frame.area();
-    let theme = Theme::for_color_mode(options.no_color, app.ansi16);
+    let theme = Theme::for_color_tier(options.no_color, app.ansi16, app.ansi256);
     frame.render_widget(Block::default().style(theme.canvas_style()), area);
     if area.width < 44 || area.height < 14 {
-        render_too_small(frame, area, options, theme);
+        if area.width >= 24 && area.height >= 3 && app.planet.is_some() && !app.onboarding_pending()
+        {
+            render_pilot_strip(frame, area, app, options, theme, now);
+        } else {
+            render_too_small(frame, area, options, theme);
+        }
         if app.session_menu.is_some() {
             render_session_menu(frame, area, app, options, theme);
         }
+        return;
+    }
+    if app.session_menu.is_some() && (app.snapshot.is_none() || app.onboarding_pending()) {
+        render_session_menu_backdrop(frame, area, app, options, theme);
+        render_session_menu(frame, area, app, options, theme);
         return;
     }
     if app.session_menu.is_none() {
@@ -81,7 +193,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
             .boot_intro
             .filter(|boot_state| boot_state.is_active(now))
         {
-            boot::render_boot_intro(frame, area, boot_state, options, theme, now);
+            boot::render_boot_intro(
+                frame,
+                area,
+                boot_state,
+                options,
+                theme,
+                app.color_tier(options),
+                now,
+            );
             return;
         }
     }
@@ -100,15 +220,18 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
             Workspace::System => render_dashboard(frame, area, app, options, theme, now),
         }
     }
+    if app.session_menu.is_some() {
+        dim_backdrop(frame, area, theme);
+        render_session_menu(frame, area, app, options, theme);
+        return;
+    }
     if app.show_return_summary {
+        dim_backdrop(frame, area, theme);
         render_return_summary(frame, area, app, options, theme);
     } else if let (Some(planet), Some((index, record))) =
         (&app.planet, app.active_transmission_record())
     {
-        let source = record.region_id.as_ref().map_or_else(
-            || "Planetary context".to_owned(),
-            |region_id| region_designation(planet, region_id).to_owned(),
-        );
+        let source = archive_source_label(planet, record);
         let elapsed = app
             .transmission_opened_at
             .map_or(std::time::Duration::from_secs(10), |opened| {
@@ -125,21 +248,23 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
                 campaign: &planet.campaign,
                 elapsed,
                 force_complete: app.transmission_revealed,
+                is_replay: app.replay_transmission_id.is_some(),
+                scroll: app.transmission_scroll,
                 phase: app.globe_phase,
                 options,
                 theme,
+                tier: app.color_tier(options),
             },
         );
     } else if app.show_chapter_card {
         if let Some(planet) = &app.planet {
+            dim_backdrop(frame, area, theme);
             transmission::render_chapter_card(frame, area, &planet.campaign, options, theme);
         }
     }
     if app.show_help {
+        dim_backdrop(frame, area, theme);
         render_help(frame, area, options, theme);
-    }
-    if app.session_menu.is_some() {
-        render_session_menu(frame, area, app, options, theme);
     } else if let Some(progress) = app.transition_progress(now) {
         art::render_crt_wipe(frame, area, progress, options, theme);
     }
@@ -153,7 +278,7 @@ fn render_planet(
     theme: Theme,
     now: Instant,
 ) {
-    let header_height = if area.height >= 24 { 6 } else { 5 };
+    let header_height = if area.height >= 30 { 5 } else { 3 };
     let rows = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(7),
@@ -189,9 +314,17 @@ fn render_planet(
         return;
     };
 
-    if area.width >= 100 {
-        let columns = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(rows[1]);
+    if area.width >= 76 {
+        let (left_pct, right_pct) = if area.width >= 100 {
+            (58, 42)
+        } else {
+            (54, 46)
+        };
+        let columns = Layout::horizontal([
+            Constraint::Percentage(left_pct),
+            Constraint::Percentage(right_pct),
+        ])
+        .split(rows[1]);
         if app.local_view {
             render_local_sites(frame, columns[0], app, planet, options, theme, now);
             render_local_inspector(frame, columns[1], app, planet, options, theme);
@@ -217,19 +350,19 @@ fn render_planet(
         },
         KeyHint {
             key: "ENTER",
-            label: "primary",
+            label: "act",
+        },
+        KeyHint {
+            key: "N",
+            label: "lead",
         },
         KeyHint {
             key: "P/C/D/W/L/O",
-            label: "modules",
+            label: "mod",
         },
         KeyHint {
             key: "G/M",
-            label: "rig / maintain",
-        },
-        KeyHint {
-            key: "PGUP/DN",
-            label: "details",
+            label: "rig/maint",
         },
         KeyHint {
             key: "ESC",
@@ -250,38 +383,73 @@ fn render_planet(
         &[
             KeyHint {
                 key: "ARROWS",
-                label: "",
+                label: "move",
             },
             KeyHint {
                 key: "ENTER",
-                label: "",
+                label: "act",
             },
             KeyHint {
                 key: "TAB",
-                label: "",
+                label: "view",
             },
             KeyHint {
                 key: "Q",
                 label: "menu",
             },
         ]
+    } else if area.width < 104 {
+        &[
+            KeyHint {
+                key: "ARROWS",
+                label: "region",
+            },
+            KeyHint {
+                key: "ENTER",
+                label: "act",
+            },
+            KeyHint {
+                key: "N",
+                label: "lead",
+            },
+            KeyHint {
+                key: "TAB",
+                label: "view",
+            },
+            KeyHint {
+                key: "Q",
+                label: "menu",
+            },
+            KeyHint {
+                key: "?",
+                label: "help",
+            },
+        ]
     } else if area.width < 140 {
         &[
             KeyHint {
                 key: "ARROWS",
-                label: "",
+                label: "region",
             },
             KeyHint {
                 key: "ENTER",
                 label: "action",
             },
             KeyHint {
+                key: "N",
+                label: "lead",
+            },
+            KeyHint {
+                key: "C",
+                label: "brief",
+            },
+            KeyHint {
                 key: "PGUP/DN",
-                label: "",
+                label: "scroll",
             },
             KeyHint {
                 key: "TAB",
-                label: "",
+                label: "view",
             },
             KeyHint {
                 key: "Q",
@@ -344,7 +512,7 @@ fn render_overview(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -597,7 +765,7 @@ fn render_overview(
     let activity_scroll = selected_line.saturating_sub(activity_height.saturating_sub(1)) as u16;
     frame.render_widget(
         Paragraph::new(Text::from(activity))
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .scroll((activity_scroll, 0))
             .style(theme.panel_style())
             .block(panel(
@@ -668,7 +836,11 @@ fn render_overview(
             planet.survey_queue.capacity
         )
     } else {
-        "locked // research required".into()
+        format!(
+            "waypoint {} / {} // 8-slot automation needs research",
+            planet.survey_queue.queued_region_ids.len(),
+            planet.survey_queue.capacity
+        )
     };
     let extraction_automation = if !planet.extraction_route.unlocked {
         "locked // research required".into()
@@ -684,150 +856,208 @@ fn render_overview(
     } else {
         "earned // no route active".into()
     };
-    let mut summary_lines = vec![
-        section_line("MATERIAL STORES", theme),
-        field_line(
-            "STRUCTURAL",
-            format!(
-                "raw {} // refined {} // relay needs 8",
-                raw.structural, stock.structural
-            ),
-            theme,
-        ),
-        field_line(
-            "CONDUCTIVE",
-            format!(
-                "raw {} // refined {} // relay needs 6",
-                raw.conductive, stock.conductive
-            ),
-            theme,
-        ),
-        field_line(
-            "SILICATE",
-            format!(
-                "raw {} // refined {} // relay needs 6",
-                raw.silicate, stock.silicate
-            ),
-            theme,
-        ),
-        field_line(
-            "REFINING",
-            if planet.refining_remaining_ms == 0 {
-                "idle".into()
-            } else {
-                format!(
-                    "{}s to next unit",
-                    planet.refining_remaining_ms.div_ceil(1_000)
-                )
-            },
-            theme,
-        ),
-        Line::from(""),
-        section_line("FLEET & NETWORK", theme),
-        field_line(
-            "SCOUT",
-            format!("{:?} // {scout_location}", planet.scout.state),
-            theme,
-        ),
-        field_line("EXTRACTOR", extractor_status, theme),
-        field_line("RELAY", relay_status, theme),
-        field_line(
-            "LOCAL SITES",
-            if planet.network.unlocked {
-                format!(
-                    "{} surveyed // {} required for horizon",
-                    planet.network.horizon.surveyed_subregions,
-                    planet.network.horizon.required_subregions
-                )
-            } else {
-                "locked until routine automation is proven".into()
-            },
-            theme,
-        ),
-        field_line(
-            "NODES",
-            format!(
-                "{} total // {} connected // {} beyond relay envelope",
-                planet.network.bases.len(),
-                planet.network.horizon.connected_bases,
-                planet.network.horizon.remote_bases
-            ),
-            theme,
-        ),
-        field_line(
-            "NETWORK POWER",
-            format!(
-                "{} generation / {} demand",
-                planet
-                    .network
-                    .bases
+    let right_inner_w = usize::from(columns[1].width.saturating_sub(2)).max(24);
+    let active_depots = planet
+        .network
+        .bases
+        .iter()
+        .filter(|base| {
+            base.connected
+                && base
+                    .modules
                     .iter()
-                    .map(|base| base.generation)
-                    .sum::<u32>(),
-                planet
-                    .network
-                    .bases
-                    .iter()
-                    .map(|base| base.demand)
-                    .sum::<u32>()
-            ),
-            theme,
-        ),
-        field_line(
-            "CREWS",
+                    .any(|module| module.kind == BaseModuleKind::Depot && module.active)
+        })
+        .count();
+    let depot_noun = if active_depots == 1 {
+        "depot"
+    } else {
+        "depots"
+    };
+    let horizon = &planet.network.horizon;
+    let region_check = if horizon.surveyed_regions >= horizon.required_regions {
+        if options.ascii {
             format!(
-                "{} / {} committed",
-                planet.network.active_projects.len(),
-                planet.network.project_capacity
-            ),
-            theme,
-        ),
-        field_line(
-            "LOGISTICS",
+                "regions {} ({} req) OK",
+                horizon.surveyed_regions, horizon.required_regions
+            )
+        } else {
             format!(
-                "{} active connected depot(s) // each adds one crew, maximum two",
-                planet
-                    .network
-                    .bases
-                    .iter()
-                    .filter(|base| {
-                        base.connected
-                            && base
-                                .modules
-                                .iter()
-                                .any(|module| module.kind == BaseModuleKind::Depot && module.active)
-                    })
-                    .count()
-            ),
-            theme,
+                "regions {} ({} req) ✓",
+                horizon.surveyed_regions, horizon.required_regions
+            )
+        }
+    } else {
+        format!(
+            "regions {}/{}",
+            horizon.surveyed_regions, horizon.required_regions
+        )
+    };
+    let mut summary_lines = vec![section_line("MATERIAL STORES", theme)];
+    summary_lines.extend(wrapped_field_lines(
+        "STRUCTURAL",
+        &format!(
+            "raw {} // refined {} // relay needs 8",
+            raw.structural, stock.structural
         ),
-        field_line(
-            "OBSERVATION",
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "CONDUCTIVE",
+        &format!(
+            "raw {} // refined {} // relay needs 6",
+            raw.conductive, stock.conductive
+        ),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "SILICATE",
+        &format!(
+            "raw {} // refined {} // relay needs 6",
+            raw.silicate, stock.silicate
+        ),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "REFINING",
+        &if planet.refining_remaining_ms == 0 {
+            "idle".into()
+        } else {
             format!(
-                "labs {}/{} // arrays {}/{} // regions {}/{}",
-                planet.network.horizon.analysis_sites,
-                planet.network.horizon.required_analysis_sites,
-                planet.network.horizon.observation_sites,
-                planet.network.horizon.required_observation_sites,
-                planet.network.horizon.surveyed_regions,
-                planet.network.horizon.required_regions
-            ),
-            theme,
+                "{}s to next unit",
+                planet.refining_remaining_ms.div_ceil(1_000)
+            )
+        },
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.push(Line::from(""));
+    summary_lines.push(section_line("FLEET & NETWORK", theme));
+    summary_lines.extend(wrapped_field_lines(
+        "SCOUT",
+        &format!("{:?} // {scout_location}", planet.scout.state),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "EXTRACTOR",
+        &extractor_status,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "RELAY",
+        &relay_status,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "LOCAL SITES",
+        &if planet.network.unlocked {
+            format!(
+                "{} surveyed // {} required for horizon",
+                horizon.surveyed_subregions, horizon.required_subregions
+            )
+        } else {
+            "locked until routine automation is proven".into()
+        },
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "NODES",
+        &format!(
+            "{} total // {} connected // {} beyond relay envelope",
+            planet.network.bases.len(),
+            horizon.connected_bases,
+            horizon.remote_bases
         ),
-        Line::from(""),
-        section_line("RESEARCH & AUTOMATION", theme),
-        field_line("PROFILE", active_profile.to_owned(), theme),
-        field_line(
-            "ANALYSIS",
-            format!("{} available", planet.research.analysis_units),
-            theme,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "NET POWER",
+        &format!(
+            "{} generation / {} demand",
+            planet
+                .network
+                .bases
+                .iter()
+                .map(|base| base.generation)
+                .sum::<u32>(),
+            planet
+                .network
+                .bases
+                .iter()
+                .map(|base| base.demand)
+                .sum::<u32>()
         ),
-        field_line("SURVEYS", survey_automation, theme),
-        field_line("EXTRACTION", extraction_automation, theme),
-        Line::from(""),
-        section_line("FABRICATION", theme),
-        Line::styled(construction_status, Style::default().fg(theme.text_strong)),
-    ];
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "CREWS",
+        &format!(
+            "{} / {} committed",
+            planet.network.active_projects.len(),
+            planet.network.project_capacity
+        ),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "LOGISTICS",
+        &format!("{active_depots} active connected {depot_noun} // each adds one crew, max two"),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "OBSERVATION",
+        &format!(
+            "labs {}/{} // arrays {}/{} // {region_check}",
+            horizon.analysis_sites,
+            horizon.required_analysis_sites,
+            horizon.observation_sites,
+            horizon.required_observation_sites,
+        ),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.push(Line::from(""));
+    summary_lines.push(section_line("RESEARCH & AUTOMATION", theme));
+    summary_lines.extend(wrapped_field_lines(
+        "PROFILE",
+        active_profile,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "ANALYSIS",
+        &format!("{} available", planet.research.analysis_units),
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "SURVEYS",
+        &survey_automation,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.extend(wrapped_field_lines(
+        "EXTRACTION",
+        &extraction_automation,
+        right_inner_w,
+        theme,
+    ));
+    summary_lines.push(Line::from(""));
+    summary_lines.push(section_line("FABRICATION", theme));
+    summary_lines.push(Line::styled(
+        construction_status,
+        Style::default().fg(theme.text_strong),
+    ));
     if planet.network.active_projects.is_empty() {
         summary_lines.push(Line::styled(
             "base projects idle",
@@ -864,7 +1094,7 @@ fn render_overview(
     let summary = Text::from(summary_lines);
     frame.render_widget(
         Paragraph::new(summary)
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .scroll((app.overview_status_scroll, 0))
             .style(theme.panel_style())
             .block(panel(
@@ -934,7 +1164,7 @@ fn render_research(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1062,17 +1292,80 @@ fn render_research(
             ));
         }
     }
+    let block = panel(
+        " RESEARCH & SPECIALIZATION ",
+        options,
+        theme,
+        PanelTone::Focused,
+    );
+    let inner = block.inner(rows[1]);
+    frame.render_widget(block, rows[1]);
+    frame.render_widget(Block::default().style(theme.panel_style()), inner);
+    let show_topology = research.unlocked && inner.height >= 20 && inner.width >= 52;
+    let body_area = if show_topology {
+        let splits = Layout::vertical([
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Min(10),
+        ])
+        .split(inner);
+        let completed = [
+            research.options.first().is_some_and(|o| o.completed),
+            research.options.get(1).is_some_and(|o| o.completed),
+            research.options.get(2).is_some_and(|o| o.completed),
+        ];
+        let active_idx = research.active.as_ref().and_then(|act| {
+            research
+                .options
+                .iter()
+                .position(|o| o.project == act.project)
+        });
+        let active_profile_idx = research.profiles.iter().position(|p| p.active).unwrap_or(0);
+        let topo = crate::cinematic::build_research_topology_buffer(
+            completed,
+            active_idx,
+            active_profile_idx,
+            splits[0].width,
+            splits[0].height,
+            app.globe_phase,
+        );
+        crate::raster::blit_to_frame(&topo, frame, splits[0], app.color_tier(options));
+        let caption = Line::from(vec![
+            Span::styled(" CORE ", Style::default().fg(theme.gold).bold()),
+            Span::styled(
+                if options.ascii {
+                    "---> "
+                } else {
+                    "───▶ "
+                },
+                Style::default().fg(theme.faint),
+            ),
+            Span::styled("DIRECTIONS ", Style::default().fg(theme.cyan_bright).bold()),
+            Span::styled(
+                if options.ascii {
+                    "---> "
+                } else {
+                    "───▶ "
+                },
+                Style::default().fg(theme.faint),
+            ),
+            Span::styled("PROFILES", Style::default().fg(theme.amber).bold()),
+        ]);
+        frame.render_widget(
+            Paragraph::new(caption)
+                .alignment(Alignment::Center)
+                .style(theme.panel_style()),
+            splits[1],
+        );
+        splits[2]
+    } else {
+        inner
+    };
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .style(theme.panel_style())
-            .block(panel(
-                " RESEARCH & SPECIALIZATION ",
-                options,
-                theme,
-                PanelTone::Focused,
-            )),
-        rows[1],
+            .style(theme.panel_style()),
+        body_area,
     );
     render_workspace_footer(
         frame,
@@ -1110,7 +1403,7 @@ fn render_system_map(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1144,6 +1437,7 @@ fn render_system_map(
             app.globe_phase,
             options,
             theme,
+            app.color_tier(options),
         );
         art::render_system_cliffhanger_panel(frame, columns[1], options, theme);
     } else if rows[1].height >= 18 {
@@ -1155,6 +1449,7 @@ fn render_system_map(
             app.globe_phase,
             options,
             theme,
+            app.color_tier(options),
         );
         art::render_system_cliffhanger_panel(frame, body[1], options, theme);
     } else {
@@ -1193,7 +1488,7 @@ fn render_archive(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1238,6 +1533,11 @@ fn render_archive(
             .archive_selection
             .min(planet.archive.records.len().saturating_sub(1));
         let record = &planet.archive.records[selected];
+        let list_col_w = if area.width >= 96 {
+            (usize::from(area.width) * 34 / 100).saturating_sub(3)
+        } else {
+            usize::from(area.width).saturating_sub(4)
+        };
         let list = Text::from(
             planet
                 .archive
@@ -1246,37 +1546,54 @@ fn render_archive(
                 .enumerate()
                 .flat_map(|(index, candidate)| {
                     let marker = if index == selected { ">" } else { " " };
-                    [
-                        Line::from(vec![
-                            Span::styled(
-                                format!("{marker} {:02} ", index + 1),
-                                Style::default().fg(if index == selected {
-                                    theme.amber
-                                } else {
-                                    theme.faint
-                                }),
-                            ),
-                            Span::styled(
-                                candidate.title.clone(),
-                                Style::default().fg(if index == selected {
-                                    theme.text_strong
-                                } else {
-                                    theme.text
-                                }),
-                            ),
-                        ]),
-                        Line::styled(
-                            format!("     {}", candidate.medium.to_uppercase()),
-                            Style::default().fg(theme.muted),
+                    let glyph = match (candidate.record_id.as_str(), options.ascii) {
+                        ("observation_001", false) => "≡ ",
+                        ("observation_002", false) => "▣ ",
+                        ("observation_003", false) => "┆ ",
+                        ("observation_004", false) => "◈ ",
+                        ("observation_005", false) => "✦ ",
+                        (_, true) => "* ",
+                        _ => "• ",
+                    };
+                    let mut entry_lines = vec![Line::from(vec![
+                        Span::styled(
+                            format!("{marker} {:02} ", index + 1),
+                            Style::default().fg(if index == selected {
+                                theme.amber
+                            } else {
+                                theme.faint
+                            }),
                         ),
-                    ]
+                        Span::styled(
+                            glyph,
+                            Style::default().fg(if index == selected {
+                                theme.gold
+                            } else {
+                                theme.cyan
+                            }),
+                        ),
+                        Span::styled(
+                            candidate.title.clone(),
+                            Style::default().fg(if index == selected {
+                                theme.text_strong
+                            } else {
+                                theme.text
+                            }),
+                        ),
+                    ])];
+                    entry_lines.extend(wrap_indented_lines(
+                        vec![Span::raw("     ")],
+                        5,
+                        &candidate.medium.to_uppercase(),
+                        5,
+                        list_col_w.max(20),
+                        Style::default().fg(theme.muted),
+                    ));
+                    entry_lines
                 })
                 .collect::<Vec<_>>(),
         );
-        let source = record.region_id.as_ref().map_or_else(
-            || "Planetary context".into(),
-            |region_id| region_designation(planet, region_id).to_owned(),
-        );
+        let source = archive_source_label(planet, record);
         let mut detail_lines = vec![
             Line::styled(
                 record.title.clone(),
@@ -1391,6 +1708,10 @@ fn render_archive(
             label: "select record",
         },
         KeyHint {
+            key: "V",
+            label: "replay transmission",
+        },
+        KeyHint {
             key: "TAB",
             label: "workspace",
         },
@@ -1442,6 +1763,13 @@ fn render_return_summary(
         .unreviewed_activity
         .iter()
         .filter_map(|activity| activity.archive_record_id.as_deref())
+        .filter(|record_id| {
+            planet
+                .archive
+                .unpresented_record_ids
+                .iter()
+                .any(|pending| pending == record_id)
+        })
         .filter_map(|record_id| {
             planet
                 .archive
@@ -1452,11 +1780,12 @@ fn render_return_summary(
         .collect();
     let width = area.width.saturating_sub(6).clamp(38, 86);
     let extra_evidence_lines = if archived_evidence.is_empty() { 0 } else { 5 };
-    let height = (planet.unreviewed_activity.len() as u16 + 15 + extra_evidence_lines)
-        .min(area.height.saturating_sub(2))
+    let height = (planet.unreviewed_activity.len() as u16 + 16 + extra_evidence_lines)
+        .min(area.height.saturating_sub(4))
         .max(12);
     let popup = centered_rect(width, height, area);
     frame.render_widget(Clear, popup);
+    let sep = if options.ascii { " | " } else { " · " };
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -1480,27 +1809,36 @@ fn render_return_summary(
             Style::default().fg(theme.text_strong),
         ),
         Line::raw(""),
-        Line::styled(
-            "While the daemon remained active:",
-            Style::default().fg(theme.text).bold(),
-        ),
+        Line::from(vec![
+            Span::styled(
+                "WHILE YOU WERE AWAY ",
+                Style::default().fg(theme.amber).bold(),
+            ),
+            Span::styled(
+                format!(
+                    "({} event{})",
+                    planet.unreviewed_activity.len(),
+                    if planet.unreviewed_activity.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
     ];
     if planet.unreviewed_activity.is_empty() {
         lines.push(Line::styled(
-            "No unreviewed operational changes.",
+            "  No unreviewed operational changes.",
             Style::default().fg(theme.muted),
         ));
     } else {
-        for record in planet
-            .unreviewed_activity
-            .iter()
-            .rev()
-            .take(height.saturating_sub(11) as usize)
-            .rev()
-        {
+        let max_rows = height.saturating_sub(12).max(2) as usize;
+        for record in planet.unreviewed_activity.iter().rev().take(max_rows).rev() {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("#{:03} ", record.activity_id),
+                    format!("  #{:03} ", record.activity_id),
                     Style::default().fg(theme.faint),
                 ),
                 Span::styled(record.summary.clone(), Style::default().fg(theme.text)),
@@ -1515,7 +1853,7 @@ fn render_return_summary(
                 evidence.title.to_uppercase(),
                 evidence.medium.to_uppercase()
             ),
-            Style::default().fg(theme.amber).bold(),
+            Style::default().fg(theme.gold).bold(),
         ));
         lines.push(Line::styled(
             terminal_text(&evidence.observation, options.ascii),
@@ -1524,48 +1862,70 @@ fn render_return_summary(
     }
     let raw = planet.raw_inventory;
     let refined = planet.refined_inventory;
+    let surveyed = planet
+        .regions
+        .iter()
+        .filter(|r| r.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+        .count();
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(
-            "STORES NOW  raw S {} / C {} / Si {} // refined S {} / C {} / Si {}",
-            raw.structural,
-            raw.conductive,
-            raw.silicate,
-            refined.structural,
-            refined.conductive,
-            refined.silicate
+    lines.push(Line::from(vec![
+        Span::styled("STORES NOW  ", Style::default().fg(theme.cyan).bold()),
+        Span::styled(
+            format!("MAP {surveyed}/{}", planet.regions.len()),
+            Style::default().fg(theme.text_strong).bold(),
         ),
-        Style::default().fg(theme.text),
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(
-            "CURRENT  {} // {}",
-            planet.objective.title, planet.objective.guidance
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled(
+            format!("RAW {}/{}/{}", raw.structural, raw.conductive, raw.silicate),
+            Style::default().fg(theme.text),
         ),
-        Style::default().fg(theme.amber),
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(
-            "NEXT  {}",
-            terminal_text(&planet.campaign.next_action, options.ascii)
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled(
+            format!(
+                "REF {}/{}/{}",
+                refined.structural, refined.conductive, refined.silicate
+            ),
+            Style::default().fg(theme.gold),
         ),
-        Style::default().fg(theme.text_strong),
-    ));
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled(
+            format!("ANALYSIS {}", planet.research.analysis_units),
+            Style::default().fg(theme.cyan_bright),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("CURRENT  ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            format!(
+                "{} // {}",
+                planet.objective.title, planet.objective.guidance
+            ),
+            Style::default().fg(theme.text),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("NEXT  ", Style::default().fg(theme.amber).bold()),
+        Span::styled(
+            terminal_text(&planet.campaign.next_action, options.ascii),
+            Style::default().fg(theme.text_strong),
+        ),
+    ]));
     if !planet.archive.unpresented_record_ids.is_empty() {
         lines.push(Line::styled(
             format!(
                 "      {} full discovery transmission(s) queued next.",
                 planet.archive.unpresented_record_ids.len()
             ),
-            Style::default().fg(theme.cyan_bright),
+            Style::default().fg(theme.gold).bold(),
         ));
     }
-    lines.push(Line::styled(
-        "Enter / Esc  acknowledge and continue",
-        Style::default().fg(theme.cyan),
-    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        key_span("Enter", theme),
+        Span::styled(" / ", Style::default().fg(theme.faint)),
+        key_span("Esc", theme),
+        Span::styled(" acknowledge and continue", Style::default().fg(theme.cyan)),
+    ]));
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -1625,76 +1985,130 @@ fn render_workspace_header(
     options: RenderOptions,
     theme: Theme,
 ) {
-    let compact = area.width < 118;
+    let visible = app.visible_workspaces();
+    let compact = area.width < 106 || (visible.len() >= 7 && area.width < 126);
     let ultra_compact = area.width < 84;
-    let tab = |workspace, label: &str| {
-        let formatted = if compact {
-            label.to_owned()
-        } else {
-            format!(" {label} ")
-        };
-        if active == workspace {
-            Span::styled(formatted, theme.selection_style().fg(theme.cyan_bright))
-        } else {
-            Span::styled(formatted, Style::default().fg(theme.muted))
-        }
+    let workspace_label = |ws: Workspace| match ws {
+        Workspace::Planet => "PLANET",
+        Workspace::Overview => "OVERVIEW",
+        Workspace::Probes => "PROBES",
+        Workspace::Research => "RESEARCH",
+        Workspace::Archive => "ARCHIVE",
+        Workspace::SystemMap => "SYSTEM MAP",
+        Workspace::System => "SYSTEM",
     };
-    let mut navigation = if ultra_compact {
+
+    let mut left_spans = if ultra_compact {
         vec![Span::styled(
-            if options.ascii { "# " } else { "◆ " },
-            Style::default().fg(theme.amber),
+            if options.ascii { " # " } else { " ◆ " },
+            Style::default().fg(theme.gold).bold(),
         )]
     } else {
         vec![
             Span::styled(
                 if options.ascii { " # " } else { " ◆ " },
-                Style::default().fg(theme.amber),
+                Style::default().fg(theme.gold).bold(),
             ),
             Span::styled("SUBSTRATE ", Style::default().fg(theme.text_strong).bold()),
-            Span::styled("// ", Style::default().fg(theme.faint)),
+            Span::styled(" ", Style::default().fg(theme.faint)),
         ]
     };
-    navigation.extend([
-        tab(Workspace::Planet, "PLANET"),
-        Span::raw(" "),
-        tab(Workspace::Overview, "OVERVIEW"),
-        Span::raw(" "),
-        tab(Workspace::Probes, "PROBES"),
-        Span::raw(" "),
-        tab(Workspace::Research, "RESEARCH"),
-        Span::raw(" "),
-        tab(Workspace::Archive, "ARCHIVE"),
-        Span::raw(" "),
-    ]);
-    if app
-        .planet
-        .as_ref()
-        .is_some_and(|planet| planet.system_map.available)
-    {
-        navigation.extend([tab(Workspace::SystemMap, "SYSTEM MAP"), Span::raw(" ")]);
-    }
-    navigation.push(tab(Workspace::System, "SYSTEM"));
-    if let Some(planet) = &app.planet {
-        if !ultra_compact {
-            let pips = transmission::step_pips(&planet.campaign, options.ascii);
-            navigation.extend([
-                Span::styled(
-                    if compact { " // " } else { "  //  " },
-                    Style::default().fg(theme.faint),
-                ),
-                Span::styled(
-                    format!(
-                        "CH {} {} ",
-                        transmission::roman_chapter(planet.campaign.chapter_number),
-                        planet.campaign.title
-                    ),
-                    Style::default().fg(theme.amber).bold(),
-                ),
-                Span::styled(format!("[{pips}]"), Style::default().fg(theme.cyan_bright)),
-            ]);
+
+    for (idx, &ws) in visible.iter().enumerate() {
+        let num = idx + 1;
+        let label = workspace_label(ws);
+        let text = if compact {
+            format!("{num}:{label}")
+        } else {
+            format!(" [{num}] {label} ")
+        };
+        if active == ws {
+            left_spans.push(Span::styled(
+                text,
+                theme.selection_style().fg(theme.cyan_bright),
+            ));
+        } else {
+            left_spans.push(Span::styled(text, Style::default().fg(theme.muted)));
         }
+        left_spans.push(Span::raw(" "));
     }
-    let second_line = if let Some(planet) = &app.planet {
+
+    let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let total_width = usize::from(area.width);
+    let mut right_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(planet) = &app.planet {
+        let pips = transmission::step_pips(&planet.campaign, options.ascii);
+        let full_chapter = format!(
+            "CH {} {} ",
+            transmission::roman_chapter(planet.campaign.chapter_number),
+            planet.campaign.title
+        );
+        let short_chapter = format!(
+            "CH {} ",
+            transmission::roman_chapter(planet.campaign.chapter_number)
+        );
+        let pips_str = format!("[{pips}] ");
+        let chapter_text =
+            if left_len + full_chapter.chars().count() + pips_str.chars().count() < total_width {
+                full_chapter
+            } else {
+                short_chapter
+            };
+        right_spans.push(Span::styled(
+            chapter_text,
+            Style::default().fg(theme.amber).bold(),
+        ));
+        right_spans.push(Span::styled(
+            pips_str,
+            Style::default().fg(theme.cyan_bright),
+        ));
+    }
+
+    let right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    if left_len + right_len < total_width {
+        left_spans.push(Span::raw(" ".repeat(total_width - left_len - right_len)));
+        left_spans.extend(right_spans);
+    } else if !ultra_compact {
+        left_spans.extend(right_spans);
+    }
+
+    let second_line = if active == Workspace::Planet && area.height <= 3 {
+        if let Some(planet) = &app.planet {
+            let surveyed = planet
+                .regions
+                .iter()
+                .filter(|r| r.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+                .count();
+            let mut spans = vec![Span::styled(
+                " NEXT // ",
+                Style::default().fg(theme.amber).bold(),
+            )];
+            if let Some(key) = &planet.campaign.next_action_key {
+                spans.push(Span::styled(format!(" {key} "), theme.key_style()));
+                spans.push(Span::raw(" "));
+            }
+            let badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let max_action = total_width.saturating_sub(used + badge.len() + 1);
+            let action = terminal_text(&planet.campaign.next_action, options.ascii);
+            let clipped = truncate_chars(&action, max_action, options.ascii);
+            let pad = total_width.saturating_sub(used + clipped.chars().count() + badge.len());
+            spans.push(Span::styled(
+                clipped,
+                Style::default().fg(theme.text_strong),
+            ));
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(Span::styled(badge, Style::default().fg(theme.cyan_bright)));
+            Line::from(spans)
+        } else {
+            Line::styled(
+                " Awaiting planetary state",
+                Style::default().fg(theme.muted),
+            )
+        }
+    } else if let Some(planet) = &app.planet {
         Line::from(vec![
             Span::styled(" QUESTION // ", Style::default().fg(theme.cyan).bold()),
             Span::styled(
@@ -1711,42 +2125,94 @@ fn render_workspace_header(
             ),
         ])
     };
-    let mut lines = vec![Line::from(navigation), second_line];
-    if active == Workspace::Planet {
-        if area.height >= 6 {
-            if let Some(planet) = &app.planet {
-                let mut next_spans = vec![Span::styled(
-                    " NEXT // ",
-                    Style::default().fg(theme.amber).bold(),
-                )];
-                if let Some(key) = &planet.campaign.next_action_key {
-                    next_spans.push(Span::styled(format!(" {key} "), theme.key_style()));
-                    next_spans.push(Span::raw(" "));
+
+    let mut lines = vec![Line::from(left_spans), second_line];
+    if active == Workspace::Planet && area.height >= 5 {
+        if let Some(planet) = &app.planet {
+            let mut next_spans = vec![Span::styled(
+                " NEXT // ",
+                Style::default().fg(theme.amber).bold(),
+            )];
+            let (override_key, override_text) = if app.local_view
+                && planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref()
+                && planet.campaign.next_action_key.as_deref() == Some("V")
+            {
+                let selected_detected = app
+                    .selected_subregion()
+                    .is_some_and(|s| s.knowledge == SubregionKnowledge::Detected);
+                if selected_detected {
+                    (
+                        Some("S"),
+                        "Press S to run a focused local survey on this FRONTIER sector.".to_owned(),
+                    )
+                } else {
+                    (
+                        Some("N"),
+                        "Press N (or Arrows) to select a FRONTIER sector, then press S to survey."
+                            .to_owned(),
+                    )
                 }
-                next_spans.push(Span::styled(
-                    terminal_text(&planet.campaign.next_action, options.ascii),
-                    Style::default().fg(theme.text),
-                ));
-                lines.push(Line::from(next_spans));
+            } else {
+                (None, String::new())
+            };
+            let display_key = override_key.or(planet.campaign.next_action_key.as_deref());
+            let display_action = if override_text.is_empty() {
+                planet.campaign.next_action.as_str()
+            } else {
+                override_text.as_str()
+            };
+            if let Some(key) = display_key {
+                next_spans.push(Span::styled(format!(" {key} "), theme.key_style()));
+                next_spans.push(Span::raw(" "));
             }
+            let used: usize = next_spans.iter().map(|s| s.content.chars().count()).sum();
+            let action = terminal_text(display_action, options.ascii);
+            next_spans.push(Span::styled(
+                truncate_chars(&action, total_width.saturating_sub(used + 1), options.ascii),
+                Style::default().fg(theme.text),
+            ));
+            lines.push(Line::from(next_spans));
         }
+    }
+    if active == Workspace::Planet && area.height >= 4 {
         lines.push(planet_store_header_line(
             app.planet.as_ref(),
             area.width,
+            options.ascii,
             theme,
         ));
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme.panel_style())
-            .block(panel("", options, theme, PanelTone::Standard)),
-        area,
-    );
+    let rule_char = if options.ascii { "-" } else { "─" };
+    lines.push(Line::styled(
+        rule_char.repeat(total_width),
+        Style::default().fg(theme.border),
+    ));
+
+    frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), area);
+}
+
+fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    if ascii {
+        let mut out: String = text.chars().take(max_chars - 3).collect();
+        out.push_str("...");
+        out
+    } else {
+        let mut out: String = text.chars().take(max_chars - 1).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn planet_store_header_line(
     planet: Option<&PlanetSnapshot>,
     width: u16,
+    ascii: bool,
     theme: Theme,
 ) -> Line<'static> {
     let Some(planet) = planet else {
@@ -1763,84 +2229,131 @@ fn planet_store_header_line(
         || {
             planet.relay_region_id.as_ref().map_or_else(
                 || "idle".to_owned(),
-                |region_id| format!("relay active at {}", region_designation(planet, region_id)),
+                |region_id| format!("relay {}", region_designation(planet, region_id)),
             )
         },
         |construction| {
             format!(
-                "relay {}% at {}",
+                "relay {}% {}",
                 operation_progress(construction.remaining_ms, construction.phase_total_ms),
                 region_designation(planet, &construction.region_id)
             )
         },
     );
+    let profile = planet
+        .research
+        .profiles
+        .iter()
+        .find(|profile| profile.active)
+        .map_or("Balanced", |profile| profile.title.as_str());
+    let sep = if ascii { " | " } else { " · " };
+    let raw_nonzero = raw.structural > 0 || raw.conductive > 0 || raw.silicate > 0;
+    let ref_nonzero = refined.structural > 0 || refined.conductive > 0 || refined.silicate > 0;
+    let fab_active = planet.active_construction.is_some() || planet.relay_region_id.is_some();
+    let analysis_nonzero = planet.research.analysis_units > 0;
+
     if width < 140 {
-        let profile = planet
-            .research
-            .profiles
-            .iter()
-            .find(|profile| profile.active)
-            .map_or("Balanced", |profile| profile.title.as_str());
         return Line::from(vec![
-            Span::styled(" STORES // ", Style::default().fg(theme.amber).bold()),
+            Span::styled(" STORES  ", Style::default().fg(theme.amber).bold()),
+            Span::styled("MAP ", Style::default().fg(theme.cyan)),
+            Span::styled(
+                format!("{surveyed}/{}", planet.regions.len()),
+                Style::default().fg(theme.text_strong).bold(),
+            ),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            Span::styled("RAW ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{}/{}/{}", raw.structural, raw.conductive, raw.silicate),
+                Style::default().fg(if raw_nonzero {
+                    theme.text_strong
+                } else {
+                    theme.muted
+                }),
+            ),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            Span::styled("REF ", Style::default().fg(theme.muted)),
             Span::styled(
                 format!(
-                    "MAP {surveyed}/{}  RAW {}/{}/{}  REF {}/{}/{}  FAB {fabrication}  P {profile}  A {}",
-                    planet.regions.len(),
-                    raw.structural,
-                    raw.conductive,
-                    raw.silicate,
-                    refined.structural,
-                    refined.conductive,
-                    refined.silicate,
-                    planet.research.analysis_units
+                    "{}/{}/{}",
+                    refined.structural, refined.conductive, refined.silicate
                 ),
-                Style::default().fg(theme.text_strong),
+                Style::default().fg(if ref_nonzero { theme.gold } else { theme.muted }),
+            ),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            Span::styled("FAB ", Style::default().fg(theme.muted)),
+            Span::styled(
+                fabrication,
+                Style::default().fg(if fab_active {
+                    theme.cyan_bright
+                } else {
+                    theme.muted
+                }),
+            ),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            Span::styled("P ", Style::default().fg(theme.muted)),
+            Span::styled(profile.to_owned(), Style::default().fg(theme.text)),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            Span::styled("A ", Style::default().fg(theme.muted)),
+            Span::styled(
+                planet.research.analysis_units.to_string(),
+                Style::default().fg(if analysis_nonzero {
+                    theme.cyan_bright
+                } else {
+                    theme.muted
+                }),
             ),
         ]);
     }
     Line::from(vec![
-        Span::styled(" MAP // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(" STORES  MAP ", Style::default().fg(theme.amber).bold()),
         Span::styled(
             format!("{surveyed} / {}", planet.regions.len()),
-            Style::default().fg(theme.text_strong),
+            Style::default().fg(theme.text_strong).bold(),
         ),
-        Span::styled(" GATHERED // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled("RAW ", Style::default().fg(theme.muted)),
         Span::styled(
             format!(
                 "S {}  C {}  Si {}",
                 raw.structural, raw.conductive, raw.silicate
             ),
-            Style::default().fg(theme.text_strong),
+            Style::default().fg(if raw_nonzero {
+                theme.text_strong
+            } else {
+                theme.muted
+            }),
         ),
-        Span::styled("   REFINED // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled("REF ", Style::default().fg(theme.muted)),
         Span::styled(
             format!(
                 "S {}  C {}  Si {}",
                 refined.structural, refined.conductive, refined.silicate
             ),
-            Style::default().fg(theme.text_strong),
+            Style::default().fg(if ref_nonzero { theme.gold } else { theme.muted }),
         ),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled("FAB ", Style::default().fg(theme.muted)),
         Span::styled(
-            "   FABRICATION // ",
-            Style::default().fg(theme.amber).bold(),
+            fabrication,
+            Style::default().fg(if fab_active {
+                theme.cyan_bright
+            } else {
+                theme.muted
+            }),
         ),
-        Span::styled(fabrication, Style::default().fg(theme.text_strong)),
-        Span::styled("   PROFILE // ", Style::default().fg(theme.amber).bold()),
-        Span::styled(
-            planet
-                .research
-                .profiles
-                .iter()
-                .find(|profile| profile.active)
-                .map_or("Balanced", |profile| profile.title.as_str())
-                .to_owned(),
-            Style::default().fg(theme.text_strong),
-        ),
-        Span::styled("   ANALYSIS // ", Style::default().fg(theme.amber).bold()),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled("PROFILE ", Style::default().fg(theme.muted)),
+        Span::styled(profile.to_owned(), Style::default().fg(theme.text_strong)),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled("ANALYSIS ", Style::default().fg(theme.muted)),
         Span::styled(
             planet.research.analysis_units.to_string(),
-            Style::default().fg(theme.text_strong),
+            Style::default().fg(if analysis_nonzero {
+                theme.cyan_bright
+            } else {
+                theme.muted
+            }),
         ),
     ])
 }
@@ -1854,7 +2367,7 @@ fn render_probes(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1874,7 +2387,7 @@ fn render_probes(
     let controls = if area.width < 72 {
         &[
             KeyHint {
-                key: "1/2",
+                key: "LEFT/RIGHT",
                 label: "probe",
             },
             KeyHint {
@@ -1894,23 +2407,23 @@ fn render_probes(
         &[
             KeyHint {
                 key: "LEFT/RIGHT",
-                label: "switch probe",
+                label: "probe",
             },
             KeyHint {
                 key: "G",
-                label: "cycle rig",
+                label: "rig",
             },
             KeyHint {
                 key: "PGUP/DN",
-                label: "scroll specs",
+                label: "specs",
             },
             KeyHint {
                 key: "ENTER",
-                label: "jump to region",
+                label: "region",
             },
             KeyHint {
                 key: "TAB",
-                label: "workspace",
+                label: "view",
             },
             KeyHint {
                 key: "Q",
@@ -1950,6 +2463,7 @@ fn render_globe(
                 phase: app.globe_phase,
                 ascii: options.ascii,
                 no_color: options.no_color,
+                ansi256: app.ansi256,
                 theme,
             },
             &mut cache,
@@ -2002,15 +2516,20 @@ fn render_local_sites(
     let column_count = u32::from(planet.network.subregion_columns.max(1));
     let rows = Layout::vertical(
         (0..row_count)
-            .map(|_| Constraint::Ratio(1, row_count))
+            .map(|_| Constraint::Fill(1))
             .collect::<Vec<_>>(),
     )
     .split(inner);
+    let min_tile_inner_rows = rows
+        .iter()
+        .map(|r| r.height.saturating_sub(2))
+        .min()
+        .unwrap_or(4);
     let selected_id = app.selected_subregion().map(|site| site.id.as_str());
     for (row_index, row_area) in rows.iter().enumerate() {
         let columns = Layout::horizontal(
             (0..column_count)
-                .map(|_| Constraint::Ratio(1, column_count))
+                .map(|_| Constraint::Fill(1))
                 .collect::<Vec<_>>(),
         )
         .split(*row_area);
@@ -2051,8 +2570,7 @@ fn render_local_sites(
                 options,
                 theme,
             });
-            let inner_rows = cell.height.saturating_sub(2);
-            if inner_rows < 5 && art_lines.len() > 1 {
+            if min_tile_inner_rows < 5 && art_lines.len() > 1 {
                 art_lines.truncate(1);
             }
             let mut lines = art_lines;
@@ -2067,9 +2585,33 @@ fn render_local_sites(
                 ),
                 Style::default().fg(theme.text_strong).bold(),
             ));
+            let tile_inner_w = cell.width.saturating_sub(2);
             if let (Some(energy), Some(hazard)) = (site.energy_yield, site.hazard) {
+                let compact_hazard = match hazard {
+                    mind_core::protocol::RiskLevel::Low => {
+                        if tile_inner_w >= 13 {
+                            "LOW 5%"
+                        } else {
+                            "L 5%"
+                        }
+                    }
+                    mind_core::protocol::RiskLevel::Moderate => {
+                        if tile_inner_w >= 13 {
+                            "MOD 15%"
+                        } else {
+                            "M 15%"
+                        }
+                    }
+                    mind_core::protocol::RiskLevel::High => {
+                        if tile_inner_w >= 13 {
+                            "HIGH 30%"
+                        } else {
+                            "H 30%"
+                        }
+                    }
+                };
                 lines.push(Line::styled(
-                    format!("E{energy} // {}", risk_text(hazard)),
+                    format!("E{energy} {sep} {compact_hazard}"),
                     Style::default().fg(if hazard == mind_core::protocol::RiskLevel::High {
                         theme.warning
                     } else {
@@ -2163,12 +2705,42 @@ fn render_local_inspector(
             if let Some(action) = &app.pending_action {
                 return local_confirmation(action, site, planet, theme);
             }
-            let mut lines = vec![
-                Line::styled(
-                    site.designation.clone(),
-                    Style::default().fg(theme.text_strong).bold(),
-                ),
-                Line::from(""),
+            let mut lines = vec![Line::styled(
+                site.designation.clone(),
+                Style::default().fg(theme.text_strong).bold(),
+            )];
+            let site_base = planet
+                .network
+                .bases
+                .iter()
+                .find(|base| base.subregion_id == site.id);
+            let active_survey = planet
+                .network
+                .active_site_survey
+                .as_ref()
+                .is_some_and(|survey| survey.subregion_id == site.id);
+            if area.height >= 20 {
+                let vista_w = area.width.saturating_sub(2).max(16);
+                let vista_h = if area.height >= 32 { 5 } else { 4 };
+                lines.extend(
+                    vista::render_local_vista(
+                        site,
+                        site_base,
+                        active_survey,
+                        vista_w,
+                        vista_h,
+                        app.globe_phase,
+                        app.color_tier(options),
+                    )
+                    .lines,
+                );
+                if let Some(base) = site_base {
+                    lines.push(local_module_strip(base, options.ascii, theme));
+                }
+            } else {
+                lines.push(Line::from(""));
+            }
+            lines.extend([
                 section_line("SITE CONDITIONS", theme),
                 field_line(
                     "POSITION",
@@ -2204,7 +2776,7 @@ fn render_local_inspector(
                         .map_or("unresolved".into(), |value| format!("yield {value} / 6")),
                     theme,
                 ),
-            ];
+            ]);
             if let Some(deposit) = &site.deposit {
                 lines.push(field_line(
                     "DEPOSIT",
@@ -2226,7 +2798,7 @@ fn render_local_inspector(
                 .filter(|survey| survey.subregion_id == site.id)
             {
                 lines.push(field_line(
-                    "LOCAL SURVEY",
+                    "LOCAL SCAN",
                     format!(
                         "{}% // {}s",
                         operation_progress(survey.remaining_ms, survey.phase_total_ms),
@@ -2265,23 +2837,7 @@ fn render_local_inspector(
             }
             lines.push(Line::from(""));
             lines.push(section_line("LOCAL INFRASTRUCTURE", theme));
-            let site_base = planet
-                .network
-                .bases
-                .iter()
-                .find(|base| base.subregion_id == site.id);
             if let Some(base) = site_base {
-                if area.height >= 30 {
-                    lines.extend(art::local_structure_cutaway(
-                        site,
-                        Some(base),
-                        false,
-                        app.globe_phase,
-                        options,
-                        theme,
-                    ));
-                    lines.push(Line::from(""));
-                }
                 lines.push(field_line(
                     "NODE",
                     format!(
@@ -2349,20 +2905,6 @@ fn render_local_inspector(
                 theme,
             ));
             lines.extend(local_action_lines(app, planet, site, theme));
-            if let Some(base) = site_base {
-                if area.height >= 20 && area.height < 30 {
-                    lines.push(Line::from(""));
-                    lines.push(section_line("OUTPOST SCHEMATIC", theme));
-                    lines.extend(art::local_structure_cutaway(
-                        site,
-                        Some(base),
-                        false,
-                        app.globe_phase,
-                        options,
-                        theme,
-                    ));
-                }
-            }
             Text::from(lines)
         },
     );
@@ -2457,6 +2999,11 @@ fn local_action_lines(
     site: &SubregionSnapshot,
     theme: Theme,
 ) -> Vec<Line<'static>> {
+    let has_node = planet
+        .network
+        .bases
+        .iter()
+        .any(|base| base.subregion_id == site.id);
     let mut lines = vec![
         local_action_line(
             "S",
@@ -2479,14 +3026,28 @@ fn local_action_lines(
             local_base_blocker(app, planet, site),
             theme,
         ),
-        local_action_line(
-            "M",
-            "maintenance",
-            app.base_maintenance_action().is_some(),
-            local_maintenance_blocker(planet, site),
-            theme,
-        ),
     ];
+    if !has_node {
+        lines.push(local_action_line(
+            "P/C/D/W/L/O",
+            "node modules",
+            false,
+            if planet.network.unlocked {
+                "establish a node at this site first".into()
+            } else {
+                "unlock planetary network, then establish a node".into()
+            },
+            theme,
+        ));
+        return lines;
+    }
+    lines.push(local_action_line(
+        "M",
+        "maintenance",
+        app.base_maintenance_action().is_some(),
+        local_maintenance_blocker(planet, site),
+        theme,
+    ));
     for (key, module) in [
         ("P", BaseModuleKind::PowerArray),
         ("C", BaseModuleKind::Communications),
@@ -2825,7 +3386,7 @@ fn render_region_inspector(
                 ]);
             }
 
-            let mut lines = vec![designation_line(&region.designation, region.core, theme)];
+            let mut lines = vec![region_title_line(region, options.ascii, theme)];
             let region_has_concurrent_ops = planet
                 .active_mission
                 .as_ref()
@@ -2834,13 +3395,26 @@ fn render_region_inspector(
                     .active_extraction
                     .as_ref()
                     .is_some_and(|m| m.target_region_id == region.id);
-            let show_top_diorama = area.height >= 22 && !region_has_concurrent_ops;
-            if show_top_diorama {
-                lines.extend(art::region_terrain_diorama(
+            let show_top_vista = area.height >= 16 && !region_has_concurrent_ops;
+            if show_top_vista {
+                let vista_w = area.width.saturating_sub(2).max(16);
+                let vista_h = if area.height >= 26 { 6 } else { 4 };
+                lines.extend(
+                    vista::render_region_vista(
+                        region,
+                        planet,
+                        vista_w,
+                        vista_h,
+                        app.globe_phase,
+                        app.color_tier(options),
+                    )
+                    .lines,
+                );
+                lines.push(region_vista_caption(
                     region,
                     planet,
-                    app.globe_phase,
-                    options,
+                    area.width < 58,
+                    options.ascii,
                     theme,
                 ));
             }
@@ -2863,6 +3437,25 @@ fn render_region_inspector(
                 lines.push(Line::from(""));
                 lines.push(section_line("LOCAL PRESENCE", theme));
                 lines.extend(region_presence_lines(planet, region, theme));
+            } else if area.height < 22 && !region_has_concurrent_ops {
+                lines.push(Line::from(""));
+                lines.push(section_line("REGION OPERATIONS", theme));
+                lines.extend(region_action_lines(app, planet, region, theme));
+                lines.push(Line::from(""));
+                lines.push(section_line("ACTIVE IN REGION", theme));
+                lines.extend(local_operation_lines(
+                    app,
+                    planet,
+                    region,
+                    options.ascii,
+                    theme,
+                    now,
+                ));
+                lines.push(Line::from(""));
+                lines.push(section_line("LOCAL PRESENCE", theme));
+                lines.extend(region_presence_lines(planet, region, theme));
+                lines.push(Line::from(""));
+                lines.extend(region_data_lines(region, theme));
             } else {
                 lines.push(Line::from(""));
                 lines.push(section_line("ACTIVE IN REGION", theme));
@@ -2882,13 +3475,25 @@ fn render_region_inspector(
                 lines.push(Line::from(""));
                 lines.push(section_line("REGION OPERATIONS", theme));
                 lines.extend(region_action_lines(app, planet, region, theme));
-                if !show_top_diorama && area.height >= 22 {
+                if !show_top_vista && area.height >= 22 {
+                    let vista_w = area.width.saturating_sub(2).max(16);
                     lines.push(Line::from(""));
-                    lines.extend(art::region_terrain_diorama(
+                    lines.extend(
+                        vista::render_region_vista(
+                            region,
+                            planet,
+                            vista_w,
+                            5,
+                            app.globe_phase,
+                            app.color_tier(options),
+                        )
+                        .lines,
+                    );
+                    lines.push(region_vista_caption(
                         region,
                         planet,
-                        app.globe_phase,
-                        options,
+                        area.width < 58,
+                        options.ascii,
                         theme,
                     ));
                 }
@@ -2928,6 +3533,157 @@ fn render_region_inspector(
             )),
         area,
     );
+}
+
+fn region_title_line(
+    region: &mind_core::protocol::RegionSnapshot,
+    ascii: bool,
+    theme: Theme,
+) -> Line<'static> {
+    let sep = if ascii { " - " } else { " · " };
+    let mut spans = vec![Span::styled(
+        region.designation.clone(),
+        Style::default().fg(theme.text_strong).bold(),
+    )];
+    if region.core {
+        spans.push(Span::styled(
+            "  [CORE]",
+            Style::default().fg(theme.gold).bold(),
+        ));
+    } else if region.relay {
+        spans.push(Span::styled(
+            "  [RELAY]",
+            Style::default().fg(theme.success).bold(),
+        ));
+    } else {
+        let knowledge = format!("{:?}", region.knowledge).to_uppercase();
+        spans.push(Span::styled(
+            format!("  [{knowledge}]"),
+            Style::default().fg(
+                if region.knowledge == mind_core::protocol::RegionKnowledge::Unknown {
+                    theme.muted
+                } else {
+                    theme.cyan_bright
+                },
+            ),
+        ));
+    }
+    spans.push(Span::styled(sep, Style::default().fg(theme.faint)));
+    spans.push(Span::styled(
+        format!("{} HOP", region.hop_distance_from_core),
+        Style::default().fg(if region.within_scout_range || region.core {
+            theme.text
+        } else {
+            theme.warning
+        }),
+    ));
+    Line::from(spans)
+}
+
+fn local_module_strip(
+    base: &mind_core::protocol::BaseSnapshot,
+    ascii: bool,
+    theme: Theme,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let slots = [
+        (BaseModuleKind::PowerArray, "PP", "P·PWR", "P-PWR"),
+        (BaseModuleKind::Communications, "CC", "C·COM", "C-COM"),
+        (BaseModuleKind::Depot, "DD", "D·DEP", "D-DEP"),
+        (BaseModuleKind::Workshop, "WW", "W·WRK", "W-WRK"),
+        (BaseModuleKind::Laboratory, "LL", "L·LAB", "L-LAB"),
+        (BaseModuleKind::Observatory, "OO", "O·OBS", "O-OBS"),
+    ];
+    for (kind, code, uni_tag, asc_tag) in slots {
+        let Some(module) = base.modules.iter().find(|m| m.kind == kind) else {
+            continue;
+        };
+        let color = if !module.enabled {
+            theme.muted
+        } else if module.active {
+            theme.cyan_bright
+        } else {
+            theme.warning
+        };
+        let badge = if ascii {
+            format!("[{code}] {asc_tag}  ")
+        } else {
+            format!("▐{code}▌ {uni_tag}  ")
+        };
+        spans.push(Span::styled(badge, Style::default().fg(color).bold()));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(
+            "FOOTHOLD FOUNDATION // NO MODULES",
+            Style::default().fg(theme.muted),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn region_vista_caption(
+    region: &mind_core::protocol::RegionSnapshot,
+    planet: &PlanetSnapshot,
+    compact: bool,
+    ascii: bool,
+    theme: Theme,
+) -> Line<'static> {
+    let sep = if ascii { " / " } else { " · " };
+    if region.knowledge == mind_core::protocol::RegionKnowledge::Unknown || region.terrain.is_none()
+    {
+        return Line::from(vec![
+            Span::styled(
+                "UNRESOLVED HORIZON",
+                Style::default().fg(theme.amber).bold(),
+            ),
+            Span::styled(
+                format!("{sep}survey required"),
+                Style::default().fg(theme.muted),
+            ),
+        ]);
+    }
+    let terrain = format!("{:?}", region.terrain.unwrap()).to_uppercase();
+    let temp = region
+        .temperature
+        .map_or("?".into(), |t| format!("{t:?}").to_uppercase());
+    let atmo = region
+        .atmospheric_severity
+        .map_or("?".into(), |a| format!("{a:?}").to_uppercase());
+    let lead = if compact {
+        terrain
+    } else {
+        format!("{terrain}{sep}{temp}{sep}{atmo}")
+    };
+    let mut spans = vec![Span::styled(lead, Style::default().fg(theme.cyan_bright))];
+    if region.core {
+        spans.push(Span::styled(
+            format!("{sep}CORE COMPLEX ONLINE"),
+            Style::default().fg(theme.gold).bold(),
+        ));
+    } else if planet
+        .network
+        .bases
+        .iter()
+        .any(|b| b.region_id == region.id)
+    {
+        spans.push(Span::styled(
+            format!("{sep}OUTPOST ONLINE"),
+            Style::default().fg(theme.success).bold(),
+        ));
+    } else if region.relay {
+        spans.push(Span::styled(
+            format!("{sep}RELAY ACTIVE"),
+            Style::default().fg(theme.success).bold(),
+        ));
+    } else if let Some(deposit) = &region.deposit {
+        if deposit.remaining > 0 {
+            spans.push(Span::styled(
+                format!("{sep}{:?} {}", deposit.resource, deposit.remaining).to_uppercase(),
+                Style::default().fg(theme.amber).bold(),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 fn region_data_lines(
@@ -3215,7 +3971,11 @@ fn region_presence_lines(
         .position(|queued| queued == &region.id)
     {
         lines.push(field_line(
-            "SURVEY QUEUE",
+            if planet.survey_queue.unlocked {
+                "QUEUE"
+            } else {
+                "WAYPOINT"
+            },
             format!(
                 "position {} of {}",
                 position + 1,
@@ -3263,10 +4023,10 @@ fn region_presence_lines(
         .filter(|mission| mission.target_region_id == region.id)
     {
         let relation = match mission.phase {
-            ScoutState::Outbound => "inbound",
+            ScoutState::Outbound => "inbound from core",
             ScoutState::Surveying => "surveying locally",
             ScoutState::Holding => "holding locally",
-            ScoutState::Returning => "returning from region",
+            ScoutState::Returning => "returning to core",
             ScoutState::Ready => "ready",
         };
         format!("{} // {relation}", planet.scout.designation)
@@ -3283,9 +4043,9 @@ fn region_presence_lines(
         .filter(|mission| mission.target_region_id == region.id)
     {
         let relation = match mission.phase {
-            mind_core::protocol::ExtractorState::Outbound => "inbound",
+            mind_core::protocol::ExtractorState::Outbound => "inbound from core",
             mind_core::protocol::ExtractorState::Extracting => "extracting locally",
-            mind_core::protocol::ExtractorState::Returning => "returning from region",
+            mind_core::protocol::ExtractorState::Returning => "returning to core",
             mind_core::protocol::ExtractorState::Ready => "ready",
             mind_core::protocol::ExtractorState::Rebuilding => "rebuilding",
         };
@@ -3327,7 +4087,13 @@ fn region_action_lines(
     let primary = app.primary_region_action();
     let automation = app.automation_action();
     let automation_label = match automation.as_ref() {
+        Some(ContextAction::QueueSurvey(_)) if !planet.survey_queue.unlocked => {
+            "queue waypoint (next)"
+        }
         Some(ContextAction::QueueSurvey(_)) => "queue survey",
+        Some(ContextAction::RemoveQueuedSurvey(_)) if !planet.survey_queue.unlocked => {
+            "clear waypoint"
+        }
         Some(ContextAction::RemoveQueuedSurvey(_)) => "remove queued survey",
         Some(ContextAction::SetExtractionRoute(_))
             if planet.extraction_route.region_id.as_deref() == Some(region.id.as_str()) =>
@@ -3336,67 +4102,116 @@ fn region_action_lines(
         }
         Some(ContextAction::SetExtractionRoute(_)) => "activate route",
         Some(ContextAction::ClearExtractionRoute) => "clear route",
+        _ if !planet.survey_queue.unlocked => "waypoint / auto",
         _ => "automation",
     };
     let automation_identity = automation
         .clone()
         .unwrap_or_else(|| ContextAction::QueueSurvey(region.id.clone()));
-    let mut lines = vec![
-        region_action_line(
-            "S",
-            "survey",
-            ContextAction::Deploy(region.id.clone()),
-            app.scout_action(),
-            primary.as_ref(),
-            survey_block_reason(planet, region),
-            theme,
-        ),
-        region_action_line(
-            "X",
-            "extract",
-            ContextAction::Extract(region.id.clone()),
-            app.extraction_action(),
-            primary.as_ref(),
-            extraction_block_reason(planet, region),
-            theme,
-        ),
-        region_action_line(
-            "G",
-            format!("select {}", planet.extractor.loadout.next().title()),
-            ContextAction::ConfigureExtractor(planet.extractor.loadout.next()),
-            app.extractor_loadout_action(),
-            None,
-            extractor_loadout_blocker(planet),
-            theme,
-        ),
-        region_action_line(
-            "B",
-            "build relay",
-            ContextAction::ConstructRelay(region.id.clone()),
-            app.construction_action(),
-            primary.as_ref(),
-            construction_block_reason(planet, region),
-            theme,
-        ),
-        region_action_line(
-            "R",
-            "recall scout",
-            ContextAction::Recall,
-            app.scout_recall_action(),
-            primary.as_ref(),
-            recall_block_reason(planet, region),
-            theme,
-        ),
-        region_action_line(
-            "A",
-            automation_label,
-            automation_identity,
-            automation,
-            None,
-            automation_block_reason(planet, region),
-            theme,
-        ),
+
+    struct ActionEntry {
+        key: &'static str,
+        label: String,
+        action: ContextAction,
+        available: Option<ContextAction>,
+        allow_primary: bool,
+        show_when_blocked: bool,
+        block_reason: String,
+    }
+    let mut ready_lines = Vec::new();
+    let mut blocked_lines = Vec::new();
+    let region_surveyed = region.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed;
+    let rig_relevant = region.core
+        || region.deposit.is_some()
+        || planet
+            .active_extraction
+            .as_ref()
+            .is_some_and(|m| m.target_region_id == region.id);
+    let entries = vec![
+        ActionEntry {
+            key: "S",
+            label: "survey".into(),
+            action: ContextAction::Deploy(region.id.clone()),
+            available: app.scout_action(),
+            allow_primary: true,
+            show_when_blocked: !region.core && !region_surveyed,
+            block_reason: survey_block_reason(planet, region),
+        },
+        ActionEntry {
+            key: "X",
+            label: "extract".into(),
+            action: ContextAction::Extract(region.id.clone()),
+            available: app.extraction_action(),
+            allow_primary: true,
+            show_when_blocked: region.deposit.is_some(),
+            block_reason: extraction_block_reason(planet, region),
+        },
+        ActionEntry {
+            key: "B",
+            label: "build relay".into(),
+            action: ContextAction::ConstructRelay(region.id.clone()),
+            available: app.construction_action(),
+            allow_primary: true,
+            show_when_blocked: !region.core && region_surveyed && planet.relay_region_id.is_none(),
+            block_reason: construction_block_reason(planet, region),
+        },
+        ActionEntry {
+            key: "R",
+            label: "recall scout".into(),
+            action: ContextAction::Recall,
+            available: app.scout_recall_action(),
+            allow_primary: true,
+            show_when_blocked: planet.scout.state == mind_core::protocol::ScoutState::Holding
+                || planet.active_mission.is_some(),
+            block_reason: recall_block_reason(planet, region),
+        },
+        ActionEntry {
+            key: "A",
+            label: automation_label.into(),
+            action: automation_identity,
+            available: automation,
+            allow_primary: false,
+            show_when_blocked: planet.survey_queue.unlocked
+                || planet.active_mission.is_some()
+                || (planet.extraction_route.unlocked && region.deposit.is_some()),
+            block_reason: automation_block_reason(planet, region),
+        },
+        ActionEntry {
+            key: "G",
+            label: format!("select {}", planet.extractor.loadout.next().title()),
+            action: ContextAction::ConfigureExtractor(planet.extractor.loadout.next()),
+            available: app.extractor_loadout_action(),
+            allow_primary: false,
+            show_when_blocked: rig_relevant,
+            block_reason: extractor_loadout_blocker(planet),
+        },
     ];
+
+    for entry in entries {
+        let is_available = entry.available.as_ref() == Some(&entry.action);
+        if !is_available && !entry.show_when_blocked {
+            continue;
+        }
+        let line = region_action_line(
+            entry.key,
+            entry.label,
+            entry.action,
+            entry.available,
+            if entry.allow_primary {
+                primary.as_ref()
+            } else {
+                None
+            },
+            entry.block_reason,
+            theme,
+        );
+        if is_available {
+            ready_lines.push(line);
+        } else {
+            blocked_lines.push(line);
+        }
+    }
+
     let local_field_available = planet
         .network
         .subregions
@@ -3405,19 +4220,34 @@ fn region_action_lines(
     let local_field_status = if !local_field_available {
         crate::app::LOCAL_FIELD_SURVEY_GUIDANCE
     } else if planet.network.unlocked {
-        "open spatial local field"
+        "open 4x4 local field"
     } else {
-        "open 4x4 local field (focused survey ready)"
+        "open 4x4 local field (focused survey)"
     };
-    lines.push(Line::from(vec![
-        Span::styled("[V] ", Style::default().fg(theme.amber).bold()),
+    let local_field_line = Line::from(vec![
+        Span::styled(
+            "[V] ",
+            Style::default()
+                .fg(if local_field_available {
+                    theme.amber
+                } else {
+                    theme.faint
+                })
+                .bold(),
+        ),
         Span::styled(
             "local field",
-            Style::default().fg(if local_field_available {
-                theme.text_strong
-            } else {
-                theme.muted
-            }),
+            Style::default()
+                .fg(if local_field_available {
+                    theme.text_strong
+                } else {
+                    theme.muted
+                })
+                .add_modifier(if local_field_available {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ),
         Span::styled(" // ", Style::default().fg(theme.faint)),
         Span::styled(
@@ -3428,7 +4258,21 @@ fn region_action_lines(
                 theme.muted
             }),
         ),
-    ]));
+    ]);
+    if local_field_available {
+        ready_lines.push(local_field_line);
+    } else if !region.core {
+        blocked_lines.push(local_field_line);
+    }
+
+    let mut lines = ready_lines;
+    if !blocked_lines.is_empty() {
+        lines.push(Line::styled(
+            "UNAVAILABLE HERE",
+            Style::default().fg(theme.faint),
+        ));
+        lines.extend(blocked_lines);
+    }
     lines
 }
 
@@ -3436,9 +4280,6 @@ fn automation_block_reason(
     planet: &PlanetSnapshot,
     region: &mind_core::protocol::RegionSnapshot,
 ) -> String {
-    if !planet.survey_queue.unlocked {
-        return "complete research to earn routine automation".into();
-    }
     if !region.core
         && region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed
         && !region.within_scout_range
@@ -3446,7 +4287,21 @@ fn automation_block_reason(
         return "region is beyond current network reach".into();
     }
     if region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed {
+        if planet.survey_queue.queued_region_ids.len() >= planet.survey_queue.capacity {
+            return if planet.survey_queue.unlocked {
+                format!(
+                    "survey queue full ({}/{})",
+                    planet.survey_queue.queued_region_ids.len(),
+                    planet.survey_queue.capacity
+                )
+            } else {
+                "waypoint slot full (1/1) // research unlocks 8-slot queue".into()
+            };
+        }
         return "survey is already active or queued".into();
+    }
+    if !planet.extraction_route.unlocked {
+        return "complete research to earn routine extraction routes".into();
     }
     if let Some(deposit) = &region.deposit {
         if deposit.remaining == 0 {
@@ -3667,6 +4522,23 @@ fn render_workspace_footer(
             ]);
         }
     }
+    if matches!(app.connection, ConnectionState::Connected) {
+        if let Some((badge, highlight)) = app.next_event_badge(now) {
+            spans.extend([
+                separator(theme),
+                Span::styled(
+                    badge,
+                    Style::default()
+                        .fg(if highlight {
+                            theme.gold
+                        } else {
+                            theme.cyan_bright
+                        })
+                        .bold(),
+                ),
+            ]);
+        }
+    }
     if let Some(notice) = &app.notice {
         spans.extend([
             separator(theme),
@@ -3738,73 +4610,118 @@ fn render_onboarding(
     options: RenderOptions,
     theme: Theme,
 ) {
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            if options.ascii { "# " } else { "◆ " },
-            Style::default().fg(theme.amber),
-        ),
-        Span::styled("SUBSTRATE", Style::default().fg(theme.text_strong).bold()),
-        Span::styled(" // COHERENCE", Style::default().fg(theme.muted)),
-    ]))
-    .alignment(Alignment::Center)
-    .style(theme.canvas_style());
-    let footer = Paragraph::new(connection_line(app, theme, area.width < 72))
-        .alignment(Alignment::Center)
-        .style(theme.canvas_style());
+    let confirming = !matches!(app.onboarding_view, OnboardingView::Adjusting);
+    let tier = app.color_tier(options);
+
+    // 1. Full-bleed harmonic phase canvas across the entire viewport.
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(10),
-        Constraint::Length(2),
+        Constraint::Length(1),
     ])
     .split(area);
+
+    let canvas_buf = cinematic::build_coherence_buffer(
+        chunks[1].width,
+        chunks[1].height,
+        app.band_positions,
+        app.selected_band,
+        app.globe_phase,
+        confirming,
+    );
+    crate::raster::blit_to_frame(&canvas_buf, frame, chunks[1], tier);
+
+    // 2. Clean top bar with hairline rule.
+    let rule = if options.ascii { "-" } else { "─" };
+    let title = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                if options.ascii { "# " } else { "◆ " },
+                Style::default().fg(theme.gold).bold(),
+            ),
+            Span::styled("SUBSTRATE", Style::default().fg(theme.text_strong).bold()),
+            Span::styled(" // COHERENCE", Style::default().fg(theme.cyan_bright)),
+        ]),
+        Line::styled(
+            rule.repeat(usize::from(area.width)),
+            Style::default().fg(theme.border),
+        ),
+    ])
+    .alignment(Alignment::Center)
+    .style(theme.panel_style());
     frame.render_widget(title, chunks[0]);
-    frame.render_widget(footer, chunks[2]);
 
-    let panel_area = centered_rect(58.min(area.width.saturating_sub(2)), 22, chunks[1]);
-    let panel = panel(" AWAKENING ", options, theme, PanelTone::Focused);
-    let inner = panel.inner(panel_area);
-    frame.render_widget(panel, panel_area);
-
+    // 3. Sleek floating HUD docked in the lower portion of the full-bleed canvas.
     match app.onboarding_view {
         OnboardingView::Adjusting => {
-            let rows = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Min(11),
-                Constraint::Length(1),
-                Constraint::Length(2),
-                Constraint::Length(2),
-            ])
-            .split(inner);
-            frame.render_widget(
-                Paragraph::new("The signals repeat, but do not agree.")
-                    .alignment(Alignment::Center)
-                    .style(theme.panel_style().fg(theme.text_strong)),
-                rows[0],
-            );
-            frame.render_widget(
-                Paragraph::new(ring_art(
-                    app.band_positions,
-                    app.selected_band,
-                    options.ascii,
-                    theme,
-                ))
-                .alignment(Alignment::Center)
-                .style(theme.panel_style()),
-                rows[1],
-            );
-            frame.render_widget(
-                Paragraph::new(art::coherence_oscilloscope(
+            let hud_h = 8.min(chunks[1].height);
+            let hud_w = chunks[1].width.saturating_sub(4).clamp(42, 76);
+            let hud_y = chunks[1].y + chunks[1].height.saturating_sub(hud_h + 1);
+            let hud_x = chunks[1].x + chunks[1].width.saturating_sub(hud_w) / 2;
+            let hud_area = Rect::new(hud_x, hud_y, hud_w, hud_h);
+            let block = panel(" COHERENCE ", options, theme, PanelTone::Focused);
+            let inner = block.inner(hud_area);
+            frame.render_widget(Clear, hud_area);
+            frame.render_widget(block, hud_area);
+
+            let band_bar = |idx: usize, pos: u8| -> Span<'static> {
+                let active = idx == app.selected_band;
+                let marker = if options.ascii {
+                    if active {
+                        ">"
+                    } else {
+                        " "
+                    }
+                } else if active {
+                    "▸"
+                } else {
+                    " "
+                };
+                Span::styled(
+                    format!("{marker}B{} [{:02}/12]  ", idx + 1, pos + 1),
+                    Style::default()
+                        .fg(if active {
+                            theme.gold
+                        } else if app.aligned() {
+                            theme.cyan_bright
+                        } else {
+                            theme.muted
+                        })
+                        .add_modifier(if active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )
+            };
+
+            let mut hud_lines = vec![
+                Line::styled(
+                    if app.aligned() {
+                        "Three harmonic bands lock in phase."
+                    } else {
+                        "The signals repeat, but do not agree."
+                    },
+                    Style::default()
+                        .fg(if app.aligned() {
+                            theme.gold
+                        } else {
+                            theme.text_strong
+                        })
+                        .bold(),
+                ),
+                Line::from(vec![
+                    band_bar(0, app.band_positions[0]),
+                    band_bar(1, app.band_positions[1]),
+                    band_bar(2, app.band_positions[2]),
+                ]),
+                art::coherence_oscilloscope(
                     app.band_positions,
                     app.globe_phase,
                     options.ascii,
                     theme,
-                ))
-                .alignment(Alignment::Center)
-                .style(theme.panel_style()),
-                rows[2],
-            );
-            frame.render_widget(
-                Paragraph::new(Line::from(hint_spans(
+                ),
+                Line::from(hint_spans(
                     &[
                         KeyHint {
                             key: if options.ascii { "UP/DN" } else { "↑↓" },
@@ -3824,56 +4741,45 @@ fn render_onboarding(
                         },
                     ],
                     theme,
-                )))
-                .alignment(Alignment::Center)
-                .style(theme.panel_style()),
-                rows[3],
-            );
+                )),
+            ];
             if let Some(notice) = &app.notice {
-                frame.render_widget(
-                    Paragraph::new(notice.as_str())
-                        .alignment(Alignment::Center)
-                        .style(theme.panel_style().fg(theme.warning).bold()),
-                    rows[4],
-                );
+                hud_lines.push(Line::styled(
+                    notice.as_str(),
+                    Style::default().fg(theme.warning).bold(),
+                ));
             }
+            frame.render_widget(
+                Paragraph::new(hud_lines)
+                    .alignment(Alignment::Center)
+                    .style(theme.panel_style()),
+                inner,
+            );
         }
         OnboardingView::Confirming | OnboardingView::Submitting => {
-            let marker = if options.ascii {
-                [
-                    "       . . .",
-                    "     +-------+",
-                    "   --+   *   +--",
-                    "     +-------+",
-                    "       . . .",
-                ]
-            } else {
-                [
-                    "       · · ·",
-                    "     ┌───────┐",
-                    "   ──┤   •   ├──",
-                    "     └───────┘",
-                    "       · · ·",
-                ]
-            };
             let submitting = app.onboarding_view == OnboardingView::Submitting;
             let connected = matches!(app.connection, ConnectionState::Connected);
-            let mut lines = marker
-                .into_iter()
-                .map(|line| Line::styled(line, Style::default().fg(theme.cyan)))
-                .collect::<Vec<_>>();
-            lines.extend([
-                Line::from(""),
+            let card_w = chunks[1].width.saturating_sub(4).clamp(42, 68);
+            let card_h = 9.min(chunks[1].height);
+            let card_y = chunks[1].y + chunks[1].height.saturating_sub(card_h + 1);
+            let card_x = chunks[1].x + chunks[1].width.saturating_sub(card_w) / 2;
+            let card_area = Rect::new(card_x, card_y, card_w, card_h);
+            let block = panel(" INTERVAL LOCKED ", options, theme, PanelTone::Modal);
+            let inner = block.inner(card_area);
+            frame.render_widget(Clear, card_area);
+            frame.render_widget(block, card_area);
+
+            let lines = vec![
                 Line::styled(
                     "The interval holds.",
-                    Style::default().fg(theme.text_strong).bold(),
+                    Style::default().fg(theme.gold).bold(),
                 ),
-                Line::from(""),
+                Line::raw(""),
                 Line::styled(
                     "It is easier to observe when the pattern returns.",
-                    Style::default().fg(theme.text),
+                    Style::default().fg(theme.text_strong),
                 ),
-                Line::from(""),
+                Line::raw(""),
                 Line::styled(
                     if submitting {
                         "Submitting..."
@@ -3882,22 +4788,29 @@ fn render_onboarding(
                     } else {
                         "Esc Reconsider     Enter Awaken"
                     },
-                    Style::default().fg(if connected {
-                        theme.cyan_bright
-                    } else {
-                        theme.warning
-                    }),
+                    Style::default()
+                        .fg(if connected {
+                            theme.cyan_bright
+                        } else {
+                            theme.warning
+                        })
+                        .bold(),
                 ),
-            ]);
+            ];
             frame.render_widget(
                 Paragraph::new(Text::from(lines))
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: true })
-                    .style(theme.panel_style()),
+                    .style(theme.raised_style()),
                 inner,
             );
         }
     }
+
+    let footer = Paragraph::new(connection_line(app, theme, area.width < 72))
+        .alignment(Alignment::Center)
+        .style(theme.panel_style());
+    frame.render_widget(footer, chunks[2]);
 }
 
 fn render_dashboard(
@@ -3911,7 +4824,7 @@ fn render_dashboard(
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if area.width >= 72
     {
         let rows = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(7),
             Constraint::Min(6),
             Constraint::Length(2),
@@ -3922,7 +4835,7 @@ fn render_dashboard(
         (rows[0], columns[0], columns[1], rows[2], rows[3])
     } else {
         let rows = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Min(6),
@@ -4202,78 +5115,6 @@ fn render_dashboard(
     );
 }
 
-fn ring_art(positions: [u8; 3], selected: usize, ascii: bool, theme: Theme) -> Text<'static> {
-    const WIDTH: usize = 35;
-    const HEIGHT: usize = 11;
-    let mut cells = vec![vec![(' ', None); WIDTH]; HEIGHT];
-    for (band, position) in positions.iter().enumerate() {
-        let left = band * 3;
-        let right = WIDTH - 1 - band * 3;
-        let top = band * 2;
-        let bottom = HEIGHT - 1 - band * 2;
-        for cell in &mut cells[top][left..=right] {
-            *cell = (if ascii { '-' } else { '─' }, Some(band));
-        }
-        for cell in &mut cells[bottom][left..=right] {
-            *cell = (if ascii { '-' } else { '─' }, Some(band));
-        }
-        for row in cells.iter_mut().take(bottom + 1).skip(top) {
-            row[left] = (if ascii { '|' } else { '│' }, Some(band));
-            row[right] = (if ascii { '|' } else { '│' }, Some(band));
-        }
-        let corner = if ascii { '+' } else { '•' };
-        cells[top][left] = (corner, Some(band));
-        cells[top][right] = (corner, Some(band));
-        cells[bottom][left] = (corner, Some(band));
-        cells[bottom][right] = (corner, Some(band));
-        let (gap_x, gap_y) = gap_coordinate(*position, left, right, top, bottom);
-        cells[gap_y][gap_x] = (' ', Some(band));
-    }
-
-    Text::from(
-        cells
-            .into_iter()
-            .map(|row| {
-                let spans = row
-                    .into_iter()
-                    .map(|(character, band)| {
-                        let style = if band == Some(selected) {
-                            Style::default()
-                                .fg(theme.cyan_bright)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(theme.border)
-                        };
-                        Span::styled(character.to_string(), style)
-                    })
-                    .collect::<Vec<_>>();
-                Line::from(spans)
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn gap_coordinate(
-    slot: u8,
-    left: usize,
-    right: usize,
-    top: usize,
-    bottom: usize,
-) -> (usize, usize) {
-    let slot = usize::from(slot % 12);
-    match slot {
-        0..=2 => (interpolate(left + 1, right - 1, slot, 2), top),
-        3..=5 => (right, interpolate(top + 1, bottom - 1, slot - 3, 2)),
-        6..=8 => (interpolate(right - 1, left + 1, slot - 6, 2), bottom),
-        _ => (left, interpolate(bottom - 1, top + 1, slot - 9, 2)),
-    }
-}
-
-fn interpolate(start: usize, end: usize, step: usize, total: usize) -> usize {
-    let start = start as isize;
-    (start + (end as isize - start) * step as isize / total as isize) as usize
-}
-
 fn connection_line(app: &App, theme: Theme, compact: bool) -> Line<'static> {
     let mut spans = connection_spans(&app.connection, theme);
     spans.push(separator(theme));
@@ -4320,6 +5161,106 @@ fn connection_label(state: &ConnectionState) -> &'static str {
     }
 }
 
+fn render_pilot_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+    now: Instant,
+) {
+    let Some(planet) = &app.planet else {
+        return;
+    };
+    let surveyed = planet
+        .regions
+        .iter()
+        .filter(|r| r.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+        .count();
+    let sep = if options.ascii { " | " } else { " · " };
+    let dot = if options.ascii { "*" } else { "◆" };
+    let line1 = Line::from(vec![
+        Span::styled(
+            format!(" {dot} SUBSTRATE"),
+            Style::default().fg(theme.gold).bold(),
+        ),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled(
+            format!(
+                "CH {}",
+                transmission::roman_chapter(planet.campaign.chapter_number)
+            ),
+            Style::default().fg(theme.amber).bold(),
+        ),
+        Span::styled(sep, Style::default().fg(theme.faint)),
+        Span::styled(
+            format!("MAP {surveyed}/{}", planet.regions.len()),
+            Style::default().fg(theme.cyan_bright),
+        ),
+    ]);
+
+    let status_line = if let Some((badge, highlight)) = app.next_event_badge(now) {
+        let (glyph, glyph_color) = if !planet.archive.unpresented_record_ids.is_empty() {
+            (if options.ascii { " ! " } else { " ◈ " }, theme.gold)
+        } else if highlight {
+            (if options.ascii { " * " } else { " ● " }, theme.success)
+        } else {
+            (if options.ascii { " > " } else { " ▶ " }, theme.cyan_bright)
+        };
+        Line::from(vec![
+            Span::styled(glyph, Style::default().fg(glyph_color).bold()),
+            Span::styled(
+                badge,
+                Style::default()
+                    .fg(if highlight {
+                        theme.gold
+                    } else {
+                        theme.text_strong
+                    })
+                    .bold(),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                if options.ascii { " * " } else { " ● " },
+                Style::default().fg(theme.success).bold(),
+            ),
+            Span::styled("READY FOR ORDERS", Style::default().fg(theme.text_strong)),
+        ])
+    };
+
+    let next_action = terminal_text(&planet.campaign.next_action, options.ascii);
+    let mut lines = vec![line1, status_line];
+    if area.height >= 4 {
+        lines.extend(wrap_indented_lines(
+            vec![Span::styled(
+                " NEXT ",
+                Style::default().fg(theme.amber).bold(),
+            )],
+            6,
+            &next_action,
+            6,
+            usize::from(area.width).max(20),
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(" NEXT ", Style::default().fg(theme.amber).bold()),
+            Span::styled(
+                truncate_chars(
+                    &next_action,
+                    usize::from(area.width).saturating_sub(7),
+                    options.ascii,
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), area);
+}
+
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
     frame.render_widget(
         Paragraph::new(format!(
@@ -4339,76 +5280,180 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, t
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
-    let help_area = centered_rect(
-        54.min(area.width.saturating_sub(2)),
-        38.min(area.height.saturating_sub(2)),
-        area,
+    let two_col = area.width >= 78;
+    let width = if two_col {
+        92.min(area.width.saturating_sub(4))
+    } else {
+        54.min(area.width.saturating_sub(2))
+    };
+    let height = if two_col {
+        22.min(area.height.saturating_sub(4))
+    } else {
+        24.min(area.height.saturating_sub(4))
+    };
+    let help_area = centered_rect(width, height, area);
+    frame.render_widget(Clear, help_area);
+    let block = panel(
+        " HELP // ? OR ESC TO CLOSE ",
+        options,
+        theme,
+        PanelTone::Modal,
     );
-    let help = Text::from(vec![
+    let inner = block.inner(help_area);
+    frame.render_widget(block, help_area);
+    frame.render_widget(Block::default().style(theme.raised_style()), inner);
+
+    let left_col = vec![
         section_line("GLOBAL", theme),
-        key_line("Q", "open session menu", theme),
-        key_line("CTRL-C", "detach immediately; daemon keeps running", theme),
-        key_line("R", "reconnect when disconnected", theme),
-        key_line("TAB", "cycle workspace", theme),
-        key_line("N", "focus current campaign lead on the globe", theme),
-        key_line("C", "open current chapter briefing", theme),
-        key_line("? / ESC", "close help", theme),
+        key_line("Q / CTRL-C", "session menu / detach (daemon runs)", theme),
+        key_line("TAB / 1-7", "cycle or jump directly to workspace", theme),
+        key_line("N", "focus campaign lead (globe or local)", theme),
+        key_line("C", "chapter briefing (comms in local view)", theme),
+        key_line("R / ? / ESC", "reconnect / close help", theme),
         Line::from(""),
-        section_line("PLANET", theme),
-        key_line("ARROWS", "navigate one region", theme),
-        key_line("SHIFT + ARROWS", "jump across the 10 x 20 grid", theme),
-        key_line("ENTER", "use the selected region's primary action", theme),
-        key_line("S", "deploy survey scout", theme),
-        key_line("X", "prepare extraction from a known deposit", theme),
-        key_line("G", "cycle balanced / cargo / shielded rig", theme),
-        key_line("B", "prepare relay construction when funded", theme),
-        key_line("R", "recall the scout assigned to this region", theme),
-        key_line("A", "queue or clear earned local automation", theme),
-        key_line("PGUP / PGDN", "scroll the region inspector", theme),
+        section_line("OVERVIEW / PROBES / RESEARCH", theme),
+        key_line("ARROWS", "select operation, probe, or direction", theme),
+        key_line("ENTER", "jump to region / commit / activate", theme),
+        key_line("G", "cycle extractor rig (Probes / deposits)", theme),
+        key_line("PGUP / PGDN", "scroll details panel", theme),
         Line::from(""),
-        section_line("LOCAL FIELD", theme),
-        key_line("V / ESC", "enter local field / return to globe", theme),
-        key_line("ARROWS", "move through adjacent sectors", theme),
-        key_line("S / X / B", "survey / extract / establish node", theme),
-        key_line("P / C", "build or toggle power / communications", theme),
-        key_line("D / W", "build or toggle depot / workshop", theme),
-        key_line("L / O", "build or toggle laboratory / observation", theme),
-        key_line("M", "maintain a weathered node", theme),
+        section_line("ARCHIVE", theme),
+        key_line("UP / DOWN", "select permanent observation", theme),
+        key_line("V / ENTER", "replay transmission / run experiment", theme),
+    ];
+    let right_col = vec![
+        section_line("PLANET GLOBE", theme),
+        key_line("ARROWS / SHIFT", "move region / jump 5 sectors", theme),
+        key_line("ENTER", "run primary region action", theme),
+        key_line("S / R", "deploy scout / recall scout", theme),
+        key_line("X / B", "extract deposit / build relay", theme),
+        key_line("A", "queue waypoint (1/1) or auto route", theme),
+        key_line("V", "open 4x4 local field (surveyed)", theme),
         Line::from(""),
-        section_line("OVERVIEW", theme),
-        key_line("ARROWS", "select an operation or report", theme),
-        key_line("ENTER", "inspect its region on the globe", theme),
-        key_line("PGUP / PGDN", "scroll planet-wide details", theme),
+        section_line("LOCAL FIELD (4x4)", theme),
+        key_line("ARROWS / ESC", "select sector / return to globe", theme),
+        key_line("S / X / B", "local survey / extract / node", theme),
+        key_line("P / C / D", "power / comms / depot module", theme),
+        key_line("W / L / O / M", "workshop / lab / obs / maintain", theme),
         Line::from(""),
-        section_line("PROBE BAY", theme),
-        key_line(
-            "LEFT / RIGHT / 1 / 2",
-            "switch scout or extraction schematic",
-            theme,
-        ),
-        key_line("G", "swap extractor rig live when ready", theme),
-        key_line("ENTER", "jump to the probe's region on the globe", theme),
-        Line::from(""),
-        section_line("RESEARCH", theme),
-        key_line("UP / DOWN", "select research or a profile", theme),
-        key_line("ENTER", "commit research or activate a profile", theme),
         Line::styled(
-            "Extraction can permanently lose its probe and cargo.",
+            "Extraction can lose its probe and cargo.",
             Style::default().fg(theme.warning),
         ),
         Line::styled(
-            "The core always rebuilds a replacement; progress cannot softlock.",
+            "Core always rebuilds; progress never locks.",
             Style::default().fg(theme.muted),
         ),
-    ]);
-    frame.render_widget(Clear, help_area);
-    frame.render_widget(
-        Paragraph::new(help)
-            .wrap(Wrap { trim: false })
-            .style(theme.raised_style())
-            .block(panel(" HELP ", options, theme, PanelTone::Modal)),
-        help_area,
-    );
+    ];
+
+    if two_col {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(left_col)
+                .wrap(Wrap { trim: false })
+                .style(theme.raised_style()),
+            cols[0],
+        );
+        frame.render_widget(
+            Paragraph::new(right_col)
+                .wrap(Wrap { trim: false })
+                .style(theme.raised_style()),
+            cols[1],
+        );
+    } else {
+        let mut combined = left_col;
+        combined.push(Line::from(""));
+        combined.extend(right_col);
+        frame.render_widget(
+            Paragraph::new(combined)
+                .wrap(Wrap { trim: false })
+                .style(theme.raised_style()),
+            inner,
+        );
+    }
+}
+
+fn render_session_menu_backdrop(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let tier = app.color_tier(options);
+    if matches!(
+        tier,
+        crate::raster::ColorTier::TrueColor
+            | crate::raster::ColorTier::Ansi256
+            | crate::raster::ColorTier::Ansi16
+    ) {
+        let mut buf = crate::raster::PixelBuffer::new(
+            usize::from(area.width),
+            usize::from(area.height) * 2,
+            crate::raster::Rgb(0, 18, 26),
+        );
+        buf.fill_gradient_stops(
+            &[
+                (0.0, crate::raster::Rgb(0, 12, 20)),
+                (0.65, crate::raster::Rgb(2, 24, 34)),
+                (1.0, crate::raster::Rgb(6, 38, 50)),
+            ],
+            true,
+        );
+        buf.draw_starfield(
+            42,
+            (usize::from(area.width) / 2).max(24),
+            usize::from(area.height),
+            0.0,
+            crate::raster::Rgb(46, 86, 102),
+            crate::raster::Rgb(160, 214, 224),
+        );
+        // Subtle planetary limb curvature rising at the lower edge with crisp cyan halo.
+        let cx = buf.width as f32 * 0.5;
+        let r = (buf.width as f32).max(buf.height as f32) * 1.15;
+        let cy = buf.height as f32 + r * 0.84;
+        buf.add_radial_glow(
+            cx,
+            buf.height as f32 * 0.94,
+            buf.width as f32 * 0.62,
+            buf.height as f32 * 0.28,
+            crate::raster::Rgb(54, 188, 192),
+            0.55,
+        );
+        buf.fill_circle(cx, cy, r + 1.5, crate::raster::Rgb(42, 168, 178), 0.72);
+        buf.fill_circle(cx, cy, r, crate::raster::Rgb(3, 24, 36), 1.0);
+        crate::raster::blit_to_frame(&buf, frame, area, tier);
+    }
+    if area.height >= 6 {
+        let title_area = Rect::new(area.x, area.y + 1, area.width, 2);
+        let mask_w = 46.min(area.width);
+        let mask_x = area.x + area.width.saturating_sub(mask_w) / 2;
+        frame.render_widget(
+            Block::default().style(theme.canvas_style()),
+            Rect::new(mask_x, area.y + 1, mask_w, 2),
+        );
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        if options.ascii { "* " } else { "◆ " },
+                        Style::default().fg(theme.gold).bold(),
+                    ),
+                    Span::styled(
+                        "S U B S T R A T E",
+                        Style::default().fg(theme.text_strong).bold(),
+                    ),
+                ]),
+                Line::styled(
+                    "PLANETARY EXPLORATION // ATTACHED TERMINAL",
+                    Style::default().fg(theme.muted),
+                ),
+            ])
+            .alignment(Alignment::Center),
+            title_area,
+        );
+    }
 }
 
 fn render_session_menu(
@@ -4454,11 +5499,16 @@ fn render_session_menu(
                 ),
                 Line::from(""),
             ];
+            let fresh_world = app.onboarding_pending();
             let entries = [
                 (
                     SessionMenuAction::Resume,
-                    "CONTINUE",
-                    "Return to the current playthrough.",
+                    if fresh_world { "BEGIN" } else { "CONTINUE" },
+                    if fresh_world {
+                        "Initialize planetary signal coherence."
+                    } else {
+                        "Return to the current playthrough."
+                    },
                     true,
                 ),
                 (
@@ -4918,7 +5968,7 @@ mod tests {
             Some((1, 3))
         );
         assert!(
-            ascii.contains("G/M") && ascii.contains("rig / maintain"),
+            ascii.contains("G/M") && ascii.contains("rig/maint") && ascii.contains("?  help"),
             "{ascii}"
         );
         assert!(!ascii.contains('▂'));
@@ -4964,10 +6014,12 @@ mod tests {
     fn substrate_dark_applies_canvas_surfaces_and_semantic_accents() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(engine.planet().unwrap(), Instant::now());
         app.connected();
+        app.show_return_summary = false;
 
         let theme = Theme::new(false);
         let cells = cells(
@@ -4990,10 +6042,12 @@ mod tests {
     fn no_color_ascii_frame_never_forces_color_or_unicode() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
         let mut app = App::default();
         app.apply_snapshot(engine.status(), Instant::now());
         app.apply_planet(engine.planet().unwrap(), Instant::now());
         app.connected();
+        app.show_return_summary = false;
 
         let options = RenderOptions {
             ascii: true,
@@ -6219,7 +7273,9 @@ mod tests {
             },
         );
         assert!(
-            narrow_scrolled.contains("RIG LOADOUT MATRIX") || narrow_scrolled.contains("TRV"),
+            narrow_scrolled.contains("RIG LOADOUT MATRIX")
+                || narrow_scrolled.contains("TRV")
+                || narrow_scrolled.contains("Balanced"),
             "{narrow_scrolled}"
         );
     }
@@ -6423,5 +7479,303 @@ mod tests {
         assert!(cutaway_ascii.is_ascii());
         assert!(cutaway_ascii.contains("[PP]"), "{cutaway_ascii}");
         assert!(cutaway_ascii.contains("[OO]"), "{cutaway_ascii}");
+    }
+
+    #[test]
+    fn m2_unfolding_tabs_compact_80x24_ansi256_and_pilot_strip_render_cleanly() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+
+        // Fresh post-onboarding state unfolds only Planet, Archive, System.
+        assert_eq!(
+            app.visible_workspaces(),
+            vec![Workspace::Planet, Workspace::Archive, Workspace::System]
+        );
+        assert!(app.select_visible_workspace(2));
+        assert_eq!(app.workspace, Workspace::Archive);
+        assert!(app.select_visible_workspace(1));
+        assert_eq!(app.workspace, Workspace::Planet);
+
+        // 80x24 uses side-by-side globe + inspector with polygon vista and compact header.
+        let compact = screen(
+            &app,
+            80,
+            24,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(compact.contains("REGIONAL GLOBE"), "{compact}");
+        assert!(compact.contains("REGION INSPECTOR"), "{compact}");
+        assert!(compact.contains("CORE COMPLEX ONLINE"), "{compact}");
+
+        // Small split-pane (38x5) renders the 3-line Pilot Strip when connected with planet.
+        let pilot = screen(
+            &app,
+            38,
+            5,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(pilot.contains("SUBSTRATE"), "{pilot}");
+        assert!(pilot.contains("MAP 1/200"), "{pilot}");
+        assert!(pilot.contains("NEXT"), "{pilot}");
+
+        // xterm-256 mode emits zero RGB colors on the globe and polygon vista.
+        app.ansi256 = true;
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: false,
+                    },
+                    now,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut indexed_cells = 0usize;
+        for y in 4..29 {
+            for x in 1..99 {
+                let cell = &buffer[(x, y)];
+                if matches!(cell.fg, ratatui::style::Color::Indexed(_))
+                    || matches!(cell.bg, ratatui::style::Color::Indexed(_))
+                {
+                    indexed_cells += 1;
+                }
+            }
+        }
+        assert!(
+            indexed_cells > 100,
+            "expected xterm-256 indexed cells in globe/vista"
+        );
+    }
+
+    #[test]
+    fn m3_archive_replay_is_full_screen_without_background_bleed_or_re_ack() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.workspace = Workspace::Archive;
+
+        assert!(app.open_archive_replay(now));
+        app.transmission_revealed = true;
+        let frame_txt = screen(
+            &app,
+            120,
+            36,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(frame_txt.contains("ARCHIVE REPLAY"), "{frame_txt}");
+        assert!(frame_txt.contains("RETAINED INTERVAL"), "{frame_txt}");
+        assert!(frame_txt.contains("return to Archive"), "{frame_txt}");
+        // Truly full-screen: Planet/Archive chrome must not bleed around the edges.
+        assert!(!frame_txt.contains("PERMANENT ARCHIVE"), "{frame_txt}");
+        assert!(!frame_txt.contains("REGIONAL GLOBE"), "{frame_txt}");
+
+        // Dismissing a replay returns None (does not re-acknowledge to the daemon).
+        assert_eq!(app.reveal_or_dismiss_transmission(now), None);
+        assert!(app.active_transmission_record().is_none());
+    }
+
+    #[test]
+    fn round2_xterm256_emits_zero_rgb_cells_across_full_frame() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        engine.acknowledge_archive_presentation("observation_001");
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.ansi256 = true;
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: false,
+                    },
+                    now,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut rgb_cells = 0usize;
+        let mut indexed_cells = 0usize;
+        for y in 0..36 {
+            for x in 0..120 {
+                let cell = &buffer[(x, y)];
+                if matches!(cell.fg, ratatui::style::Color::Rgb(_, _, _))
+                    || matches!(cell.bg, ratatui::style::Color::Rgb(_, _, _))
+                {
+                    rgb_cells += 1;
+                }
+                if matches!(cell.fg, ratatui::style::Color::Indexed(_))
+                    || matches!(cell.bg, ratatui::style::Color::Indexed(_))
+                {
+                    indexed_cells += 1;
+                }
+            }
+        }
+        assert_eq!(
+            rgb_cells, 0,
+            "xterm-256 mode must emit zero 24-bit RGB cells"
+        );
+        assert!(
+            indexed_cells > 500,
+            "expected indexed xterm-256 palette across full frame"
+        );
+    }
+
+    #[test]
+    fn round2_solar_horizon_current_world_label_avoids_sprite_across_pullback() {
+        let theme = Theme::for_color_mode(false, false);
+        let options = RenderOptions {
+            ascii: false,
+            no_color: false,
+        };
+        for &elapsed_ms in &[200u64, 1300, 2700] {
+            let backend = TestBackend::new(76, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let elapsed = std::time::Duration::from_millis(elapsed_ms);
+            terminal
+                .draw(|frame| {
+                    art::render_system_cliffhanger_chart(
+                        frame,
+                        Rect::new(0, 0, 76, 30),
+                        elapsed,
+                        0.4,
+                        options,
+                        theme,
+                        crate::raster::ColorTier::TrueColor,
+                    );
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let mut found_row = None;
+            let mut found_col = None;
+            for y in 1..29 {
+                let row_str: String = (1..75).map(|x| buf[(x, y)].symbol()).collect();
+                if let Some(pos) = row_str.find("CURRENT WORLD") {
+                    found_row = Some(y - 1);
+                    found_col = Some(pos as u16);
+                    break;
+                }
+            }
+            let (cw_col, cw_row) = (
+                found_col.expect("CURRENT WORLD label must render"),
+                found_row.expect("CURRENT WORLD row"),
+            );
+            let (world_col, world_row) =
+                crate::cinematic::solar_horizon_world_cell(74, 28, elapsed.as_secs_f32(), 0.4);
+            let overlaps = world_row.abs_diff(cw_row) <= 1
+                && world_col + 2 >= cw_col
+                && world_col <= cw_col + 14;
+            assert!(
+                !overlaps,
+                "CURRENT WORLD ({cw_col},{cw_row}) overlaps world sprite ({world_col},{world_row}) at {elapsed_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn round2_narrow_transmission_scrolls_and_pilot_strip_reports_active_research() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.transmission_revealed = true;
+
+        let top_narrow = screen(
+            &app,
+            48,
+            14,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            top_narrow.contains("MORE"),
+            "narrow transmission must show scroll continuation cue: {top_narrow}"
+        );
+        app.scroll_transmission(6);
+        let scrolled_narrow = screen(
+            &app,
+            48,
+            14,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            scrolled_narrow.contains("interpretation")
+                || scrolled_narrow.contains("prior")
+                || scrolled_narrow.contains("calibration")
+                || scrolled_narrow.contains("TOP"),
+            "scrolling narrow transmission should reveal lower prose: {scrolled_narrow}"
+        );
+
+        // Pilot Strip must report active research instead of IDLE.
+        app.reveal_or_dismiss_transmission(now);
+        engine.acknowledge_archive_presentation("observation_001");
+        let mut planet = engine.planet().unwrap();
+        planet.research.unlocked = true;
+        planet.research.active = Some(mind_core::protocol::ActiveResearchSnapshot {
+            project: mind_core::protocol::ResearchProject::ExtendedTelemetry,
+            remaining_ms: 42_000,
+            phase_total_ms: 75_000,
+        });
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        let pilot = screen(
+            &app,
+            38,
+            5,
+            RenderOptions {
+                ascii: false,
+                no_color: false,
+            },
+        );
+        assert!(
+            pilot.contains("RESEARCH") && !pilot.contains("IDLE"),
+            "pilot strip must report active research, got: {pilot}"
+        );
     }
 }

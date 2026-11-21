@@ -3,7 +3,12 @@
 //! All art and framing remain strictly grounded in player-visible observations and preserve full
 //! ASCII and monochrome readability.
 
-use crate::{theme::Theme, ui::RenderOptions};
+use crate::{
+    cinematic,
+    raster::{blit_to_frame, ColorTier},
+    theme::Theme,
+    ui::RenderOptions,
+};
 use mind_core::protocol::{ArchiveRecordSnapshot, CampaignSnapshot};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -15,7 +20,7 @@ use ratatui::{
 };
 use std::time::Duration;
 
-const TRANSMISSION_REVEAL_MS: u128 = 1_600;
+const TRANSMISSION_REVEAL_MS: u128 = 2_400;
 const CARRIER_LOCK_MS: u128 = 350;
 
 const ASCII_DOUBLE_BORDER: border::Set<'static> = border::Set {
@@ -214,9 +219,61 @@ pub struct DiscoveryTransmissionView<'a> {
     pub campaign: &'a CampaignSnapshot,
     pub elapsed: Duration,
     pub force_complete: bool,
+    pub is_replay: bool,
+    pub scroll: u16,
     pub phase: f64,
     pub options: RenderOptions,
     pub theme: Theme,
+    pub tier: ColorTier,
+}
+
+/// Pre-wrap prose to a fixed display width so progressive typewriter reveal never re-flows words.
+fn prewrap_lines(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(12);
+    let mut out = Vec::new();
+    for raw_para in text.split('\n') {
+        if raw_para.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in raw_para.split_whitespace() {
+            let word_len = word.chars().count();
+            let cur_len = current.chars().count();
+            if cur_len == 0 {
+                current.push_str(word);
+            } else if cur_len + 1 + word_len <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                out.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Take the first `budget` characters across pre-wrapped lines without changing line breaks.
+fn reveal_prewrapped(lines: &[String], mut budget: usize) -> Vec<String> {
+    let mut visible = Vec::with_capacity(lines.len());
+    for line in lines {
+        if budget == 0 {
+            break;
+        }
+        let len = line.chars().count();
+        if len <= budget {
+            visible.push(line.clone());
+            budget = budget.saturating_sub(len + 1);
+        } else {
+            visible.push(line.chars().take(budget).collect());
+            break;
+        }
+    }
+    visible
 }
 
 pub fn render_discovery_transmission(
@@ -232,42 +289,17 @@ pub fn render_discovery_transmission(
         campaign,
         elapsed,
         force_complete,
+        is_replay,
+        scroll,
         phase,
         options,
         theme,
+        tier,
     } = view;
-    let width = area.width.saturating_sub(4).clamp(40, 86);
-    let height = area.height.saturating_sub(2).clamp(12, 28);
-    let popup = centered_rect(width, height, area);
-    frame.render_widget(Clear, popup);
 
-    let title = format!(
-        " TRANSMISSION // RECORD {:02} OF {:02} ",
-        record_index + 1,
-        total_records.max(record_index + 1)
-    );
-    let border_set = if options.ascii {
-        ASCII_DOUBLE_BORDER
-    } else {
-        border::DOUBLE
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border_set)
-        .border_style(
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(theme.raised_style());
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    // Truly full-screen cinematic takeover — zero background bleed-through.
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme.canvas_style()), area);
 
     let progress = if force_complete {
         1.0
@@ -276,22 +308,36 @@ pub fn render_discovery_transmission(
     };
     let obs_full = terminal_text(&record.observation, options.ascii);
     let interp_full = terminal_text(&record.interpretation, options.ascii);
-    let obs_chars =
-        ((obs_full.chars().count() as f64) * (progress / 0.72).min(1.0)).ceil() as usize;
-    let obs_visible: String = obs_full.chars().take(obs_chars).collect();
-    let interp_visible = if progress >= 0.72 {
-        let interp_progress = ((progress - 0.72) / 0.28).clamp(0.0, 1.0);
-        let chars = ((interp_full.chars().count() as f64) * interp_progress).ceil() as usize;
-        interp_full.chars().take(chars).collect()
-    } else {
-        String::new()
-    };
 
+    // Layout: Top telemetry bar (1 row) + Full-bleed polygon scene (~44%) + Divider (1 row)
+    // + Centered scrollable editorial prose block + Bottom prompt (1 row).
+    let scene_height = if area.height >= 26 {
+        ((area.height as u32 * 44) / 100).clamp(8, 16) as u16
+    } else if area.height >= 20 {
+        6
+    } else {
+        0
+    };
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(scene_height),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    // 1. Sleek top transmission telemetry bar.
+    let mut header_title = format!(
+        " TRANSMISSION // RECORD {:02} OF {:02} ",
+        record_index + 1,
+        total_records.max(record_index + 1)
+    );
     let acquiring_carrier = !force_complete && elapsed.as_millis() < CARRIER_LOCK_MS;
-    let carrier_line = if acquiring_carrier {
+    let mut right_tag = if acquiring_carrier {
         let frac = (elapsed.as_millis() as f64 / CARRIER_LOCK_MS as f64).clamp(0.0, 1.0);
-        let filled = (frac * 12.0).round() as usize;
-        let bar: String = (0..12)
+        let filled = (frac * 10.0).round() as usize;
+        let bar: String = (0..10)
             .map(|i| {
                 if options.ascii {
                     if i < filled {
@@ -306,27 +352,92 @@ pub fn render_discovery_transmission(
                 }
             })
             .collect();
-        Line::from(vec![
-            Span::styled("CARRIER ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("[{bar}] ACQUIRING SIGNAL"),
-                Style::default().fg(theme.gold).bold(),
-            ),
-        ])
+        format!("CARRIER [{bar}] ACQUIRING ")
+    } else if is_replay {
+        format!("SOURCE {source_label}  //  ARCHIVE REPLAY ")
     } else {
-        Line::from(vec![
-            Span::styled("SOURCE  ", Style::default().fg(theme.muted)),
-            Span::styled(source_label.to_owned(), Style::default().fg(theme.text)),
-            Span::styled("   ARCHIVE  ", Style::default().fg(theme.muted)),
-            Span::styled("PERMANENT RECORD", Style::default().fg(theme.success)),
-        ])
+        format!("SOURCE {source_label}  //  PERMANENT RECORD ")
+    };
+    if header_title.chars().count() + right_tag.chars().count() >= usize::from(area.width) {
+        header_title = format!(
+            " TRANSMISSION {:02}/{:02} ",
+            record_index + 1,
+            total_records.max(record_index + 1)
+        );
+        right_tag = if acquiring_carrier {
+            "CARRIER LOCK ".into()
+        } else if is_replay {
+            format!("{source_label} // REPLAY ")
+        } else {
+            format!("{source_label} // RECORD ")
+        };
+    }
+    let pad = usize::from(area.width)
+        .saturating_sub(header_title.chars().count() + right_tag.chars().count());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(header_title, Style::default().fg(theme.gold).bold()),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(
+                right_tag,
+                Style::default().fg(if acquiring_carrier {
+                    theme.amber
+                } else {
+                    theme.cyan_bright
+                }),
+            ),
+        ]))
+        .style(theme.panel_style()),
+        rows[0],
+    );
+
+    // 2. Full-bleed bespoke polygon scene for this approved observation.
+    if scene_height > 0 {
+        let buf = cinematic::build_discovery_buffer(
+            &record.record_id,
+            rows[1].width,
+            rows[1].height,
+            phase,
+            progress,
+        );
+        blit_to_frame(&buf, frame, rows[1], tier);
+    }
+
+    // 3. Hairline rule separating visual plate from prose.
+    let rule = if options.ascii { "-" } else { "─" };
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            rule.repeat(usize::from(rows[2].width)),
+            Style::default().fg(theme.border),
+        ))
+        .style(theme.canvas_style()),
+        rows[2],
+    );
+
+    // 4. Centered editorial observation & interpretation block (pre-wrapped + scrollable).
+    let text_width = rows[3].width.saturating_sub(4).clamp(32, 84);
+    let text_area = centered_rect(text_width, rows[3].height, rows[3]);
+    let wrap_cols = usize::from(text_area.width).max(20);
+
+    let obs_wrapped = prewrap_lines(&obs_full, wrap_cols);
+    let interp_wrapped = prewrap_lines(&interp_full, wrap_cols);
+    let obs_total_chars: usize = obs_wrapped.iter().map(|l| l.chars().count() + 1).sum();
+    let interp_total_chars: usize = interp_wrapped.iter().map(|l| l.chars().count() + 1).sum();
+    let obs_budget = ((obs_total_chars as f64) * (progress / 0.72).min(1.0)).ceil() as usize;
+    let obs_visible = reveal_prewrapped(&obs_wrapped, obs_budget);
+    let interp_visible = if progress >= 0.72 {
+        let interp_progress = ((progress - 0.72) / 0.28).clamp(0.0, 1.0);
+        let budget = ((interp_total_chars as f64) * interp_progress).ceil() as usize;
+        reveal_prewrapped(&interp_wrapped, budget)
+    } else {
+        Vec::new()
     };
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 if options.ascii { "* " } else { "◈ " },
-                Style::default().fg(theme.amber).bold(),
+                Style::default().fg(theme.gold).bold(),
             ),
             Span::styled(
                 record.title.to_uppercase(),
@@ -338,29 +449,11 @@ pub fn render_discovery_transmission(
                 Style::default().fg(theme.cyan_bright),
             ),
         ]),
-        carrier_line,
+        Line::raw(""),
+        Line::styled("OBSERVATION //", Style::default().fg(theme.amber).bold()),
     ];
-
-    if inner.height >= 16 {
-        lines.push(Line::raw(""));
-        lines.extend(record_diagram(
-            &record.record_id,
-            options.ascii,
-            phase,
-            theme,
-        ));
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "OBSERVATION //",
-        Style::default().fg(theme.amber).bold(),
-    ));
-    for paragraph in obs_visible.split('\n') {
-        lines.push(Line::styled(
-            paragraph.to_owned(),
-            Style::default().fg(theme.text_strong),
-        ));
+    for line in obs_visible {
+        lines.push(Line::styled(line, Style::default().fg(theme.text_strong)));
     }
 
     if !interp_visible.is_empty() {
@@ -369,13 +462,12 @@ pub fn render_discovery_transmission(
             "CURRENT INTERPRETATION //",
             Style::default().fg(theme.cyan).bold(),
         ));
-        lines.push(Line::styled(
-            interp_visible,
-            Style::default().fg(theme.muted),
-        ));
+        for line in interp_visible {
+            lines.push(Line::styled(line, Style::default().fg(theme.muted)));
+        }
     }
 
-    if progress >= 1.0 && inner.height >= 20 {
+    if progress >= 1.0 && rows[3].height >= 13 && !is_replay {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled(
@@ -391,32 +483,76 @@ pub fn render_discovery_transmission(
                 Style::default().fg(theme.amber),
             ),
         ]));
-        lines.push(Line::styled(
-            terminal_text(&campaign.question, options.ascii),
-            Style::default().fg(theme.text),
-        ));
+        for qline in prewrap_lines(&terminal_text(&campaign.question, options.ascii), wrap_cols) {
+            lines.push(Line::styled(qline, Style::default().fg(theme.text)));
+        }
     }
 
+    let total_lines = lines.len() as u16;
+    let view_h = text_area.height;
+    let max_scroll = total_lines.saturating_sub(view_h);
+    let clamped_scroll = scroll.min(max_scroll);
+    let has_more_below = clamped_scroll < max_scroll;
+    let has_more_above = clamped_scroll > 0;
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((clamped_scroll, 0))
+            .style(theme.canvas_style()),
+        text_area,
+    );
+
+    // 5. Crisp bottom action prompt with scroll continuation cue on compact terminals.
+    let compact_footer = area.width < 68;
     let footer_prompt = if progress < 1.0 {
-        "SPACE / ENTER  reveal complete transmission"
+        if compact_footer {
+            "SPACE/ENTER  reveal"
+        } else {
+            "SPACE / ENTER  reveal complete transmission"
+        }
+    } else if is_replay {
+        if compact_footer {
+            "ENTER/ESC  Archive"
+        } else {
+            "ENTER / ESC  return to Archive"
+        }
+    } else if compact_footer {
+        "ENTER/ESC  file & continue"
     } else {
         "ENTER / ESC  file permanently in Archive and continue"
     };
-
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(2)]).split(inner);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(theme.raised_style()),
-        chunks[0],
-    );
+    let scroll_cue = if has_more_below && has_more_above {
+        if options.ascii {
+            "  [UP/DN scroll]"
+        } else {
+            "  [↑/↓ scroll]"
+        }
+    } else if has_more_below {
+        if options.ascii {
+            "  v MORE [DN]"
+        } else {
+            "  ▼ MORE [↓]"
+        }
+    } else if has_more_above {
+        if options.ascii {
+            "  ^ TOP [UP]"
+        } else {
+            "  ▲ TOP [↑]"
+        }
+    } else {
+        ""
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(footer_prompt, Style::default().fg(theme.cyan_bright).bold()),
+            Span::styled(scroll_cue, Style::default().fg(theme.gold).bold()),
             Span::styled("   ", Style::default()),
             Span::styled(
-                if let Some(key) = &campaign.next_action_key {
-                    format!("NEXT [{key}]")
+                if !is_replay && scroll_cue.is_empty() {
+                    campaign
+                        .next_action_key
+                        .as_ref()
+                        .map_or_else(String::new, |key| format!("NEXT [{key}]"))
                 } else {
                     String::new()
                 },
@@ -424,8 +560,8 @@ pub fn render_discovery_transmission(
             ),
         ]))
         .alignment(Alignment::Center)
-        .style(theme.raised_style()),
-        chunks[1],
+        .style(theme.panel_style()),
+        rows[4],
     );
 }
 

@@ -1,15 +1,19 @@
-//! Late-1980s skippable CRT boot / power-on sequence.
+//! Full-bleed skippable Awakening / power-on sequence powered by the universal polygon rasterizer.
 //!
 //! Operational diagnostics only; respects ASCII/monochrome/TERM=dumb modes and yields
 //! immediately to any player keypress.
 
-use crate::{theme::Theme, ui::RenderOptions};
+use crate::{
+    cinematic,
+    raster::{blit_to_frame, ColorTier},
+    theme::Theme,
+    ui::RenderOptions,
+};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Modifier, Style},
-    symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph},
     Frame,
 };
 use std::time::{Duration, Instant};
@@ -17,46 +21,18 @@ use std::time::{Duration, Instant};
 pub const FULL_BOOT_DURATION: Duration = Duration::from_millis(2_600);
 pub const QUICK_BOOT_DURATION: Duration = Duration::from_millis(750);
 
-const ASCII_DOUBLE_BORDER: border::Set<'static> = border::Set {
-    top_left: "+",
-    top_right: "+",
-    bottom_left: "+",
-    bottom_right: "+",
-    vertical_left: "|",
-    vertical_right: "|",
-    horizontal_top: "=",
-    horizontal_bottom: "=",
-};
-
-const WORDMARK_UNICODE: [&str; 5] = [
-    "▄▀▀ █ █ █▀▄ ▄▀▀ ▀█▀ █▀▄ ▄▀▄ ▀█▀ █▀▀",
-    "▀▄  █ █ █▀▄ ▀▄   █  █▀▄ █▀█  █  █▀▀",
-    "▀▀  ▀▀▀ ▀▀  ▀▀   ▀  ▀ ▀ ▀ ▀  ▀  ▀▀▀",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "   PLANETARY ARRAY INITIALIZATION   ",
-];
-
-const WORDMARK_ASCII: [&str; 5] = [
-    " ##  # # ##   ##  ### ##   #  ### ###",
-    "#    # # # # #     #  # # # #  #  #  ",
-    " ##  ### ##   ##   #  ##  ###  #  ###",
-    "=====================================",
-    "    PLANETARY ARRAY INITIALIZATION   ",
-];
-
-const POST_CHECKS: [(&str, &str, u128); 5] = [
-    ("OK", "CORE BUS          LOOPBACK LINK READY", 700),
-    ("OK", "SENSOR GRID       10x20 REGIONAL TOPOLOGY", 1_050),
-    ("OK", "SURVEY SCOUT      STANDING BY AT CORE", 1_350),
-    ("OK", "CORE FABRICATION  SUBSTRATE KERNEL ONLINE", 1_650),
-    ("..", "SIGNAL COHERENCE  THREE BANDS DRIFTING", 1_950),
+const POST_CHECKS: [(&str, &str, u128); 4] = [
+    ("OK", "CORE BUS // LOOPBACK LINK", 680),
+    ("OK", "SENSOR GRID // 10x20 TOPOLOGY", 1_050),
+    ("OK", "SURVEY SCOUT // STANDBY", 1_400),
+    ("..", "SIGNAL COHERENCE // BANDS DRIFTING", 1_800),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootMode {
-    /// Full ~2.6 s CRT boot sequence shown before initial Coherence onboarding.
+    /// Full ~2.6 s planetary horizon Awakening sequence shown before initial Coherence onboarding.
     FullBoot,
-    /// Brief ~0.75 s power-on crest shown when reattaching to an established daemon.
+    /// Brief ~0.75 s power-on limb sweep shown when reattaching to an established daemon.
     QuickPowerOn,
 }
 
@@ -107,6 +83,7 @@ pub fn render_boot_intro(
     boot: BootIntroState,
     options: RenderOptions,
     theme: Theme,
+    tier: ColorTier,
     now: Instant,
 ) {
     frame.render_widget(Clear, area);
@@ -114,65 +91,54 @@ pub fn render_boot_intro(
 
     let elapsed_ms = boot.elapsed(now).as_millis();
     let progress = boot.progress(now);
+    let quick_mode = boot.mode == BootMode::QuickPowerOn;
 
-    match boot.mode {
-        BootMode::QuickPowerOn => render_quick_power_on(frame, area, progress, options, theme),
-        BootMode::FullBoot => {
-            render_full_boot(frame, area, elapsed_ms, progress, options, theme)
-        }
+    // Full-bleed edge-to-edge planetary horizon backdrop.
+    let buf =
+        cinematic::build_awakening_buffer(area.width, area.height, progress as f32, quick_mode);
+    blit_to_frame(&buf, frame, area, tier);
+
+    if quick_mode {
+        render_quick_overlay(frame, area, progress, options, theme);
+    } else {
+        render_boot_overlay(frame, area, elapsed_ms, progress, options, theme);
     }
 }
 
-fn render_quick_power_on(
+fn render_quick_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
     progress: f64,
     options: RenderOptions,
     theme: Theme,
 ) {
-    let band_width = ((area.width as f64) * (progress * 1.4).min(1.0)).round() as usize;
+    let band_width =
+        ((area.width.saturating_sub(12) as f64) * (progress * 1.4).min(1.0)).round() as usize;
     let bar_char = if options.ascii { '=' } else { '━' };
-    let beam = bar_char.to_string().repeat(band_width.min(54));
+    let beam = bar_char.to_string().repeat(band_width.min(48));
     let crest = if options.ascii {
         "# SUBSTRATE // TERMINAL LINK ACTIVE #"
     } else {
         "◆ SUBSTRATE // TERMINAL LINK ACTIVE ◆"
     };
 
-    let card = centered_rect(60.min(area.width.saturating_sub(2)), 9, area);
-    let border_set = if options.ascii {
-        ASCII_DOUBLE_BORDER
-    } else {
-        border::DOUBLE
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border_set)
-        .border_style(Style::default().fg(theme.cyan_bright).bold())
-        .style(theme.blueprint_style());
-    let inner = block.inner(card);
-    frame.render_widget(block, card);
-
+    let overlay_h = 5.min(area.height);
+    let overlay_y = area.y + area.height.saturating_sub(overlay_h) / 2;
+    let rect = Rect::new(area.x, overlay_y, area.width, overlay_h);
     let lines = vec![
-        Line::raw(""),
         Line::styled(beam.clone(), Style::default().fg(theme.cyan_bright)),
         Line::styled(crest, Style::default().fg(theme.gold).bold()),
-        Line::styled(beam, Style::default().fg(theme.cobalt_bright)),
+        Line::styled(beam, Style::default().fg(theme.cyan)),
         Line::raw(""),
         Line::styled(
             "PRESS ANY KEY TO SKIP",
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
     ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .style(theme.blueprint_style()),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rect);
 }
 
-fn render_full_boot(
+fn render_boot_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
     elapsed_ms: u128,
@@ -180,130 +146,112 @@ fn render_full_boot(
     options: RenderOptions,
     theme: Theme,
 ) {
-    // Phase 1 (0..380 ms): CRT horizontal raster beam expanding from center.
-    if elapsed_ms < 380 {
-        let beam_frac = (elapsed_ms as f64 / 380.0).clamp(0.05, 1.0);
-        let beam_len = ((area.width.saturating_sub(6) as f64) * beam_frac).round() as usize;
-        let glyph = if options.ascii { '-' } else { '━' };
-        let core = if options.ascii { "*" } else { "◈" };
-        let side = glyph.to_string().repeat(beam_len / 2);
-        let line = Line::from(vec![
-            Span::styled(side.clone(), Style::default().fg(theme.cyan_bright)),
-            Span::styled(core, Style::default().fg(theme.gold).bold()),
-            Span::styled(side, Style::default().fg(theme.cyan_bright)),
-        ]);
-        let mid = centered_rect(area.width, 3, area);
-        frame.render_widget(
-            Paragraph::new(vec![Line::raw(""), line])
-                .alignment(Alignment::Center)
-                .style(theme.canvas_style()),
-            mid,
-        );
+    if elapsed_ms < 360 {
+        if area.height >= 4 {
+            let hint = Rect::new(area.x, area.y + area.height - 2, area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "PRESS ANY KEY TO SKIP",
+                    Style::default().fg(theme.muted),
+                ))
+                .alignment(Alignment::Center),
+                hint,
+            );
+        }
         return;
     }
 
-    let width = 66.min(area.width.saturating_sub(2));
-    let height = 20.min(area.height.saturating_sub(2));
-    let panel_area = centered_rect(width, height, area);
-    let border_set = if options.ascii {
-        ASCII_DOUBLE_BORDER
+    // Title block in the upper starfield.
+    let title_y = area.y + (area.height / 7).max(1);
+    let title_h = 4.min(area.height.saturating_sub(2));
+    let title_rect = Rect::new(area.x, title_y, area.width, title_h);
+    let rule = if options.ascii {
+        "==================================="
     } else {
-        border::DOUBLE
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border_set)
-        .border_style(Style::default().fg(theme.cobalt_bright).bold())
-        .title(Span::styled(
-            " SUBSTRATE // SYSTEM INITIALIZATION ",
-            Style::default().fg(theme.gold).bold(),
-        ))
-        .style(theme.blueprint_style());
-    let inner = block.inner(panel_area);
-    frame.render_widget(block, panel_area);
+    let dot = if options.ascii { "*" } else { "◆" };
+    let title_lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{dot}  "), Style::default().fg(theme.gold).bold()),
+            Span::styled("SUBSTRATE", Style::default().fg(theme.text_strong).bold()),
+            Span::styled(format!("  {dot}"), Style::default().fg(theme.gold).bold()),
+        ]),
+        Line::styled(rule, Style::default().fg(theme.cyan_bright)),
+        Line::styled(
+            "SYSTEM INITIALIZATION // PLANETARY ARRAY",
+            Style::default().fg(theme.amber).bold(),
+        ),
+    ];
+    // Reserve the title rectangle before drawing stars.
+    let mask_w = 43.min(area.width);
+    let mask_x = area.x + area.width.saturating_sub(mask_w) / 2;
+    let mask_rect = Rect::new(
+        mask_x,
+        title_y.saturating_sub(1).max(area.y),
+        mask_w,
+        (title_h + 1).min(
+            area.height
+                .saturating_sub(title_y.saturating_sub(1).saturating_sub(area.y)),
+        ),
+    );
+    frame.render_widget(Block::default().style(theme.canvas_style()), mask_rect);
+    frame.render_widget(
+        Paragraph::new(title_lines).alignment(Alignment::Center),
+        title_rect,
+    );
 
-    let wordmark = if options.ascii {
-        WORDMARK_ASCII
-    } else {
-        WORDMARK_UNICODE
-    };
-    let reveal_rows = (((elapsed_ms.saturating_sub(380)) / 90) as usize + 1).min(wordmark.len());
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(16);
-    for (idx, row) in wordmark.iter().take(reveal_rows).enumerate() {
-        let style = if idx < 3 {
-            Style::default().fg(theme.gold).bold()
-        } else if idx == 3 {
-            Style::default().fg(theme.cyan_bright)
-        } else {
-            Style::default().fg(theme.text_strong).bold()
-        };
-        lines.push(Line::styled((*row).to_owned(), style));
-    }
-    lines.push(Line::raw(""));
-
+    // Compact floating operational check strip along the lower planetary silhouette.
+    let mut status_lines: Vec<Line<'static>> = Vec::new();
     for (status, detail, threshold_ms) in POST_CHECKS {
         if elapsed_ms >= threshold_ms {
             let status_style = if status == "OK" {
                 Style::default().fg(theme.cyan_bright).bold()
             } else {
-                Style::default().fg(theme.amber).bold()
+                Style::default().fg(theme.gold).bold()
             };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  [{status}] "), status_style),
+            status_lines.push(Line::from(vec![
+                Span::styled(format!("[{status}] "), status_style),
                 Span::styled(detail.to_owned(), Style::default().fg(theme.text_strong)),
             ]));
         }
     }
 
     let pct = (progress * 100.0).round().clamp(0.0, 100.0) as usize;
-    let bar_cells = 24_usize;
+    let bar_cells = 22_usize;
     let filled = (bar_cells * pct) / 100;
     let (fill_ch, empty_ch) = if options.ascii {
         ('#', '.')
     } else {
         ('█', '░')
     };
-    let meter = format!(
-        "  INIT [{}{}] {:>3}%",
-        fill_ch.to_string().repeat(filled),
-        empty_ch
-            .to_string()
-            .repeat(bar_cells.saturating_sub(filled)),
-        pct
-    );
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(meter, Style::default().fg(theme.gold).bold()));
-    lines.push(Line::styled(
-        "  PRESS ANY KEY TO ENTER COHERENCE",
-        Style::default().fg(theme.text),
-    ));
+    status_lines.push(Line::raw(""));
+    status_lines.push(Line::from(vec![
+        Span::styled(
+            format!(
+                "INIT [{}{}] {:>3}%   ",
+                fill_ch.to_string().repeat(filled),
+                empty_ch
+                    .to_string()
+                    .repeat(bar_cells.saturating_sub(filled)),
+                pct
+            ),
+            Style::default().fg(theme.gold).bold(),
+        ),
+        Span::styled(
+            "PRESS ANY KEY TO ENTER COHERENCE",
+            Style::default().fg(theme.text),
+        ),
+    ]));
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .style(theme.blueprint_style()),
-        inner,
-    );
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(area.height.saturating_sub(height) / 2),
-            Constraint::Length(height),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(area.width.saturating_sub(width) / 2),
-            Constraint::Length(width),
-            Constraint::Min(0),
-        ])
-        .split(vertical[1])[1]
+    let bottom_h =
+        (status_lines.len() as u16).min(area.height.saturating_sub(title_y - area.y + title_h + 1));
+    if bottom_h >= 2 {
+        let bottom_y = area.y + area.height.saturating_sub(bottom_h + 1);
+        let bottom_rect = Rect::new(area.x, bottom_y, area.width, bottom_h);
+        frame.render_widget(
+            Paragraph::new(status_lines).alignment(Alignment::Center),
+            bottom_rect,
+        );
+    }
 }

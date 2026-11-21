@@ -56,6 +56,10 @@ impl Theme {
     }
 
     pub fn for_color_mode(no_color: bool, ansi16: bool) -> Self {
+        Self::for_color_tier(no_color, ansi16, false)
+    }
+
+    pub fn for_color_tier(no_color: bool, ansi16: bool, ansi256: bool) -> Self {
         if no_color {
             return Self {
                 no_color: true,
@@ -109,6 +113,37 @@ impl Theme {
                 warning: Color::LightYellow,
                 danger: Color::LightRed,
                 success: Color::LightGreen,
+            };
+        }
+
+        if ansi256 {
+            let idx = |(r, g, b): (u8, u8, u8)| {
+                crate::raster::present::to_xterm256_solid(crate::raster::Rgb(r, g, b))
+            };
+            return Self {
+                no_color: false,
+                ansi16: false,
+                canvas: Color::Indexed(233),
+                panel: Color::Indexed(234),
+                raised: Color::Indexed(23),
+                blueprint: Color::Indexed(17),
+                blueprint_grid: Color::Indexed(24),
+                text: idx(TEXT_RGB),
+                text_strong: idx(TEXT_STRONG_RGB),
+                muted: idx(MUTED_RGB),
+                faint: idx(FAINT_RGB),
+                border: Color::Indexed(24),
+                selection: Color::Indexed(23),
+                cyan: idx(CYAN_RGB),
+                cyan_bright: idx(CYAN_BRIGHT_RGB),
+                amber: idx(AMBER_RGB),
+                gold: idx(GOLD_RGB),
+                blue: idx(BLUE_RGB),
+                cobalt_bright: idx(COBALT_BRIGHT_RGB),
+                magenta: idx(MAGENTA_RGB),
+                warning: idx(ORANGE_RGB),
+                danger: idx(RED_RGB),
+                success: idx(GREEN_RGB),
             };
         }
 
@@ -166,11 +201,20 @@ impl Theme {
     }
 
     pub fn key_style(self) -> Style {
-        let style = Style::default().fg(self.amber).add_modifier(Modifier::BOLD);
         if self.no_color {
-            style.add_modifier(Modifier::REVERSED)
+            Style::default()
+                .fg(self.amber)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else if self.ansi16 {
+            Style::default()
+                .fg(Color::LightYellow)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD)
         } else {
-            style.bg(self.raised)
+            Style::default()
+                .fg(self.amber)
+                .bg(self.raised)
+                .add_modifier(Modifier::BOLD)
         }
     }
 

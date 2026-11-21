@@ -1,11 +1,10 @@
-//! Live late-1980s EGA schematic Probe Bay workspace.
+//! Technical Probe Bay workspace powered by the universal half-block polygon rasterizer.
 //!
-//! Renders inspectable half-block / box-drawing blueprints of the Survey Scout and Extraction
-//! Probe from existing authoritative `PlanetSnapshot` data, with live rig morphing (`G`),
-//! assembly gantry progress during extractor rebuild, research/profile modifiers, and clearly
-//! marked reserved slots for future modular probe systems.
+//! Renders full-canvas faceted schematics of the Survey Scout and Extraction Probe on a cohesive
+//! deep-teal drafting field with live rig morphing (`G`), vertical scanline rebuild assembly,
+//! unwrapped loadout comparison matrix, and active research/profile chips.
 
-use crate::{app::App, theme::Theme, ui::RenderOptions};
+use crate::{app::App, cinematic, raster::blit_to_frame, theme::Theme, ui::RenderOptions};
 use mind_core::protocol::{ExtractorLoadout, ExtractorState, PlanetSnapshot, ScoutState};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -50,14 +49,14 @@ pub fn render_probe_bay_body(
     theme: Theme,
     now: Instant,
 ) {
-    if area.width >= 96 {
-        let columns = Layout::horizontal([Constraint::Percentage(54), Constraint::Percentage(46)])
+    if area.width >= 92 {
+        let columns = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(area);
         render_blueprint_panel(frame, columns[0], app, planet, options, theme, now);
         render_telemetry_panel(frame, columns[1], app, planet, options, theme, now);
     } else {
         let rows =
-            Layout::vertical([Constraint::Percentage(54), Constraint::Percentage(46)]).split(area);
+            Layout::vertical([Constraint::Percentage(52), Constraint::Percentage(48)]).split(area);
         render_blueprint_panel(frame, rows[0], app, planet, options, theme, now);
         render_telemetry_panel(frame, rows[1], app, planet, options, theme, now);
     }
@@ -93,10 +92,10 @@ fn render_blueprint_panel(
         } else {
             border::DOUBLE
         })
-        .style(theme.blueprint_style())
+        .style(theme.panel_style())
         .border_style(
             Style::default()
-                .fg(theme.cobalt_bright)
+                .fg(theme.cyan_bright)
                 .add_modifier(Modifier::BOLD),
         )
         .title(Span::styled(
@@ -109,235 +108,52 @@ fn render_blueprint_panel(
         return;
     }
 
-    let mut lines = Vec::new();
-    // Chassis switcher tabs inside the blueprint bay.
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    // Top craft switcher tabs (uses Left/Right arrows so 1-7 stay global workspace hotkeys).
     let scout_tab = if !selected_extractor {
         Span::styled(
-            format!(" [1] {} ", planet.scout.designation),
+            format!(" {} ", planet.scout.designation.to_uppercase()),
             theme.key_style(),
         )
     } else {
         Span::styled(
-            format!("  1  {} ", planet.scout.designation),
+            format!(" {} ", planet.scout.designation.to_uppercase()),
             Style::default().fg(theme.muted),
         )
     };
     let extractor_tab = if selected_extractor {
         Span::styled(
-            format!(" [2] {} ", planet.extractor.designation),
+            format!(" {} ", planet.extractor.designation.to_uppercase()),
             theme.key_style(),
         )
     } else {
         Span::styled(
-            format!("  2  {} ", planet.extractor.designation),
+            format!(" {} ", planet.extractor.designation.to_uppercase()),
             Style::default().fg(theme.muted),
         )
     };
-    lines.push(Line::from(vec![
-        scout_tab,
-        Span::styled("   ", theme.blueprint_style()),
-        extractor_tab,
-    ]));
-
-    let grid_rule = if options.ascii {
-        "-".repeat(usize::from(inner.width.saturating_sub(2)).min(52))
-    } else {
-        "┄".repeat(usize::from(inner.width.saturating_sub(2)).min(52))
-    };
-    lines.push(Line::styled(
-        grid_rule.clone(),
-        Style::default().fg(theme.blueprint_grid),
-    ));
-
-    let blink = (app.globe_phase * 4.0).floor() as i64 % 2 == 0;
-    if selected_extractor {
-        lines.extend(extractor_blueprint_lines(
-            app,
-            planet,
-            blink,
-            options.ascii,
-            theme,
-            now,
-        ));
-    } else {
-        lines.extend(scout_blueprint_lines(planet, blink, options.ascii, theme));
-    }
-
-    lines.push(Line::styled(
-        grid_rule,
-        Style::default().fg(theme.blueprint_grid),
-    ));
-    let status_banner = if selected_extractor {
-        extractor_status_banner(app, planet, now)
-    } else {
-        scout_status_banner(app, planet, now)
-    };
-    lines.push(Line::styled(
-        status_banner,
-        Style::default().fg(theme.gold).bold(),
-    ));
-
+    let arrow_hint = if options.ascii { "<->" } else { "◀ ▶" };
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .alignment(Alignment::Center)
-            .style(theme.blueprint_style()),
-        inner,
+        Paragraph::new(Line::from(vec![
+            scout_tab,
+            Span::styled(
+                format!("  {arrow_hint}  "),
+                Style::default().fg(theme.faint),
+            ),
+            extractor_tab,
+        ]))
+        .alignment(Alignment::Center)
+        .style(theme.panel_style()),
+        chunks[0],
     );
-}
 
-fn scout_blueprint_lines(
-    planet: &PlanetSnapshot,
-    blink: bool,
-    ascii: bool,
-    theme: Theme,
-) -> Vec<Line<'static>> {
-    let hull = Style::default().fg(theme.cyan_bright).bold();
-    let frame_s = Style::default().fg(theme.cobalt_bright);
-    let callout = Style::default().fg(theme.gold).bold();
-    let active = Style::default().fg(theme.amber).bold();
-    let dim = Style::default().fg(theme.muted);
-
-    let state = planet.scout.state;
-    let moving = matches!(state, ScoutState::Outbound | ScoutState::Returning);
-    let scanning = state == ScoutState::Surveying;
-
-    let mast_tip = match (ascii, blink) {
-        (true, true) => "*",
-        (true, false) => "+",
-        (false, true) => "◈",
-        (false, false) => "◇",
-    };
-    let sweep_line = if scanning {
-        if ascii {
-            if blink {
-                "       \\  |  /       "
-            } else {
-                "      -- [*] --      "
-            }
-        } else if blink {
-            "       ╲  │  ╱       "
-        } else {
-            "      ━━  ◈  ━━      "
-        }
-    } else if moving {
-        if ascii {
-            if blink {
-                "       >>>|<<<       "
-            } else {
-                "        >>|<<        "
-            }
-        } else if blink {
-            "       ▓▓▓█▓▓▓       "
-        } else {
-            "        ▒▓█▓▒        "
-        }
-    } else if ascii {
-        "      [DOCKED]       "
-    } else {
-        "      ▪ STANDBY ▪    "
-    };
-
-    if ascii {
-        vec![
-            Line::from(vec![
-                Span::styled(format!("          {mast_tip}          "), active),
-                Span::styled("<- TELEMETRY MAST", callout),
-            ]),
-            Line::from(vec![
-                Span::styled("       .--+--.       ", hull),
-                Span::styled("<- WIDE SENSOR DISH", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("  ====[ (===) ]====  ", hull),
-                Span::styled("<- SOLAR / THERMAL FINS", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("     /| [###] |\\     ", frame_s),
-                Span::styled("<- PROTECTED CHASSIS", callout),
-            ]),
-            Line::from(vec![
-                Span::styled("    /_|  ===  |_\\    ", hull),
-                Span::styled("<- RELAY TRANSPONDER", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("       / | | \\       ", frame_s),
-                Span::styled("<- VECTOR THRUSTERS", dim),
-            ]),
-            Line::from(vec![
-                Span::styled(sweep_line, active),
-                Span::styled(
-                    if scanning {
-                        "  ACTIVE SWEEP"
-                    } else if moving {
-                        "  TRANSIT BURN"
-                    } else {
-                        "  STATION HOLD"
-                    },
-                    dim,
-                ),
-            ]),
-        ]
-    } else {
-        vec![
-            Line::from(vec![
-                Span::styled(format!("          {mast_tip}          "), active),
-                Span::styled("◀─ TELEMETRY MAST", callout),
-            ]),
-            Line::from(vec![
-                Span::styled("       ▄▀▀█▀▀▄       ", hull),
-                Span::styled("◀─ WIDE SENSOR DISH", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("  ▄▄▄█▌ ▐███▌ ▐█▄▄▄  ", hull),
-                Span::styled("◀─ THERMAL / SOLAR FINS", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("  ▀▀▀█▌ ▐█▓█▌ ▐█▀▀▀  ", frame_s),
-                Span::styled("◀─ PROTECTED CHASSIS", callout),
-            ]),
-            Line::from(vec![
-                Span::styled("      ▀▄█████▄▀      ", hull),
-                Span::styled("◀─ RELAY TRANSPONDER", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("        ▀▄▀▄▀        ", frame_s),
-                Span::styled("◀─ VECTOR THRUSTERS", dim),
-            ]),
-            Line::from(vec![
-                Span::styled(sweep_line, active),
-                Span::styled(
-                    if scanning {
-                        "  ACTIVE SWEEP"
-                    } else if moving {
-                        "  TRANSIT BURN"
-                    } else {
-                        "  STATION HOLD"
-                    },
-                    dim,
-                ),
-            ]),
-        ]
-    }
-}
-
-fn extractor_blueprint_lines(
-    app: &App,
-    planet: &PlanetSnapshot,
-    blink: bool,
-    ascii: bool,
-    theme: Theme,
-    now: Instant,
-) -> Vec<Line<'static>> {
-    let hull = Style::default().fg(theme.cyan_bright).bold();
-    let rig_accent = match planet.extractor.loadout {
-        ExtractorLoadout::Balanced => Style::default().fg(theme.cobalt_bright).bold(),
-        ExtractorLoadout::Cargo => Style::default().fg(theme.gold).bold(),
-        ExtractorLoadout::Shielded => Style::default().fg(theme.magenta).bold(),
-    };
-    let callout = Style::default().fg(theme.gold).bold();
-    let active = Style::default().fg(theme.amber).bold();
-    let dim = Style::default().fg(theme.muted);
-
+    // Center: Full-canvas half-block polygon craft schematic on cohesive teal drafting field.
     let rebuilding = planet.extractor.state == ExtractorState::Rebuilding
         && planet.extractor.rebuild_remaining_ms > 0;
     let remaining_rebuild = app.display_remaining_ms(planet.extractor.rebuild_remaining_ms, now);
@@ -348,167 +164,76 @@ fn extractor_blueprint_lines(
         100
     };
 
-    let drill_active = planet.extractor.state == ExtractorState::Extracting;
-    let moving = matches!(
+    let buf = cinematic::build_probe_schematic_buffer(
+        selected_extractor,
+        planet.extractor.loadout,
+        planet.scout.state,
         planet.extractor.state,
-        ExtractorState::Outbound | ExtractorState::Returning
+        rebuild_pct,
+        chunks[1].width,
+        chunks[1].height,
+        app.globe_phase,
     );
+    blit_to_frame(&buf, frame, chunks[1], app.color_tier(options));
 
-    let rows: Vec<(&'static str, &'static str, bool)> = match (ascii, planet.extractor.loadout) {
-        (true, ExtractorLoadout::Balanced) => vec![
-            ("       .-----.       ", "<- TELEMETRY DOME", false),
-            ("     / [=====] \\     ", "<- BALANCED FRAME", true),
-            ("    | [##] [##] |    ", "<- TWIN ORE PODS", true),
-            ("    |===|===|===|    ", "<- CORE COUPLING", false),
-            ("      \\  | |  /      ", "<- STABILIZERS", false),
-            ("        \\ | /        ", "<- ROTARY AUGER", true),
-        ],
-        (true, ExtractorLoadout::Cargo) => vec![
-            ("       .-----.       ", "<- TELEMETRY DOME", false),
-            ("  +--+/[=====]\\+--+  ", "<- +2 OUTBOARD HOPPERS", true),
-            ("  |##||[##|##]||##|  ", "<- EXPANDED CARGO BAY", true),
-            ("  +--+|=|===|=|+--+  ", "<- REINFORCED RACKS", true),
-            ("      \\  | |  /      ", "<- HEAVY STRUTS", false),
-            ("        \\ | /        ", "<- ROTARY AUGER", false),
-        ],
-        (true, ExtractorLoadout::Shielded) => vec![
-            ("     /=========\\     ", "<- ABLATIVE CANOPY", true),
-            ("   //  [=====]  \\\\   ", "<- OUTER ARMOR SHELL", true),
-            ("  ||  |[#] [#]|  ||  ", "<- COMPACT ORE CELL", true),
-            ("   \\\\  |=====|  //   ", "<- IMPACT BAFFLES", true),
-            ("     \\===| |===/     ", "<- SHIELDED STRUTS", false),
-            ("        \\ | /        ", "<- ROTARY AUGER", false),
-        ],
-        (false, ExtractorLoadout::Balanced) => vec![
-            ("       ▄█████▄       ", "◀─ TELEMETRY DOME", false),
-            ("     ▄▀███████▀▄     ", "◀─ BALANCED FRAME", true),
-            ("    █▌ ▓██ ██▓ ▐█    ", "◀─ TWIN ORE PODS", true),
-            ("    ▀███▀▀▀▀▀███▀    ", "◀─ CORE COUPLING", false),
-            ("      ▀▄ ▐█▌ ▄▀      ", "◀─ STABILIZERS", false),
-            ("         ▀▼▀         ", "◀─ ROTARY AUGER", true),
-        ],
-        (false, ExtractorLoadout::Cargo) => vec![
-            ("       ▄█████▄       ", "◀─ TELEMETRY DOME", false),
-            ("  ▄██▄▀███████▀▄██▄  ", "◀─ +2 OUTBOARD HOPPERS", true),
-            ("  ████▌▓██ ██▓▐████  ", "◀─ EXPANDED CARGO BAY", true),
-            ("  ▀██▀██▀▀▀▀▀██▀██▀  ", "◀─ REINFORCED RACKS", true),
-            ("      ▀▄ ▐█▌ ▄▀      ", "◀─ HEAVY STRUTS", false),
-            ("         ▀▼▀         ", "◀─ ROTARY AUGER", false),
-        ],
-        (false, ExtractorLoadout::Shielded) => vec![
-            ("     ╔═════════╗     ", "◀─ ABLATIVE CANOPY", true),
-            ("   ▄█▌ ███████ ▐█▄   ", "◀─ OUTER ARMOR SHELL", true),
-            ("   ██▌ ▐▓█ █▓▌ ▐██   ", "◀─ COMPACT ORE CELL", true),
-            ("   ▀█▌ ▀▀▀▀▀▀▀ ▐█▀   ", "◀─ IMPACT BAFFLES", true),
-            ("     ╚═══▐█▌═══╝     ", "◀─ SHIELDED STRUTS", false),
-            ("         ▀▼▀         ", "◀─ ROTARY AUGER", false),
-        ],
-    };
-
-    let row_count = rows.len();
-    // During rebuild, fill from bottom row up according to rebuild_pct.
-    let built_rows = if rebuilding {
-        ((rebuild_pct as usize * row_count) / 100).min(row_count)
-    } else {
-        row_count
-    };
-
-    let mut out = Vec::with_capacity(row_count + 1);
-    for (idx, (art_row, label, is_rig_part)) in rows.into_iter().enumerate() {
-        let from_bottom = row_count - 1 - idx;
-        if rebuilding && from_bottom > built_rows {
-            let wireframe = if ascii {
-                "    . . . . . . .    "
-            } else {
-                "    · · · · · · ·    "
-            };
-            out.push(Line::from(vec![
-                Span::styled(wireframe, Style::default().fg(theme.blueprint_grid)),
-                Span::styled(label, Style::default().fg(theme.faint)),
-            ]));
-        } else if rebuilding && from_bottom == built_rows {
-            let spark = match (ascii, blink) {
-                (true, true) => "  *==[FABRICATING]==*",
-                (true, false) => "  +==[FABRICATING]==+",
-                (false, true) => "  ✦══[FABRICATING]══✦",
-                (false, false) => "  ✧──[FABRICATING]──✧",
-            };
-            out.push(Line::from(vec![
-                Span::styled(spark, active),
-                Span::styled(format!("  {rebuild_pct}%"), callout),
-            ]));
-        } else {
-            let style = if is_rig_part { rig_accent } else { hull };
-            out.push(Line::from(vec![
-                Span::styled(art_row, style),
-                Span::styled(label, if is_rig_part { callout } else { dim }),
-            ]));
-        }
-    }
-
-    let footer_motion = if rebuilding {
-        if ascii {
+    // Bottom: Crisp craft hardware callout + live status banner.
+    let callout_line = if !selected_extractor {
+        let mode = match planet.scout.state {
+            ScoutState::Surveying => "ACTIVE SCAN SWEEP",
+            ScoutState::Outbound | ScoutState::Returning => "TRANSIT BURN",
+            ScoutState::Holding => "HOLDING ON STATION",
+            ScoutState::Ready => "STANDBY AT CORE",
+        };
+        Line::from(vec![
+            Span::styled(
+                "WIDE SENSOR DISH",
+                Style::default().fg(theme.cyan_bright).bold(),
+            ),
+            Span::styled(" // ", Style::default().fg(theme.faint)),
+            Span::styled(mode, Style::default().fg(theme.amber)),
+        ])
+    } else if rebuilding {
+        Line::from(vec![Span::styled(
             format!(
-                "  GANTRY ACTIVE // {}s  ",
+                "GANTRY ACTIVE // FABRICATING {rebuild_pct}% // {}s",
                 remaining_rebuild.div_ceil(1_000)
-            )
-        } else {
-            format!(
-                "  ◈ GANTRY ACTIVE // {}s",
-                remaining_rebuild.div_ceil(1_000)
-            )
-        }
-    } else if drill_active {
-        if ascii {
-            if blink {
-                "       vvv[*]vvv     "
-            } else {
-                "        vv[+]vv      "
-            }
-            .to_owned()
-        } else if blink {
-            "       ▼▼▼◈▼▼▼       ".to_owned()
-        } else {
-            "        ▼▼◎▼▼        ".to_owned()
-        }
-    } else if moving {
-        if ascii {
-            if blink {
-                "       >>>|<<<       "
-            } else {
-                "        >>|<<        "
-            }
-            .to_owned()
-        } else if blink {
-            "       ▓▓▓█▓▓▓       ".to_owned()
-        } else {
-            "        ▒▓█▓▒        ".to_owned()
-        }
-    } else if ascii {
-        "      [BAY READY]    ".to_owned()
+            ),
+            Style::default().fg(theme.gold).bold(),
+        )])
     } else {
-        "      ▪ BAY READY ▪  ".to_owned()
+        let rig_callout = match planet.extractor.loadout {
+            ExtractorLoadout::Balanced => "BALANCED FRAME // TWIN ORE PODS",
+            ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS // EXPANDED BAY",
+            ExtractorLoadout::Shielded => "ABLATIVE CANOPY // SHIELD PLATING",
+        };
+        Line::from(vec![
+            Span::styled(rig_callout, Style::default().fg(theme.cyan_bright).bold()),
+            Span::styled(" // ", Style::default().fg(theme.faint)),
+            Span::styled(
+                if planet.extractor.state == ExtractorState::Ready {
+                    "G SWAP RIG"
+                } else {
+                    "RIG LOCKED"
+                },
+                Style::default().fg(theme.muted),
+            ),
+        ])
     };
-    out.push(Line::from(vec![
-        Span::styled(footer_motion, active),
-        Span::styled(
-            if rebuilding {
-                "  REBUILDING HULL"
-            } else if drill_active {
-                "  CORE EXTRACTION"
-            } else if moving {
-                "  TRANSIT BURN"
-            } else {
-                "  PRESS G TO SWAP RIG"
-            },
-            if rebuilding || drill_active {
-                callout
-            } else {
-                dim
-            },
-        ),
-    ]));
-    out
+
+    let status_banner = if selected_extractor {
+        extractor_status_banner(app, planet, now)
+    } else {
+        scout_status_banner(app, planet, now)
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            callout_line,
+            Line::styled(status_banner, Style::default().fg(theme.gold).bold()),
+        ])
+        .alignment(Alignment::Center)
+        .style(theme.panel_style()),
+        chunks[2],
+    );
 }
 
 fn scout_status_banner(app: &App, planet: &PlanetSnapshot, now: Instant) -> String {
@@ -619,6 +344,10 @@ fn render_telemetry_panel(
             "RIG LOADOUT MATRIX //",
             Style::default().fg(theme.gold).bold(),
         ));
+        lines.push(Line::styled(
+            "  RIG         CAP   TRV   CYC   RBLD",
+            Style::default().fg(theme.faint),
+        ));
         for loadout in ExtractorLoadout::ALL {
             let is_active = planet.extractor.loadout == loadout;
             let marker = match (options.ascii, is_active) {
@@ -632,9 +361,14 @@ fn render_telemetry_panel(
             } else {
                 format!("{delta}")
             };
+            let short_name = match loadout {
+                ExtractorLoadout::Balanced => "Balanced",
+                ExtractorLoadout::Cargo => "Cargo",
+                ExtractorLoadout::Shielded => "Shielded",
+            };
             let row_text = format!(
-                "{marker}{:<12} CARGO {:>2}  TRV {:>3}%  CYCLE {:>2}s  REBUILD {:>2}s",
-                loadout.title(),
+                "{marker}{:<10} {:>3}  {:>4}%  {:>3}s   {:>3}s",
+                short_name,
                 cargo_str,
                 loadout.travel_percent(),
                 loadout.extraction_duration_ms() / 1_000,
@@ -649,6 +383,7 @@ fn render_telemetry_panel(
                 },
             ));
         }
+        lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled(" G ", theme.key_style()),
             Span::styled(
@@ -675,11 +410,25 @@ fn render_telemetry_panel(
             format!("{:?}", planet.scout.state).to_uppercase(),
             theme,
         ));
-        lines.push(kv(
-            "LOCATION",
-            region_name(planet, &planet.scout.region_id),
-            theme,
-        ));
+        if let Some(mission) = &planet.active_mission {
+            let label = match mission.phase {
+                ScoutState::Outbound => "DESTINATION",
+                ScoutState::Surveying | ScoutState::Holding => "STATION",
+                ScoutState::Returning => "RETURNING",
+                ScoutState::Ready => "LOCATION",
+            };
+            lines.push(kv(
+                label,
+                region_name(planet, &mission.target_region_id),
+                theme,
+            ));
+        } else {
+            lines.push(kv(
+                "LOCATION",
+                region_name(planet, &planet.scout.region_id),
+                theme,
+            ));
+        }
         lines.push(kv(
             "RELIABILITY",
             "Protected survey frame (failure-free)".to_owned(),
@@ -735,26 +484,11 @@ fn render_telemetry_panel(
     ));
 
     lines.push(Line::raw(""));
+    let sep = if options.ascii { " | " } else { " · " };
     lines.push(Line::styled(
-        "MODULAR HARDPOINTS // PLANNED",
-        Style::default().fg(theme.muted).bold(),
+        format!("HARDPOINTS // SLOT A{sep}SLOT B{sep}SLOT C (RESERVED)"),
+        Style::default().fg(theme.faint),
     ));
-    let slot_frame = if options.ascii {
-        [
-            "  +-[SLOT A: SENSOR BAY   // RESERVED]-+",
-            "  +-[SLOT B: UTILITY MOUNT // RESERVED]-+",
-            "  +-[SLOT C: DRIVE COUPLING// RESERVED]-+",
-        ]
-    } else {
-        [
-            "  ┌┄[SLOT A · SENSOR BAY    // RESERVED]┄┐",
-            "  ┌┄[SLOT B · UTILITY MOUNT // RESERVED]┄┐",
-            "  ┌┄[SLOT C · DRIVE MODULE  // RESERVED]┄┐",
-        ]
-    };
-    for slot in slot_frame {
-        lines.push(Line::styled(slot, Style::default().fg(theme.faint)));
-    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -771,7 +505,7 @@ fn render_telemetry_panel(
         ));
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .scroll((app.probe_panel_scroll, 0))
             .style(theme.panel_style())
             .block(block),
@@ -790,6 +524,6 @@ fn region_name(planet: &PlanetSnapshot, region_id: &str) -> String {
     planet
         .regions
         .iter()
-        .find(|region| region.id == region_id)
-        .map_or_else(|| region_id.to_owned(), |region| region.designation.clone())
+        .find(|r| r.id == region_id)
+        .map_or_else(|| region_id.to_owned(), |r| r.designation.clone())
 }

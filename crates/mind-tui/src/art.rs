@@ -12,12 +12,9 @@ use mind_core::protocol::{
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
-    symbols::{border, Marker},
+    symbols::border,
     text::{Line, Span},
-    widgets::{
-        canvas::{Canvas, Circle, Line as CanvasLine},
-        Block, Borders, Paragraph, Wrap,
-    },
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use std::time::Duration;
@@ -801,7 +798,8 @@ pub fn archive_experiment_waveform(
     ]
 }
 
-/// Animated client-local parallax pullback & unresolved outer-return observation chart.
+/// Animated client-local parallax pullback & unresolved outer-return observation chart
+/// powered by the universal half-block polygon rasterizer.
 ///
 /// Deliberately leaves the count, types, and orbital arrangement of outer worlds unresolved.
 pub fn render_system_cliffhanger_chart(
@@ -811,25 +809,8 @@ pub fn render_system_cliffhanger_chart(
     phase: f64,
     options: RenderOptions,
     theme: Theme,
+    tier: crate::raster::ColorTier,
 ) {
-    let pullback = (elapsed.as_secs_f64() / PULLBACK_DURATION_SECS).clamp(0.0, 1.0);
-    // Smooth cubic ease-out pullback from inner world framing to local star + outer dark.
-    let eased = 1.0 - (1.0 - pullback).powi(3);
-    let orbit_angle = 0.62 + phase * 0.35;
-    let world_x = -12.0 + 24.0 * orbit_angle.cos();
-    let world_y = 24.0 * orbit_angle.sin();
-    let x_half = 26.0 + 34.0 * eased;
-    let y_half = 14.0 + 18.0 * eased;
-    let cam_x = world_x * (1.0 - eased);
-    let cam_y = world_y * (1.0 - eased);
-
-    let marker = if options.ascii {
-        Marker::Custom('.')
-    } else {
-        Marker::Braille
-    };
-    let star_marker = if options.ascii { "*" } else { "✦" };
-    let world_marker = if options.ascii { "o" } else { "●" };
     let border_set = if options.ascii {
         ASCII_BORDER
     } else {
@@ -844,108 +825,85 @@ pub fn render_system_cliffhanger_chart(
             Style::default().fg(theme.cyan_bright).bold(),
         ))
         .style(theme.canvas_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 16 || inner.height < 6 {
+        return;
+    }
 
-    let corona_pulse = 4.4 + (phase * std::f64::consts::TAU).sin() * 0.55;
-    let sweep_angle = phase * std::f64::consts::TAU;
-    let sweep_x = -12.0 + 46.0 * sweep_angle.cos();
-    let sweep_y = 26.0 * sweep_angle.sin();
+    let elapsed_secs = elapsed.as_secs_f32();
+    let buf = crate::cinematic::build_solar_horizon_buffer(
+        inner.width,
+        inner.height,
+        elapsed_secs,
+        phase,
+    );
+    crate::raster::blit_to_frame(&buf, frame, inner, tier);
 
-    // Intermittent, shifting outer return blips that never imply a fixed planet count or orbit.
-    let tick_bucket = (phase * 8.0).floor() as usize;
-    let return_a_visible = eased > 0.55 && !tick_bucket.is_multiple_of(3);
-    let return_b_visible = eased > 0.72 && (tick_bucket % 4 == 1 || tick_bucket % 4 == 2);
-    let return_c_visible = eased > 0.85 && (tick_bucket.is_multiple_of(5) || tick_bucket % 5 == 3);
+    // Crisp minimal telemetry labels anchored dynamically from projected sprite positions.
+    let p = (elapsed_secs / (PULLBACK_DURATION_SECS as f32)).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - p).powi(3);
+    let star_col = ((inner.width as f32) * (0.14 + 0.14 * eased)).round() as u16;
+    let mid_row = inner.height / 2;
 
-    let chart = Canvas::default()
-        .block(block)
-        .marker(marker)
-        .x_bounds([cam_x - x_half, cam_x + x_half])
-        .y_bounds([cam_y - y_half, cam_y + y_half])
-        .paint(move |context| {
-            // Subtle parallax sweep line from the local star frame.
-            if eased > 0.35 {
-                context.draw(&CanvasLine {
-                    x1: -12.0,
-                    y1: 0.0,
-                    x2: sweep_x,
-                    y2: sweep_y,
-                    color: theme.faint,
-                });
-            }
-            // Local star core and pulsing corona.
-            context.draw(&Circle::new(-12.0, 0.0, 2.8, theme.amber));
-            context.draw(&Circle::new(-12.0, 0.0, corona_pulse, theme.warning));
-            // Reference orbital path of the current world.
-            context.draw(&Circle::new(-12.0, 0.0, 24.0, theme.border));
-            if eased > 0.5 {
-                context.draw(&Circle::new(-12.0, 0.0, 40.0, theme.faint));
-            }
-            context.print(
-                -12.8,
-                0.8,
-                Line::styled(star_marker, Style::default().fg(theme.amber).bold()),
-            );
-            context.print(
-                -18.0,
-                -7.2,
-                Line::styled("LOCAL STAR", Style::default().fg(theme.muted)),
-            );
+    let star_label_x = inner.x + star_col.saturating_sub(5);
+    let star_label_y = inner.y + (mid_row + 4).min(inner.height.saturating_sub(2));
+    let star_w = 10.min((inner.x + inner.width).saturating_sub(star_label_x));
+    if star_w >= 6 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "LOCAL STAR",
+                Style::default().fg(theme.gold).bold(),
+            )),
+            Rect::new(star_label_x, star_label_y, star_w, 1),
+        );
+    }
 
-            // Current world marker + subtle reticle.
-            context.draw(&Circle::new(world_x, world_y, 1.4, theme.cyan_bright));
-            context.print(
-                world_x - 0.8,
-                world_y + 0.8,
-                Line::styled(world_marker, Style::default().fg(theme.cyan_bright).bold()),
-            );
-            context.print(
-                world_x + 3.2,
-                world_y + 1.2,
-                Line::styled(
-                    "CURRENT WORLD",
-                    Style::default().fg(theme.text_strong).bold(),
-                ),
-            );
+    let (world_col, world_row) =
+        crate::cinematic::solar_horizon_world_cell(inner.width, inner.height, elapsed_secs, phase);
+    let label_len: u16 = 13; // "CURRENT WORLD"
+                             // Place label cleanly outside the world sprite + glow radius (4 cols / 2 rows clear).
+    let (cw_rel_x, cw_rel_y) = if world_col + 5 + label_len < inner.width {
+        (world_col + 5, world_row)
+    } else if world_col >= label_len + 5 {
+        (world_col - label_len - 4, world_row)
+    } else {
+        let clamped_x = world_col
+            .saturating_sub(label_len / 2)
+            .min(inner.width.saturating_sub(label_len));
+        let below_y = if world_row + 3 < inner.height.saturating_sub(1) {
+            world_row + 3
+        } else {
+            world_row.saturating_sub(3).max(1)
+        };
+        (clamped_x, below_y)
+    };
+    let cw_x = inner.x + cw_rel_x;
+    let cw_y = inner.y + cw_rel_y.clamp(1, inner.height.saturating_sub(2));
+    let cw_w = label_len.min((inner.x + inner.width).saturating_sub(cw_x));
+    if cw_w >= 13 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "CURRENT WORLD",
+                Style::default().fg(theme.cyan_bright).bold(),
+            )),
+            Rect::new(cw_x, cw_y, cw_w, 1),
+        );
+    }
 
-            // Faint intermittent outer interruptions — intentionally unclassified and non-enumerated.
-            let blip = if options.ascii { "?" } else { "◌" };
-            if return_a_visible {
-                context.print(
-                    31.0,
-                    11.0,
-                    Line::styled(blip, Style::default().fg(theme.cyan)),
-                );
-            }
-            if return_b_visible {
-                context.print(
-                    38.0,
-                    -12.0,
-                    Line::styled(blip, Style::default().fg(theme.amber)),
-                );
-            }
-            if return_c_visible {
-                context.print(
-                    -46.0,
-                    16.0,
-                    Line::styled(blip, Style::default().fg(theme.cyan)),
-                );
-            }
-
-            context.print(
-                cam_x - x_half + 4.0,
-                cam_y - y_half + 3.0,
-                Line::styled("REFERENCE TRACK", Style::default().fg(theme.faint)),
-            );
-            context.print(
-                cam_x + 4.0,
-                cam_y - y_half + 3.0,
-                Line::styled(
-                    "OUTER RETURNS // UNRESOLVED",
-                    Style::default().fg(theme.cyan),
-                ),
-            );
-        });
-    frame.render_widget(chart, area);
+    // Bottom legend bar inside the observation frame.
+    let bot_y = inner.y + inner.height.saturating_sub(1);
+    let left_txt = " REFERENCE TRACK";
+    let right_txt = "OUTER RETURNS // UNRESOLVED ";
+    let pad = usize::from(inner.width).saturating_sub(left_txt.len() + right_txt.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(left_txt, Style::default().fg(theme.muted)),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(right_txt, Style::default().fg(theme.cyan)),
+        ])),
+        Rect::new(inner.x, bot_y, inner.width, 1),
+    );
 }
 
 /// Fast non-blocking 1980s CRT interleaved horizontal raster-wipe overlay (~180 ms).

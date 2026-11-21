@@ -120,6 +120,7 @@ pub struct App {
     pub last_frame_duration_us: u64,
     pub frame_count: u64,
     pub ansi16: bool,
+    pub ansi256: bool,
     pub boot_intro: Option<BootIntroState>,
     pub transition_started_at: Option<Instant>,
     pub globe_cache: RefCell<crate::globe::GlobeCache>,
@@ -146,8 +147,10 @@ pub struct App {
     pub archive_selection: usize,
     pub show_return_summary: bool,
     pub active_transmission_id: Option<String>,
+    pub replay_transmission_id: Option<String>,
     pub transmission_opened_at: Option<Instant>,
     pub transmission_revealed: bool,
+    pub transmission_scroll: u16,
     pub show_chapter_card: bool,
     pub system_map_opened_at: Option<Instant>,
     pub pending_action: Option<ContextAction>,
@@ -162,6 +165,7 @@ pub struct App {
     last_seen_chapter: Option<u8>,
     suppress_initial_return_summary: bool,
     pending_archive_ack_id: Option<String>,
+    last_auto_acked_activity_id: u64,
     boot_intro_enabled: bool,
     boot_intro_armed: bool,
     pub animations_enabled: bool,
@@ -182,6 +186,7 @@ impl Default for App {
             last_frame_duration_us: 0,
             frame_count: 0,
             ansi16: false,
+            ansi256: false,
             boot_intro: None,
             transition_started_at: None,
             globe_cache: RefCell::new(crate::globe::GlobeCache::default()),
@@ -208,8 +213,10 @@ impl Default for App {
             archive_selection: 0,
             show_return_summary: false,
             active_transmission_id: None,
+            replay_transmission_id: None,
             transmission_opened_at: None,
             transmission_revealed: false,
+            transmission_scroll: 0,
             show_chapter_card: false,
             system_map_opened_at: None,
             pending_action: None,
@@ -224,6 +231,7 @@ impl Default for App {
             last_seen_chapter: None,
             suppress_initial_return_summary: false,
             pending_archive_ack_id: None,
+            last_auto_acked_activity_id: 0,
             boot_intro_enabled: false,
             boot_intro_armed: false,
             animations_enabled: true,
@@ -357,9 +365,28 @@ impl App {
             self.active_transmission_id = next_unpresented.clone();
             self.transmission_opened_at = next_unpresented.as_ref().map(|_| received_at);
             self.transmission_revealed = false;
+            self.transmission_scroll = 0;
         }
+        let mut operation_resolved = false;
         if let Some(previous) = self.planet.as_ref() {
             if previous.revision != planet.revision {
+                if (previous.network.active_site_survey.is_some()
+                    && planet.network.active_site_survey.is_none())
+                    || (previous.active_extraction.is_some() && planet.active_extraction.is_none())
+                    || (previous.active_construction.is_some()
+                        && planet.active_construction.is_none())
+                    || (previous.research.active.is_some() && planet.research.active.is_none())
+                    || (previous
+                        .active_mission
+                        .as_ref()
+                        .is_some_and(|m| m.phase != ScoutState::Holding)
+                        && planet
+                            .active_mission
+                            .as_ref()
+                            .is_none_or(|m| m.phase == ScoutState::Holding))
+                {
+                    operation_resolved = true;
+                }
                 let old_regions: HashMap<&str, _> = previous
                     .regions
                     .iter()
@@ -397,6 +424,9 @@ impl App {
         });
         self.planet = Some(planet);
         self.planet_received_at = Some(received_at);
+        if operation_resolved {
+            self.notice = None;
+        }
         if system_map_became_available {
             self.workspace = Workspace::SystemMap;
             self.system_map_opened_at = Some(received_at);
@@ -529,13 +559,29 @@ impl App {
     fn reset_local_playthrough_state(&mut self) {
         let connection = self.connection.clone();
         let ansi16 = self.ansi16;
+        let ansi256 = self.ansi256;
         let boot_intro_enabled = self.boot_intro_enabled;
         let animations_enabled = self.animations_enabled;
         *self = Self::default();
         self.connection = connection;
         self.ansi16 = ansi16;
+        self.ansi256 = ansi256;
         self.boot_intro_enabled = boot_intro_enabled;
         self.animations_enabled = animations_enabled;
+    }
+
+    pub fn color_tier(&self, options: crate::ui::RenderOptions) -> crate::raster::ColorTier {
+        if options.ascii {
+            crate::raster::ColorTier::Ascii
+        } else if options.no_color {
+            crate::raster::ColorTier::Monochrome
+        } else if self.ansi16 {
+            crate::raster::ColorTier::Ansi16
+        } else if self.ansi256 {
+            crate::raster::ColorTier::Ansi256
+        } else {
+            crate::raster::ColorTier::TrueColor
+        }
     }
 
     pub fn enable_boot_intro(&mut self) {
@@ -695,11 +741,11 @@ impl App {
                     .map_or(Duration::from_secs(10), |opened| {
                         now.saturating_duration_since(opened)
                     });
-                if elapsed < Duration::from_millis(1_650) {
+                if elapsed < Duration::from_millis(2_500) {
                     return Some(now + ACTIVE_FRAME);
                 }
             }
-            return None;
+            return Some(now + AMBIENT_FRAME);
         }
         if !matches!(self.connection, ConnectionState::Connected) {
             return None;
@@ -807,29 +853,96 @@ impl App {
         }
     }
 
-    pub fn cycle_workspace(&mut self, reverse: bool) {
-        let system_map_available = self
-            .planet
-            .as_ref()
-            .is_some_and(|planet| planet.system_map.available);
-        self.workspace = match (self.workspace, reverse, system_map_available) {
-            (Workspace::Planet, false, _) => Workspace::Overview,
-            (Workspace::Overview, false, _) => Workspace::Probes,
-            (Workspace::Probes, false, _) => Workspace::Research,
-            (Workspace::Research, false, _) => Workspace::Archive,
-            (Workspace::Archive, false, true) => Workspace::SystemMap,
-            (Workspace::Archive, false, false) => Workspace::System,
-            (Workspace::SystemMap, false, _) => Workspace::System,
-            (Workspace::System, false, _) => Workspace::Planet,
-            (Workspace::Planet, true, _) => Workspace::System,
-            (Workspace::Overview, true, _) => Workspace::Planet,
-            (Workspace::Probes, true, _) => Workspace::Overview,
-            (Workspace::Research, true, _) => Workspace::Probes,
-            (Workspace::Archive, true, _) => Workspace::Research,
-            (Workspace::SystemMap, true, _) => Workspace::Archive,
-            (Workspace::System, true, true) => Workspace::SystemMap,
-            (Workspace::System, true, false) => Workspace::Archive,
+    /// Workspaces progressively unfold as the player encounters their corresponding systems.
+    pub fn visible_workspaces(&self) -> Vec<Workspace> {
+        let mut list = vec![Workspace::Planet];
+        let Some(planet) = self.planet.as_ref() else {
+            if self.workspace != Workspace::Planet
+                && self.workspace != Workspace::Archive
+                && self.workspace != Workspace::System
+            {
+                list.push(self.workspace);
+            }
+            list.push(Workspace::Archive);
+            list.push(Workspace::System);
+            return list;
         };
+        let surveyed_count = planet
+            .regions
+            .iter()
+            .filter(|r| r.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+            .count();
+        let has_stock = planet.raw_inventory.structural > 0
+            || planet.raw_inventory.conductive > 0
+            || planet.raw_inventory.silicate > 0
+            || planet.refined_inventory.structural > 0
+            || planet.refined_inventory.conductive > 0
+            || planet.refined_inventory.silicate > 0;
+        let has_ops = planet.active_mission.is_some()
+            || planet.active_extraction.is_some()
+            || planet.active_construction.is_some()
+            || !planet.network.active_projects.is_empty()
+            || !planet.recent_reports.is_empty();
+
+        if self.workspace == Workspace::Overview || has_ops || has_stock || surveyed_count > 1 {
+            list.push(Workspace::Overview);
+        }
+        if self.workspace == Workspace::Probes
+            || has_ops
+            || surveyed_count > 1
+            || planet.extractor.loadout != ExtractorLoadout::Balanced
+            || planet.extractor.rebuild_remaining_ms > 0
+        {
+            list.push(Workspace::Probes);
+        }
+        if self.workspace == Workspace::Research
+            || planet.research.unlocked
+            || planet.research.analysis_units >= 3
+            || planet.research.active.is_some()
+        {
+            list.push(Workspace::Research);
+        }
+        list.push(Workspace::Archive);
+        if self.workspace == Workspace::SystemMap || planet.system_map.available {
+            list.push(Workspace::SystemMap);
+        }
+        list.push(Workspace::System);
+        list
+    }
+
+    pub fn select_visible_workspace(&mut self, one_based_index: usize) -> bool {
+        let visible = self.visible_workspaces();
+        let Some(&target) = one_based_index
+            .checked_sub(1)
+            .and_then(|idx| visible.get(idx))
+        else {
+            return false;
+        };
+        if self.workspace == target {
+            return false;
+        }
+        self.workspace = target;
+        self.pending_action = None;
+        self.notice = None;
+        true
+    }
+
+    pub fn cycle_workspace(&mut self, reverse: bool) {
+        let visible = self.visible_workspaces();
+        let current_idx = visible
+            .iter()
+            .position(|&ws| ws == self.workspace)
+            .unwrap_or(0);
+        let next_idx = if reverse {
+            if current_idx == 0 {
+                visible.len() - 1
+            } else {
+                current_idx - 1
+            }
+        } else {
+            (current_idx + 1) % visible.len()
+        };
+        self.workspace = visible[next_idx];
         self.pending_action = None;
         self.notice = None;
     }
@@ -1140,9 +1253,7 @@ impl App {
             return self.local_primary_action();
         }
         let region = self.selected_region()?;
-        if self.scout_recall_action().is_some() {
-            Some(ContextAction::Recall)
-        } else if region
+        if region
             .deposit
             .as_ref()
             .is_some_and(|deposit| deposit.remaining > 0)
@@ -1223,7 +1334,19 @@ impl App {
 
     pub fn extractor_loadout_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
-        (matches!(self.workspace, Workspace::Planet | Workspace::Probes)
+        let allowed_workspace = match self.workspace {
+            Workspace::Probes => true,
+            Workspace::Planet => self.selected_region().is_some_and(|r| {
+                r.core
+                    || r.deposit.is_some()
+                    || planet
+                        .active_extraction
+                        .as_ref()
+                        .is_some_and(|m| m.target_region_id == r.id)
+            }),
+            _ => false,
+        };
+        (allowed_workspace
             && planet.extractor.state == ExtractorState::Ready
             && planet.active_extraction.is_none())
         .then(|| ContextAction::ConfigureExtractor(planet.extractor.loadout.next()))
@@ -1241,7 +1364,17 @@ impl App {
                 PlanetActionKind::Research => "RESEARCH COMMITTED".into(),
                 PlanetActionKind::Archive => "ARCHIVE COMPARISON STARTED".into(),
                 PlanetActionKind::Profile => "OPERATIONAL PROFILE ACTIVATED".into(),
-                PlanetActionKind::Automation => "AUTOMATION UPDATED".into(),
+                PlanetActionKind::Automation => {
+                    if self
+                        .planet
+                        .as_ref()
+                        .is_some_and(|p| p.survey_queue.unlocked)
+                    {
+                        "AUTOMATION UPDATED".into()
+                    } else {
+                        "SURVEY WAYPOINT UPDATED".into()
+                    }
+                }
                 PlanetActionKind::Review => "ACTIVITY REVIEWED".into(),
                 PlanetActionKind::ArchivePresentation => "OBSERVATION FILED IN ARCHIVE".into(),
                 PlanetActionKind::LocalSurvey => "LOCAL SURVEY STARTED".into(),
@@ -1335,7 +1468,7 @@ impl App {
     pub fn automation_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
         let region = self.selected_region()?;
-        if self.workspace != Workspace::Planet || !planet.survey_queue.unlocked {
+        if self.workspace != Workspace::Planet {
             return None;
         }
         if planet
@@ -1346,11 +1479,20 @@ impl App {
         {
             return Some(ContextAction::RemoveQueuedSurvey(region.id.clone()));
         }
+        let already_scout_target = planet
+            .active_mission
+            .as_ref()
+            .is_some_and(|mission| mission.target_region_id == region.id);
         if !region.core
             && region.knowledge < mind_core::protocol::RegionKnowledge::Surveyed
             && region.within_scout_range
+            && !already_scout_target
+            && planet.survey_queue.queued_region_ids.len() < planet.survey_queue.capacity
         {
             return Some(ContextAction::QueueSurvey(region.id.clone()));
+        }
+        if !planet.extraction_route.unlocked {
+            return None;
         }
         if planet.extraction_route.region_id.as_deref() == Some(region.id.as_str()) {
             if planet.extraction_route.paused_reason.as_deref() == Some("probe_loss")
@@ -1372,6 +1514,165 @@ impl App {
             .then(|| ContextAction::SetExtractionRoute(region.id.clone()))
     }
 
+    /// Shortest live completion countdown or ready-decision badge for the companion status strip.
+    pub fn next_event_badge(&self, now: Instant) -> Option<(String, bool)> {
+        let planet = self.planet.as_ref()?;
+        if !planet.archive.unpresented_record_ids.is_empty() {
+            return Some((
+                format!(
+                    "{} DISCOVERY READY",
+                    planet.archive.unpresented_record_ids.len()
+                ),
+                true,
+            ));
+        }
+        let region_label = |region_id: &str| -> String {
+            planet
+                .regions
+                .iter()
+                .find(|r| r.id == region_id)
+                .map_or_else(|| region_id.to_owned(), |r| r.designation.clone())
+        };
+        let mut timers: Vec<(u64, String)> = Vec::new();
+        if let Some(mission) = &planet.active_mission {
+            if mission.phase != ScoutState::Holding {
+                let rem = self.display_remaining_ms(mission.remaining_ms, now);
+                timers.push((
+                    rem,
+                    format!(
+                        "NEXT: {} {}s",
+                        region_label(&mission.target_region_id),
+                        rem.div_ceil(1_000)
+                    ),
+                ));
+            }
+        }
+        if let Some(ext) = &planet.active_extraction {
+            let rem = self.display_remaining_ms(ext.remaining_ms, now);
+            timers.push((
+                rem,
+                format!(
+                    "NEXT: EXT {} {}s",
+                    region_label(&ext.target_region_id),
+                    rem.div_ceil(1_000)
+                ),
+            ));
+        }
+        if let Some(site) = &planet.network.active_site_survey {
+            let rem = self.display_remaining_ms(site.remaining_ms, now);
+            timers.push((rem, format!("NEXT: SCAN {}s", rem.div_ceil(1_000))));
+        }
+        if let Some(build) = &planet.active_construction {
+            let rem = self.display_remaining_ms(build.remaining_ms, now);
+            timers.push((rem, format!("NEXT: RELAY {}s", rem.div_ceil(1_000))));
+        }
+        if let Some(res) = &planet.research.active {
+            let rem = self.display_remaining_ms(res.remaining_ms, now);
+            timers.push((rem, format!("NEXT: RESEARCH {}s", rem.div_ceil(1_000))));
+        }
+        for proj in &planet.network.active_projects {
+            let rem = self.display_remaining_ms(proj.remaining_ms, now);
+            timers.push((rem, format!("NEXT: PROJECT {}s", rem.div_ceil(1_000))));
+        }
+        if planet.extractor.rebuild_remaining_ms > 0 {
+            let rem = self.display_remaining_ms(planet.extractor.rebuild_remaining_ms, now);
+            timers.push((rem, format!("NEXT: REBUILD {}s", rem.div_ceil(1_000))));
+        }
+        if let Some(exp) = &planet.archive.experiment {
+            if exp.active && exp.running {
+                let rem = self.display_remaining_ms(exp.remaining_ms, now);
+                timers.push((rem, format!("NEXT: ARCHIVE {}s", rem.div_ceil(1_000))));
+            }
+        }
+        timers.sort_by_key(|(ms, _)| *ms);
+        if let Some((_, first)) = timers.first() {
+            let label = if timers.len() > 1 {
+                format!("{first} (+{})", timers.len() - 1)
+            } else {
+                first.clone()
+            };
+            return Some((label, false));
+        }
+        Some(("READY FOR ORDERS".to_owned(), true))
+    }
+
+    /// Short OSC 0 terminal title reflecting current daemon state (used when `--title` is enabled).
+    pub fn companion_window_title(&self, now: Instant) -> String {
+        if self.onboarding_pending() {
+            return "SUBSTRATE · Coherence".to_owned();
+        }
+        let Some(planet) = self.planet.as_ref() else {
+            return "SUBSTRATE".to_owned();
+        };
+        let chapter = crate::transmission::roman_chapter(planet.campaign.chapter_number);
+        let badge = self
+            .next_event_badge(now)
+            .map_or_else(|| "ONLINE".to_owned(), |(label, _)| label);
+        format!("SUBSTRATE · CH {chapter} · {badge}")
+    }
+
+    /// Monotonic milestone/completion counters used by opt-in `--bell` notifications.
+    /// Uses `max(mission_id)` from `recent_reports` rather than `.len()` so notifications keep
+    /// working even after the 64-entry report ring saturates.
+    pub fn bell_milestone_signature(&self) -> Option<(usize, usize, usize, u64)> {
+        let planet = self.planet.as_ref()?;
+        let surveyed = planet
+            .regions
+            .iter()
+            .filter(|r| r.knowledge >= mind_core::protocol::RegionKnowledge::Surveyed)
+            .count();
+        let archived = planet.archive.records.len();
+        let research = planet
+            .research
+            .options
+            .iter()
+            .filter(|o| o.completed)
+            .count();
+        let latest_report_id = planet
+            .recent_reports
+            .iter()
+            .map(|r| r.mission_id)
+            .max()
+            .unwrap_or(0);
+        Some((surveyed, archived, research, latest_report_id))
+    }
+
+    /// Returns the latest unreviewed activity ID to acknowledge while the player is actively
+    /// watching a live non-modal workspace, so Return Summary only reports away-time events.
+    pub fn pending_live_activity_ack(&mut self, now: Instant) -> Option<u64> {
+        if !matches!(self.connection, ConnectionState::Connected)
+            || self.session_menu.is_some()
+            || self.show_return_summary
+            || self.boot_intro_active(now)
+            || self.active_transmission_record().is_some()
+        {
+            return None;
+        }
+        let latest_id = self
+            .planet
+            .as_ref()?
+            .unreviewed_activity
+            .last()
+            .map(|record| record.activity_id)?;
+        if latest_id > self.last_auto_acked_activity_id {
+            self.last_auto_acked_activity_id = latest_id;
+            Some(latest_id)
+        } else {
+            None
+        }
+    }
+
+    pub fn scroll_transmission(&mut self, delta: i16) {
+        self.transmission_scroll = if delta.is_negative() {
+            self.transmission_scroll
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.transmission_scroll
+                .saturating_add(delta as u16)
+                .min(64)
+        };
+    }
+
     pub fn dismiss_return_summary(&mut self) -> Option<u64> {
         self.show_return_summary = false;
         if self.active_transmission_id.is_some() {
@@ -1389,7 +1690,10 @@ impl App {
         if self.show_return_summary {
             return None;
         }
-        let record_id = self.active_transmission_id.as_deref()?;
+        let record_id = self
+            .replay_transmission_id
+            .as_deref()
+            .or(self.active_transmission_id.as_deref())?;
         let records = &self.planet.as_ref()?.archive.records;
         records
             .iter()
@@ -1397,28 +1701,62 @@ impl App {
             .find(|(_, record)| record.record_id == record_id)
     }
 
+    pub fn open_archive_replay(&mut self, now: Instant) -> bool {
+        let Some(record_id) = self.planet.as_ref().and_then(|planet| {
+            planet
+                .archive
+                .records
+                .get(
+                    self.archive_selection
+                        .min(planet.archive.records.len().saturating_sub(1)),
+                )
+                .map(|r| r.record_id.clone())
+        }) else {
+            return false;
+        };
+        self.replay_transmission_id = Some(record_id);
+        self.transmission_opened_at = Some(now);
+        self.transmission_revealed = false;
+        self.transmission_scroll = 0;
+        true
+    }
+
     pub fn reveal_or_dismiss_transmission(&mut self, now: Instant) -> Option<String> {
-        let record_id = self.active_transmission_id.clone()?;
         let elapsed = self
             .transmission_opened_at
             .map_or(Duration::from_secs(10), |opened| {
                 now.saturating_duration_since(opened)
             });
-        if !self.transmission_revealed && elapsed < Duration::from_millis(1_600) {
+        if self.replay_transmission_id.is_some() {
+            if !self.transmission_revealed && elapsed < Duration::from_millis(2_400) {
+                self.transmission_revealed = true;
+                return None;
+            }
+            self.replay_transmission_id = None;
+            self.transmission_opened_at = None;
+            self.transmission_revealed = false;
+            self.transmission_scroll = 0;
+            return None;
+        }
+        let record_id = self.active_transmission_id.clone()?;
+        if !self.transmission_revealed && elapsed < Duration::from_millis(2_400) {
             self.transmission_revealed = true;
             return None;
         }
         self.active_transmission_id = None;
         self.transmission_opened_at = None;
         self.transmission_revealed = false;
+        self.transmission_scroll = 0;
         self.pending_archive_ack_id = Some(record_id.clone());
         Some(record_id)
     }
 
     pub fn clear_active_transmission_locally(&mut self) {
         self.active_transmission_id = None;
+        self.replay_transmission_id = None;
         self.transmission_opened_at = None;
         self.transmission_revealed = false;
+        self.transmission_scroll = 0;
     }
 
     pub fn toggle_chapter_card(&mut self) {
@@ -1426,6 +1764,17 @@ impl App {
     }
 
     pub fn focus_campaign_lead(&mut self) -> bool {
+        // Inside 4x4 local view, focus the actionable sector in this region first (e.g. a
+        // connected node needing an Observatory/Lab, or a Detected frontier sector needing [S]).
+        if self.workspace == Workspace::Planet && self.local_view {
+            if let Some((slot, label)) = self.best_local_lead_slot() {
+                self.selected_subregion_slot = slot;
+                self.pending_action = None;
+                self.region_panel_scroll = 0;
+                self.notice = Some(format!("FOCUSED LOCAL LEAD // {label}"));
+                return true;
+            }
+        }
         let Some((lead_id, designation)) = self.planet.as_ref().and_then(|planet| {
             let lead_id = planet.campaign.lead_region_id.as_ref()?;
             let designation = planet
@@ -1447,6 +1796,47 @@ impl App {
         self.focus_selected_region(false);
         self.notice = Some(format!("FOCUSED CAMPAIGN LEAD // {designation}"));
         true
+    }
+
+    fn best_local_lead_slot(&self) -> Option<(usize, String)> {
+        let planet = self.planet.as_ref()?;
+        let region_id = self.selected_region_id.as_deref()?;
+        let sites: Vec<_> = planet
+            .network
+            .subregions
+            .iter()
+            .filter(|s| s.region_id == region_id)
+            .collect();
+        if sites.is_empty() {
+            return None;
+        }
+        // Prefer an established node in this region when campaign asks for node/module work.
+        if matches!(
+            planet.campaign.next_action_key.as_deref(),
+            Some("O" | "L" | "P" | "C" | "D" | "W" | "M")
+        ) {
+            if let Some(base) = planet
+                .network
+                .bases
+                .iter()
+                .find(|b| b.region_id == region_id)
+            {
+                if let Some(site) = sites.iter().find(|s| s.id == base.subregion_id) {
+                    return Some((usize::from(site.slot), site.designation.clone()));
+                }
+            }
+        }
+        // Otherwise prefer a Detected frontier sector (sheltered shelf first for Ch I).
+        if let Some(site) = sites
+            .iter()
+            .filter(|s| s.knowledge == SubregionKnowledge::Detected)
+            .max_by_key(|s| {
+                u8::from(s.class == Some(mind_core::protocol::SubregionClass::ShelteredShelf))
+            })
+        {
+            return Some((usize::from(site.slot), site.designation.clone()));
+        }
+        None
     }
 
     pub fn move_archive_selection(&mut self, delta: isize) {

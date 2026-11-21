@@ -1,9 +1,12 @@
 pub mod app;
 pub mod art;
 pub mod boot;
+pub mod cinematic;
 pub mod connection;
 pub mod globe;
 pub mod probes;
+pub mod raster;
 pub mod theme;
 pub mod transmission;
 pub mod ui;
+pub mod vista;
