@@ -87,14 +87,14 @@ pub fn record_diagram(
                 Line::from(vec![
                     Span::styled("  BAND C  ━━━┫ ", dim),
                     Span::styled(gap, warm),
-                    Span::styled(" ┣━━━  Δ0.00 // SHELTER BIAS", dim),
+                    Span::styled(" ┣━━━  Δ0.00 // MEASURED OFFSET", dim),
                 ]),
             ]
         }
         ("observation_001", true) => vec![
             Line::styled("  BAND A  ---| * |---  LOCKED", accent),
             Line::styled("  BAND B  ---| * |---  RETAINED INTERVAL", accent),
-            Line::styled("  BAND C  ---| * |---  d0.00 // SHELTER BIAS", dim),
+            Line::styled("  BAND C  ---| * |---  d0.00 // MEASURED OFFSET", dim),
         ],
         ("observation_002", false) => vec![
             Line::from(vec![

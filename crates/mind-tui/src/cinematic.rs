@@ -32,10 +32,25 @@ pub fn build_awakening_buffer(
         ],
         true,
     );
-    buf.draw_starfield(
+    // Keep procedural stars out of the title rectangle.
+    let star_excl = if quick_mode {
+        let oh = 6.min(usize::from(height));
+        let oy = usize::from(height).saturating_sub(oh) / 2;
+        let mw = 54.min(pw);
+        let mx = pw.saturating_sub(mw) / 2;
+        Some((mx, oy.saturating_sub(1) * 2, mx + mw, (oy + oh + 1) * 2))
+    } else {
+        let ty = (usize::from(height) / 7).max(1);
+        let mw = 48.min(pw);
+        let mx = pw.saturating_sub(mw) / 2;
+        Some((mx, ty.saturating_sub(1) * 2, mx + mw, (ty + 5) * 2))
+    };
+    buf.draw_starfield_bounded(
         107,
         (pw * 2 / 3).max(28),
+        2,
         (ph * 3) / 4,
+        star_excl,
         p * 0.4,
         Rgb(44, 84, 102),
         Rgb(168, 224, 232),
@@ -154,10 +169,12 @@ pub fn build_coherence_buffer(
         ],
         true,
     );
-    buf.draw_starfield(
+    buf.draw_starfield_bounded(
         313,
         (pw / 2).max(20),
+        4,
         (ph * 2) / 3,
+        None,
         t * 0.3,
         Rgb(40, 78, 96),
         Rgb(144, 206, 218),
@@ -257,7 +274,7 @@ pub fn build_coherence_buffer(
         for s in 0..=steps {
             let u = s as f32 / steps as f32;
             let x = margin + u * span;
-            let env = (u * std::f32::consts::PI).sin().powf(0.55);
+            let env = (u * std::f32::consts::PI).sin().max(0.0).powf(0.55);
             let wave = (u * TAU * 2.0 + slot_angle + t * TAU * 0.7).sin();
             let y = band_cy - wave * amp * env;
             if let Some((px, py)) = prev {
@@ -811,6 +828,21 @@ fn draw_discovery_005_wider_frame(buf: &mut PixelBuffer, t: f32, r: f32) {
     draw_solar_frame_internal(buf, 0.55 + 0.45 * r, t);
 }
 
+/// Projected terminal cell `(col, row, corona_rows)` of the Local Star during Solar Horizon pullback.
+pub fn solar_horizon_star_cell(width: u16, height: u16, elapsed_secs: f32) -> (u16, u16, u16) {
+    let pw = usize::from(width.max(24)) as f32;
+    let ph = (usize::from(height.max(10)) * 2) as f32;
+    let p = (elapsed_secs / 2.6).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - p).powi(3);
+    let star_x = pw * (0.14 + 0.14 * eased);
+    let star_y = ph * 0.46;
+    let corona_px = (ph * 0.24).max(4.0);
+    let col = (star_x.round().max(0.0) as u16).min(width.saturating_sub(1));
+    let row = ((star_y * 0.5).round().max(0.0) as u16).min(height.saturating_sub(1));
+    let corona_rows = ((corona_px * 0.5).ceil() as u16).max(2);
+    (col, row, corona_rows)
+}
+
 /// Projected terminal cell `(col, row)` of the Current World marker during the Solar Horizon pullback.
 pub fn solar_horizon_world_cell(
     width: u16,
@@ -824,11 +856,12 @@ pub fn solar_horizon_world_cell(
     let eased = 1.0 - (1.0 - p).powi(3);
     let t = phase as f32;
     let star_x = pw * (0.14 + 0.14 * eased);
-    let star_y = ph * 0.50;
-    let orbit_r = pw.min(ph) * (0.18 + 0.18 * eased);
+    let star_y = ph * 0.46;
+    let star_r = (ph * 0.065).max(2.0);
+    let orbit_r = (pw.min(ph) * (0.20 + 0.18 * eased)).max(star_r * 3.0);
     let angle = 0.42 + t * 0.30;
-    let world_x = star_x + orbit_r * angle.cos() * 1.15;
-    let world_y = star_y - orbit_r * angle.sin() * 0.72;
+    let world_x = star_x + orbit_r * angle.cos() * 1.18;
+    let world_y = star_y - orbit_r * angle.sin() * 0.68;
     let col = (world_x.round().max(0.0) as u16).min(width.saturating_sub(1));
     let row = ((world_y * 0.5).round().max(0.0) as u16).min(height.saturating_sub(1));
     (col, row)
@@ -861,10 +894,13 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
         ],
         true,
     );
-    buf.draw_starfield(
+    // Keep stars strictly above the bottom legend row (last 2 terminal rows = 4 pixel rows).
+    buf.draw_starfield_bounded(
         505,
         (buf.width * 2 / 3).max(24),
-        buf.height,
+        2,
+        buf.height.saturating_sub(4).max(4),
+        None,
         t * 0.25,
         Rgb(38, 72, 92),
         Rgb(148, 206, 222),
@@ -872,17 +908,18 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
 
     // Camera pulls smoothly back from the Current World to center the wide local frame.
     let star_x = wf * (0.14 + 0.14 * eased);
-    let star_y = hf * 0.50;
-    let orbit_r = wf.min(hf) * (0.18 + 0.18 * eased);
+    let star_y = hf * 0.46;
+    let star_r = (hf * 0.065).max(2.0);
+    let orbit_r = (wf.min(hf) * (0.20 + 0.18 * eased)).max(star_r * 3.0);
     let angle = 0.42 + t * 0.30;
-    let world_x = star_x + orbit_r * angle.cos() * 1.15;
-    let world_y = star_y - orbit_r * angle.sin() * 0.72;
+    let world_x = star_x + orbit_r * angle.cos() * 1.18;
+    let world_y = star_y - orbit_r * angle.sin() * 0.68;
 
     // Subtle parallax sweep vector across the frame.
     if eased > 0.30 {
         let sweep_a = t * TAU * 0.4;
         let sx = star_x + wf * 0.62 * sweep_a.cos();
-        let sy = star_y + hf * 0.42 * sweep_a.sin();
+        let sy = (star_y + hf * 0.38 * sweep_a.sin()).min(hf - 5.0);
         buf.stroke_line(star_x, star_y, sx, sy, Rgb(22, 68, 86), 0.45 * eased);
     }
 
@@ -890,9 +927,11 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
     let steps = 56;
     for i in (0..steps).step_by(2) {
         let a = (i as f32 / steps as f32) * TAU;
-        let rx = star_x + orbit_r * a.cos() * 1.15;
-        let ry = star_y - orbit_r * a.sin() * 0.72;
-        buf.set(rx.round() as i32, ry.round() as i32, Rgb(34, 96, 114), 0.65);
+        let rx = star_x + orbit_r * a.cos() * 1.18;
+        let ry = star_y - orbit_r * a.sin() * 0.68;
+        if ry < hf - 4.0 {
+            buf.set(rx.round() as i32, ry.round() as i32, Rgb(34, 96, 114), 0.65);
+        }
     }
 
     // Local star: soft radial corona.
@@ -900,29 +939,23 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
     buf.add_radial_glow(
         star_x,
         star_y,
-        wf * 0.14 * corona,
-        hf * 0.26 * corona,
+        wf * 0.13 * corona,
+        hf * 0.24 * corona,
         Rgb(236, 188, 66),
         0.52,
     );
     buf.add_radial_glow(
         star_x,
         star_y,
-        wf * 0.055 * corona,
-        hf * 0.10 * corona,
+        wf * 0.05 * corona,
+        hf * 0.095 * corona,
         Rgb(252, 232, 148),
         0.88,
     );
-    buf.fill_circle(
-        star_x,
-        star_y,
-        (hf * 0.065).max(2.0),
-        Rgb(255, 244, 198),
-        1.0,
-    );
+    buf.fill_circle(star_x, star_y, star_r, Rgb(255, 244, 198), 1.0);
 
     // Current World: luminous cyan dot with soft atmospheric aura.
-    buf.add_radial_glow(world_x, world_y, 5.0, 4.0, Rgb(64, 214, 218), 0.72);
+    buf.add_radial_glow(world_x, world_y, 4.5, 3.5, Rgb(64, 214, 218), 0.72);
     buf.fill_circle(
         world_x,
         world_y,
@@ -931,30 +964,30 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
         1.0,
     );
 
-    // Intermittent, shifting unresolved outer returns — uncounted and intentionally faint.
+    // Intermittent, shifting unresolved outer returns — kept strictly clear of the bottom legend band.
     let bucket = (t * 8.0).floor() as usize;
     let candidates = [
         (
             0.74_f32,
-            0.24_f32,
+            0.22_f32,
             !bucket.is_multiple_of(3),
             Rgb(84, 206, 214),
         ),
         (
             0.84,
-            0.66,
+            0.58,
             bucket % 4 == 1 || bucket % 4 == 2,
             Rgb(238, 194, 72),
         ),
         (
             0.66,
-            0.80,
+            0.70,
             bucket.is_multiple_of(5) || bucket % 5 == 3,
             Rgb(94, 196, 216),
         ),
         (
             0.90,
-            0.36,
+            0.34,
             bucket % 7 == 2 || bucket % 7 == 5,
             Rgb(118, 212, 224),
         ),
@@ -1250,7 +1283,7 @@ fn draw_extractor_polygon_craft(
     {
         let target: &mut PixelBuffer = if rebuilding { &mut craft } else { &mut *buf };
 
-        // Rig-specific frame attachments (drawn behind/around core hull).
+        // Rig-specific structural frame attachments (drawn behind/around core hull).
         match loadout {
             ExtractorLoadout::Balanced => {
                 // Compact twin lateral ore pods.
@@ -1374,7 +1407,7 @@ fn draw_extractor_polygon_craft(
             }
         }
 
-        // Core heavy drill-rig hull (asymmetric dorsal antenna + armored lower body).
+        // Core heavy structural drill-rig hull (asymmetric dorsal antenna + armored lower body).
         draw_poly_norm(
             target,
             &[

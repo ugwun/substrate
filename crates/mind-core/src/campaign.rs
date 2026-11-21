@@ -91,18 +91,18 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         .count();
 
     let sheltered_note = if input.has_observed_sheltered {
-        "sheltered shelf observed"
+        "shelf ok"
     } else {
-        "include one sheltered shelf"
+        "incl. 1 sheltered shelf"
     };
     let local_progress = format!(
-        "{}/3 local sectors; {sheltered_note}",
+        "{}/3 sectors; {sheltered_note}",
         input.observed_subregions.min(3)
     );
 
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
-            format!("Focused local survey resolving ({local_progress}). Monitor the field or let it finish in the background."),
+            format!("Focused survey resolving ({local_progress}). Monitor or let it finish in background."),
             Some("V".into()),
             Some(input.scout_region_id.to_owned()),
         )
@@ -114,7 +114,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
         if holding_has_detected {
             (
                 format!(
-                    "Open 4x4 local field (V) in {} and press S on a FRONTIER sector ({local_progress}).",
+                    "Open 4x4 field (V) in {} and press S on a FRONTIER ({local_progress}).",
                     region_label(input.regions, input.scout_region_id)
                 ),
                 Some("V".into()),
@@ -127,7 +127,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
                 .map_or("a nearby region", |id| region_label(input.regions, id));
             (
                 format!(
-                    "Select {label} and press S to redeploy the scout directly ({local_progress})."
+                    "Select {label} and press S to redeploy scout directly ({local_progress})."
                 ),
                 Some("S".into()),
                 next_region,
@@ -169,7 +169,7 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
                     region_label(input.regions, queued_id),
                 ),
                 Some("A".into()),
-                Some(active_target.to_owned()),
+                Some(queued_id.to_owned()),
             )
         } else {
             let phase_verb = match input.scout_state {

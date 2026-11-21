@@ -49,9 +49,13 @@ pub fn render_probe_bay_body(
     theme: Theme,
     now: Instant,
 ) {
-    if area.width >= 92 {
-        let columns = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
-            .split(area);
+    if area.width >= 76 {
+        let (left_pct, right_pct) = if area.width >= 96 { (52, 48) } else { (44, 56) };
+        let columns = Layout::horizontal([
+            Constraint::Percentage(left_pct),
+            Constraint::Percentage(right_pct),
+        ])
+        .split(area);
         render_blueprint_panel(frame, columns[0], app, planet, options, theme, now);
         render_telemetry_panel(frame, columns[1], app, planet, options, theme, now);
     } else {
@@ -72,12 +76,22 @@ fn render_blueprint_panel(
     now: Instant,
 ) {
     let selected_extractor = app.probe_selection % PROBE_COUNT == 1;
+    let compact_bp = area.width < 44;
     let title = if selected_extractor {
-        format!(
-            " PROBE BAY // {} ({}) ",
-            planet.extractor.designation.to_uppercase(),
-            planet.extractor.loadout.title().to_uppercase()
-        )
+        if compact_bp {
+            format!(
+                " PROBE BAY // {} ",
+                planet.extractor.loadout.title().to_uppercase()
+            )
+        } else {
+            format!(
+                " PROBE BAY // {} ({}) ",
+                planet.extractor.designation.to_uppercase(),
+                planet.extractor.loadout.title().to_uppercase()
+            )
+        }
+    } else if compact_bp {
+        " PROBE BAY // SCOUT 01 ".to_owned()
     } else {
         format!(
             " PROBE BAY // {} (PROTECTED) ",
@@ -164,7 +178,7 @@ fn render_blueprint_panel(
         100
     };
 
-    let buf = cinematic::build_probe_schematic_buffer(
+    let mut buf = cinematic::build_probe_schematic_buffer(
         selected_extractor,
         planet.extractor.loadout,
         planet.scout.state,
@@ -174,6 +188,28 @@ fn render_blueprint_panel(
         chunks[1].height,
         app.globe_phase,
     );
+    if selected_extractor {
+        if let Some(morph_p) = app.rig_morph_progress(now) {
+            let sweep_y = (buf.height as f32) * morph_p;
+            let wf = buf.width as f32;
+            buf.add_radial_glow(
+                wf * 0.5,
+                sweep_y,
+                wf * 0.55,
+                4.0,
+                crate::raster::Rgb(96, 226, 230),
+                0.75 * (1.0 - morph_p * 0.4),
+            );
+            buf.stroke_line(
+                2.0,
+                sweep_y,
+                (wf - 2.0).max(3.0),
+                sweep_y,
+                crate::raster::Rgb(252, 214, 86),
+                0.95,
+            );
+        }
+    }
     blit_to_frame(&buf, frame, chunks[1], app.color_tier(options));
 
     // Bottom: Crisp craft hardware callout + live status banner.
@@ -201,10 +237,18 @@ fn render_blueprint_panel(
             Style::default().fg(theme.gold).bold(),
         )])
     } else {
-        let rig_callout = match planet.extractor.loadout {
-            ExtractorLoadout::Balanced => "BALANCED FRAME // TWIN ORE PODS",
-            ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS // EXPANDED BAY",
-            ExtractorLoadout::Shielded => "ABLATIVE CANOPY // SHIELD PLATING",
+        let rig_callout = if chunks[2].width < 42 {
+            match planet.extractor.loadout {
+                ExtractorLoadout::Balanced => "BALANCED FRAME",
+                ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS",
+                ExtractorLoadout::Shielded => "ABLATIVE CANOPY",
+            }
+        } else {
+            match planet.extractor.loadout {
+                ExtractorLoadout::Balanced => "BALANCED FRAME // TWIN ORE PODS",
+                ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS // EXPANDED BAY",
+                ExtractorLoadout::Shielded => "ABLATIVE CANOPY // SHIELD PLATING",
+            }
         };
         Line::from(vec![
             Span::styled(rig_callout, Style::default().fg(theme.cyan_bright).bold()),
@@ -346,7 +390,7 @@ fn render_telemetry_panel(
         ));
         lines.push(Line::styled(
             "  RIG         CAP   TRV   CYC   RBLD",
-            Style::default().fg(theme.faint),
+            Style::default().fg(theme.cyan).bold(),
         ));
         for loadout in ExtractorLoadout::ALL {
             let is_active = planet.extractor.loadout == loadout;
@@ -489,9 +533,20 @@ fn render_telemetry_panel(
     let sep = if options.ascii { " | " } else { " · " };
     lines.push(Line::styled(
         format!("HARDPOINTS // SLOT A{sep}SLOT B{sep}SLOT C (RESERVED)"),
-        Style::default().fg(theme.faint),
+        Style::default().fg(theme.muted),
     ));
 
+    let inner_h = usize::from(area.height.saturating_sub(2));
+    let total_lines = lines.len();
+    let title_str = if total_lines > inner_h {
+        if options.ascii {
+            " TELEMETRY & LOADOUT [PgDn] "
+        } else {
+            " TELEMETRY & LOADOUT [PgDn ▼] "
+        }
+    } else {
+        " TELEMETRY & LOADOUT "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(if options.ascii {
@@ -502,8 +557,12 @@ fn render_telemetry_panel(
         .style(theme.panel_style())
         .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
-            " TELEMETRY & LOADOUT ",
-            Style::default().fg(theme.muted),
+            title_str,
+            Style::default().fg(if total_lines > inner_h {
+                theme.amber
+            } else {
+                theme.muted
+            }),
         ));
     frame.render_widget(
         Paragraph::new(Text::from(lines))

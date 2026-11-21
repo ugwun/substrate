@@ -1147,8 +1147,48 @@ fn paint_route_subpixel(cell: &mut Cell, foreground: Color, upper: bool, bold: b
     cell.style = style;
 }
 
+fn color_is_bright_bg(color: Color) -> bool {
+    match color {
+        Color::White
+        | Color::Gray
+        | Color::Yellow
+        | Color::LightYellow
+        | Color::Cyan
+        | Color::LightCyan
+        | Color::LightGreen => true,
+        Color::Rgb(r, g, b) => {
+            (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) > 132.0
+        }
+        Color::Indexed(idx) => {
+            if idx < 16 {
+                matches!(idx, 3 | 6 | 7 | 10 | 11 | 14 | 15)
+            } else if idx >= 232 {
+                idx >= 244
+            } else {
+                let c = idx - 16;
+                let r = (c / 36) as f32 / 5.0;
+                let g = ((c / 6) % 6) as f32 / 5.0;
+                let b = (c % 6) as f32 / 5.0;
+                (0.299 * r + 0.587 * g + 0.114 * b) > 0.50
+            }
+        }
+        _ => false,
+    }
+}
+
 fn overlay_style(cell: &Cell, foreground: Color, bold: bool) -> Style {
-    let mut style = Style::default().fg(foreground);
+    let fg = if foreground == Color::Reset {
+        Color::Reset
+    } else if cell.style.bg.is_some_and(color_is_bright_bg) {
+        match cell.style.bg {
+            Some(Color::Indexed(_)) => Color::Indexed(16),
+            Some(Color::Rgb(_, _, _)) => Color::Rgb(1, 20, 28),
+            _ => Color::Black,
+        }
+    } else {
+        foreground
+    };
+    let mut style = Style::default().fg(fg);
     if let Some(background) = cell.style.bg {
         style = style.bg(background);
     }

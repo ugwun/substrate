@@ -127,6 +127,8 @@ pub struct App {
     pub event_scroll: usize,
     pub follow_events: bool,
     pub show_help: bool,
+    pub help_scroll: u16,
+    pub rig_morph_at: Option<Instant>,
     pub session_menu: Option<SessionMenuState>,
     pub session_menu_selection: usize,
     pub session_menu_message: Option<String>,
@@ -193,6 +195,8 @@ impl Default for App {
             event_scroll: 0,
             follow_events: true,
             show_help: false,
+            help_scroll: 0,
+            rig_morph_at: None,
             session_menu: None,
             session_menu_selection: 0,
             session_menu_message: None,
@@ -369,6 +373,9 @@ impl App {
         }
         let mut operation_resolved = false;
         if let Some(previous) = self.planet.as_ref() {
+            if previous.extractor.loadout != planet.extractor.loadout {
+                self.rig_morph_at = Some(received_at);
+            }
             if previous.revision != planet.revision {
                 if (previous.network.active_site_survey.is_some()
                     && planet.network.active_site_survey.is_none())
@@ -805,7 +812,13 @@ impl App {
                     .is_some_and(|exp| exp.active && exp.running);
                 running.then_some(now + WAVEFORM_FRAME)
             }
-            Workspace::Probes => Some(now + AMBIENT_FRAME),
+            Workspace::Probes => {
+                if self.rig_morph_progress(now).is_some() {
+                    Some(now + ACTIVE_FRAME)
+                } else {
+                    Some(now + AMBIENT_FRAME)
+                }
+            }
             Workspace::Overview | Workspace::Research => {
                 let planet = self.planet.as_ref()?;
                 let active_timers = planet.active_mission.is_some()
@@ -897,7 +910,6 @@ impl App {
         }
         if self.workspace == Workspace::Research
             || planet.research.unlocked
-            || planet.research.analysis_units >= 3
             || planet.research.active.is_some()
         {
             list.push(Workspace::Research);
@@ -1568,7 +1580,20 @@ impl App {
         }
         if let Some(res) = &planet.research.active {
             let rem = self.display_remaining_ms(res.remaining_ms, now);
-            timers.push((rem, format!("NEXT: RESEARCH {}s", rem.div_ceil(1_000))));
+            let title = planet
+                .research
+                .options
+                .iter()
+                .find(|o| o.project == res.project)
+                .map_or("RESEARCH", |o| o.title.as_str());
+            timers.push((
+                rem,
+                format!(
+                    "NEXT: RESEARCH {} {}s",
+                    title.to_uppercase(),
+                    rem.div_ceil(1_000)
+                ),
+            ));
         }
         for proj in &planet.network.active_projects {
             let rem = self.display_remaining_ms(proj.remaining_ms, now);
@@ -1798,15 +1823,30 @@ impl App {
         true
     }
 
+    pub fn scroll_help(&mut self, delta: isize) {
+        if delta.is_negative() {
+            self.help_scroll = self.help_scroll.saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.help_scroll = self.help_scroll.saturating_add(delta as u16).min(64);
+        }
+    }
+
+    pub fn rig_morph_progress(&self, now: Instant) -> Option<f32> {
+        let started = self.rig_morph_at?;
+        let elapsed_ms = now.saturating_duration_since(started).as_millis() as f32;
+        if elapsed_ms < 360.0 {
+            Some((elapsed_ms / 360.0).clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    }
+
     fn best_local_lead_slot(&self) -> Option<(usize, String)> {
         let planet = self.planet.as_ref()?;
         let region_id = self.selected_region_id.as_deref()?;
-        let sites: Vec<_> = planet
-            .network
-            .subregions
-            .iter()
-            .filter(|s| s.region_id == region_id)
-            .collect();
+        // IMPORTANT: selected_subregion_slot indexes the row/column-sorted `selected_subregions()` list,
+        // NOT the persisted `site.slot` ordering.
+        let sites = self.selected_subregions();
         if sites.is_empty() {
             return None;
         }
@@ -1821,20 +1861,25 @@ impl App {
                 .iter()
                 .find(|b| b.region_id == region_id)
             {
-                if let Some(site) = sites.iter().find(|s| s.id == base.subregion_id) {
-                    return Some((usize::from(site.slot), site.designation.clone()));
+                if let Some((idx, site)) = sites
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.id == base.subregion_id)
+                {
+                    return Some((idx, site.designation.clone()));
                 }
             }
         }
         // Otherwise prefer a Detected frontier sector (sheltered shelf first for Ch I).
-        if let Some(site) = sites
+        if let Some((idx, site)) = sites
             .iter()
-            .filter(|s| s.knowledge == SubregionKnowledge::Detected)
-            .max_by_key(|s| {
+            .enumerate()
+            .filter(|(_, s)| s.knowledge == SubregionKnowledge::Detected)
+            .max_by_key(|(_, s)| {
                 u8::from(s.class == Some(mind_core::protocol::SubregionClass::ShelteredShelf))
             })
         {
-            return Some((usize::from(site.slot), site.designation.clone()));
+            return Some((idx, site.designation.clone()));
         }
         None
     }

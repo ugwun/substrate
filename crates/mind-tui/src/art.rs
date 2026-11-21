@@ -30,8 +30,6 @@ const ASCII_BORDER: border::Set<'static> = border::Set {
     horizontal_bottom: "-",
 };
 
-const PULLBACK_DURATION_SECS: f64 = 2.6;
-
 /// Parameters for rendering a local sector pixel-art tile.
 pub struct LocalSectorArtParams<'a> {
     pub site: &'a SubregionSnapshot,
@@ -840,30 +838,55 @@ pub fn render_system_cliffhanger_chart(
     );
     crate::raster::blit_to_frame(&buf, frame, inner, tier);
 
-    // Crisp minimal telemetry labels anchored dynamically from projected sprite positions.
-    let p = (elapsed_secs / (PULLBACK_DURATION_SECS as f32)).clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - p).powi(3);
-    let star_col = ((inner.width as f32) * (0.14 + 0.14 * eased)).round() as u16;
-    let mid_row = inner.height / 2;
-
-    let star_label_x = inner.x + star_col.saturating_sub(5);
-    let star_label_y = inner.y + (mid_row + 4).min(inner.height.saturating_sub(2));
-    let star_w = 10.min((inner.x + inner.width).saturating_sub(star_label_x));
-    if star_w >= 6 {
+    // Crisp minimal telemetry labels anchored dynamically outside star/world sprites with solid backing pills.
+    let (star_col, star_row, corona_rows) =
+        crate::cinematic::solar_horizon_star_cell(inner.width, inner.height, elapsed_secs);
+    let star_text = " LOCAL STAR ";
+    let star_len = star_text.len() as u16;
+    let max_label_row = inner.height.saturating_sub(2).max(1);
+    let (star_rel_x, star_rel_y) = if star_row + corona_rows < max_label_row {
+        (
+            star_col
+                .saturating_sub(star_len / 2)
+                .min(inner.width.saturating_sub(star_len)),
+            star_row + corona_rows + 1,
+        )
+    } else if star_row >= corona_rows + 2 {
+        (
+            star_col
+                .saturating_sub(star_len / 2)
+                .min(inner.width.saturating_sub(star_len)),
+            star_row - corona_rows - 1,
+        )
+    } else {
+        (
+            star_col
+                .saturating_sub(star_len / 2)
+                .min(inner.width.saturating_sub(star_len)),
+            max_label_row,
+        )
+    };
+    let star_label_x = inner.x + star_rel_x;
+    let star_label_y = inner.y + star_rel_y.min(max_label_row);
+    let star_w = star_len.min((inner.x + inner.width).saturating_sub(star_label_x));
+    if star_w >= 8 {
+        let star_rect = Rect::new(star_label_x, star_label_y, star_w, 1);
+        frame.render_widget(ratatui::widgets::Clear, star_rect);
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "LOCAL STAR",
-                Style::default().fg(theme.gold).bold(),
+                star_text,
+                theme.canvas_style().fg(theme.gold).bold(),
             )),
-            Rect::new(star_label_x, star_label_y, star_w, 1),
+            star_rect,
         );
     }
 
     let (world_col, world_row) =
         crate::cinematic::solar_horizon_world_cell(inner.width, inner.height, elapsed_secs, phase);
-    let label_len: u16 = 13; // "CURRENT WORLD"
-                             // Place label cleanly outside the world sprite + glow radius (4 cols / 2 rows clear).
-    let (cw_rel_x, cw_rel_y) = if world_col + 5 + label_len < inner.width {
+    let cw_text = " CURRENT WORLD ";
+    let label_len = cw_text.len() as u16;
+    // Place label cleanly outside the world sprite + glow radius (5 cols / 3 rows clear).
+    let (cw_rel_x, cw_rel_y) = if world_col + 5 + label_len <= inner.width {
         (world_col + 5, world_row)
     } else if world_col >= label_len + 5 {
         (world_col - label_len - 4, world_row)
@@ -871,7 +894,7 @@ pub fn render_system_cliffhanger_chart(
         let clamped_x = world_col
             .saturating_sub(label_len / 2)
             .min(inner.width.saturating_sub(label_len));
-        let below_y = if world_row + 3 < inner.height.saturating_sub(1) {
+        let below_y = if world_row + 3 <= max_label_row {
             world_row + 3
         } else {
             world_row.saturating_sub(3).max(1)
@@ -879,30 +902,38 @@ pub fn render_system_cliffhanger_chart(
         (clamped_x, below_y)
     };
     let cw_x = inner.x + cw_rel_x;
-    let cw_y = inner.y + cw_rel_y.clamp(1, inner.height.saturating_sub(2));
+    let cw_y = inner.y + cw_rel_y.clamp(1, max_label_row);
     let cw_w = label_len.min((inner.x + inner.width).saturating_sub(cw_x));
-    if cw_w >= 13 {
+    if cw_w >= 10 {
+        let cw_rect = Rect::new(cw_x, cw_y, cw_w, 1);
+        frame.render_widget(ratatui::widgets::Clear, cw_rect);
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "CURRENT WORLD",
-                Style::default().fg(theme.cyan_bright).bold(),
+                cw_text,
+                theme.canvas_style().fg(theme.cyan_bright).bold(),
             )),
-            Rect::new(cw_x, cw_y, cw_w, 1),
+            cw_rect,
         );
     }
 
-    // Bottom legend bar inside the observation frame.
+    // Bottom legend bar inside the observation frame on a solid clear band.
     let bot_y = inner.y + inner.height.saturating_sub(1);
-    let left_txt = " REFERENCE TRACK";
-    let right_txt = "OUTER RETURNS // UNRESOLVED ";
+    let bot_rect = Rect::new(inner.x, bot_y, inner.width, 1);
+    let (left_txt, right_txt) = if inner.width >= 48 {
+        (" REFERENCE TRACK", "OUTER RETURNS // UNRESOLVED ")
+    } else {
+        (" REF TRACK", "OUTER RETURNS UNRESOLVED ")
+    };
     let pad = usize::from(inner.width).saturating_sub(left_txt.len() + right_txt.len());
+    frame.render_widget(ratatui::widgets::Clear, bot_rect);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(left_txt, Style::default().fg(theme.muted)),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(right_txt, Style::default().fg(theme.cyan)),
-        ])),
-        Rect::new(inner.x, bot_y, inner.width, 1),
+            Span::styled(left_txt, theme.canvas_style().fg(theme.muted)),
+            Span::styled(" ".repeat(pad), theme.canvas_style()),
+            Span::styled(right_txt, theme.canvas_style().fg(theme.cyan)),
+        ]))
+        .style(theme.canvas_style()),
+        bot_rect,
     );
 }
 

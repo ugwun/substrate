@@ -335,7 +335,27 @@ impl PixelBuffer {
         dim: Rgb,
         bright: Rgb,
     ) {
-        let y_limit = max_y.min(self.height).max(1);
+        self.draw_starfield_bounded(seed, count, 0, max_y, None, phase, dim, bright);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_starfield_bounded(
+        &mut self,
+        seed: u64,
+        count: usize,
+        min_y: usize,
+        max_y: usize,
+        exclude: Option<(usize, usize, usize, usize)>,
+        phase: f32,
+        dim: Rgb,
+        bright: Rgb,
+    ) {
+        let y_start = min_y.min(self.height);
+        let y_limit = max_y.min(self.height).max(y_start + 1).min(self.height);
+        let span = y_limit.saturating_sub(y_start);
+        if span == 0 || self.width == 0 {
+            return;
+        }
         let mut s = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
         for i in 0..count {
             s = s
@@ -345,7 +365,12 @@ impl PixelBuffer {
             s = s
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let y = ((s >> 32) as usize) % y_limit;
+            let y = y_start + (((s >> 32) as usize) % span);
+            if let Some((ex0, ey0, ex1, ey1)) = exclude {
+                if x >= ex0 && x < ex1 && y >= ey0 && y < ey1 {
+                    continue;
+                }
+            }
             let twinkle = ((phase * std::f32::consts::TAU + i as f32 * 1.37).sin() * 0.5 + 0.5)
                 .clamp(0.0, 1.0);
             let color = if i % 5 == 0 {

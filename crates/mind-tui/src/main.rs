@@ -399,7 +399,14 @@ async fn handle_key(
     }
     if app.show_help {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('?') => app.show_help = false,
+            KeyCode::Esc | KeyCode::Char('?') => {
+                app.show_help = false;
+                app.help_scroll = 0;
+            }
+            KeyCode::Up => app.scroll_help(-1),
+            KeyCode::Down => app.scroll_help(1),
+            KeyCode::PageUp => app.scroll_help(-6),
+            KeyCode::PageDown => app.scroll_help(6),
             _ => {}
         }
         return Ok(false);

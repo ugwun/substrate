@@ -160,7 +160,7 @@ Global controls:
 - `?`: show help
 - `Tab` or Shift-Tab: cycle Planet, Overview, Probes, Research, Archive, and System workspaces;
   System Map joins the cycle only after the concluding milestone
-- `Space` / `Enter` on a Discovery Transmission: complete typewriter reveal, then acknowledge and file in Archive
+- `Space` / `Enter` / `Esc` on a Discovery Transmission: `Space` snaps a revealing transmission to complete; `Enter` or `Esc` files a revealed record permanently in Archive (`Up`/`Down` scrolls on narrow viewports)
 - `Enter` in Archive: start the visible timing comparison when its research and powered
   laboratory requirements are met
 

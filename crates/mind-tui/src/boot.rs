@@ -93,36 +93,9 @@ pub fn render_boot_intro(
     let progress = boot.progress(now);
     let quick_mode = boot.mode == BootMode::QuickPowerOn;
 
-    // Full-bleed edge-to-edge planetary horizon backdrop.
-    let mut buf =
+    // Full-bleed edge-to-edge planetary horizon backdrop (stars cleanly excluded from title zone).
+    let buf =
         cinematic::build_awakening_buffer(area.width, area.height, progress as f32, quick_mode);
-    // Reserve the title rectangle before drawing stars.
-    let sky_mask = crate::raster::Rgb(1, 14, 22);
-    if quick_mode {
-        let overlay_h = 5.min(area.height);
-        let overlay_y = area.height.saturating_sub(overlay_h) / 2;
-        let mask_w = 52.min(area.width);
-        let mask_x = area.width.saturating_sub(mask_w) / 2;
-        buf.mask_rect(
-            usize::from(mask_x),
-            usize::from(overlay_y.saturating_sub(1)) * 2,
-            usize::from(mask_x + mask_w),
-            usize::from((overlay_y + overlay_h + 1).min(area.height)) * 2,
-            sky_mask,
-        );
-    } else if elapsed_ms >= 360 {
-        let title_y = (area.height / 7).max(1);
-        let title_h = 4.min(area.height.saturating_sub(2));
-        let mask_w = 46.min(area.width);
-        let mask_x = area.width.saturating_sub(mask_w) / 2;
-        buf.mask_rect(
-            usize::from(mask_x),
-            usize::from(title_y.saturating_sub(1)) * 2,
-            usize::from(mask_x + mask_w),
-            usize::from((title_y + title_h + 1).min(area.height)) * 2,
-            sky_mask,
-        );
-    }
     blit_to_frame(&buf, frame, area, tier);
 
     if quick_mode {
@@ -262,10 +235,25 @@ fn render_boot_overlay(
         (status_lines.len() as u16).min(area.height.saturating_sub(title_y - area.y + title_h + 1));
     if bottom_h >= 2 {
         let bottom_y = area.y + area.height.saturating_sub(bottom_h + 1);
-        let bottom_rect = Rect::new(area.x, bottom_y, area.width, bottom_h);
-        frame.render_widget(
-            Paragraph::new(status_lines).alignment(Alignment::Center),
-            bottom_rect,
-        );
+        for (idx, line) in status_lines
+            .into_iter()
+            .take(usize::from(bottom_h))
+            .enumerate()
+        {
+            let text_w = line.width() as u16;
+            if text_w == 0 {
+                continue;
+            }
+            let pill_w = (text_w + 4).min(area.width);
+            let pill_x = area.x + area.width.saturating_sub(pill_w) / 2;
+            let pill_rect = Rect::new(pill_x, bottom_y + idx as u16, pill_w, 1);
+            frame.render_widget(Clear, pill_rect);
+            frame.render_widget(
+                Paragraph::new(line)
+                    .alignment(Alignment::Center)
+                    .style(theme.canvas_style()),
+                pill_rect,
+            );
+        }
     }
 }
