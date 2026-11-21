@@ -9,8 +9,16 @@ permissions:
 
 jobs:
   rust:
-    name: Rust checks (Linux)
-    runs-on: ubuntu-latest
+    name: Rust checks (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux
+            os: ubuntu-latest
+          - label: Windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

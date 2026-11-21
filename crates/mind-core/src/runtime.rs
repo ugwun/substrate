@@ -1,7 +1,13 @@
 use crate::PROTOCOL_VERSION;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, net::SocketAddr, path::Path};
+use std::{
+    fs,
+    io::{self, Write},
+    net::SocketAddr,
+    path::Path,
+};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 fn default_mcp_address() -> SocketAddr {
@@ -42,9 +48,17 @@ impl RuntimeMetadata {
     }
 
     pub fn write_atomic(&self, path: &Path) -> Result<(), RuntimeError> {
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
-        fs::rename(temporary, path)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut temporary = NamedTempFile::new_in(parent)?;
+        temporary.write_all(&serde_json::to_vec_pretty(self)?)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(path)
+            .map_err(|error| RuntimeError::Io(error.error))?;
         Ok(())
     }
 

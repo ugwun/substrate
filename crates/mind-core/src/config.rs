@@ -118,7 +118,7 @@ pub fn load_or_create(overrides: ConfigOverrides) -> Result<(Config, AppPaths), 
         })?;
         toml::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: paths.config_file.clone(),
-            source,
+            source: Box::new(source),
         })?
     } else {
         let config = Config::default();
@@ -190,7 +190,7 @@ pub enum ConfigError {
     #[error("failed to parse {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("failed to serialize configuration: {0}")]
     Serialize(toml::ser::Error),
