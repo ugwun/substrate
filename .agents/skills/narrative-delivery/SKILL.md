@@ -28,7 +28,7 @@ description: Implement Substrate's public story breadcrumbs safely. Use when add
 ## Client and co-processor boundary
 
 - Expose only discovered, player-visible evidence through TUI, IPC, and MCP.
-- Keep eligibility counters, guarantee progress, hidden interpretations, and unreleased content out of client DTOs.
+- Keep hidden eligibility counters, hidden guarantee progress, hidden interpretations, and unreleased content out of client DTOs. Player-visible progress toward already-announced campaign objectives (such as Chapter III's post-comparison regional survey count) may be shown when derived strictly from actions the player performed.
 - Keep external co-processor reflections in a separate non-canonical journal; never use model output to establish lore or gate story progression.
 - Keep gameplay SKILLS free of unreleased narrative information.
 - Keep the current system-map reveal observational and minimal: publish only player-visible local-frame results, leave outer returns unresolved, and expose no hidden system composition or later interpretation.

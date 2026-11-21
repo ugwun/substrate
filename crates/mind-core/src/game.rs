@@ -1627,10 +1627,14 @@ impl GameState {
         else {
             return self.action_rejected("unknown_archive_record");
         };
-        if index + 1 > self.presented_archive_count {
-            self.presented_archive_count = index + 1;
-            self.changed();
+        if index < self.presented_archive_count {
+            return self.action_accepted(None);
         }
+        if index > self.presented_archive_count {
+            return self.action_rejected("archive_presentation_out_of_order");
+        }
+        self.presented_archive_count = index + 1;
+        self.changed();
         self.action_accepted(None)
     }
 
@@ -3900,11 +3904,6 @@ impl GameState {
             })
         {
             return Err(GameError::Invariant("base project state is inconsistent"));
-        }
-        if self.horizon_reached && !self.horizon_progress().ready {
-            return Err(GameError::Invariant(
-                "solar horizon progression is inconsistent",
-            ));
         }
         if self.activity_log.len() > ACTIVITY_CAPACITY
             || self
@@ -6791,5 +6790,110 @@ mod tests {
         assert_eq!(ch5.chapter_number, 5);
         assert_eq!(ch5.title, "Wider Frame");
         assert!(ch5.complete);
+    }
+
+    #[test]
+    fn post_horizon_save_reloads_when_observatory_is_suspended_or_weathered() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("game_state.json");
+        let mut state = GameState::with_seed(67);
+        prepare_network_chapter(&mut state);
+        for record_id in [
+            OBSERVATION_002,
+            OBSERVATION_003,
+            OBSERVATION_004,
+            OBSERVATION_005,
+        ] {
+            state.record_archive_observation(record_id, None);
+        }
+        state.horizon_reached = true;
+
+        // Establish a foothold with power, comms, and an observatory, then suspend and weather it.
+        let region_id = state.world.core_region_id.clone();
+        let site = state
+            .world
+            .regions
+            .iter_mut()
+            .find(|region| region.id == region_id)
+            .unwrap()
+            .subregions
+            .first_mut()
+            .unwrap();
+        site.knowledge = SubregionKnowledge::Observed;
+        let site_id = site.id.clone();
+        state.bases.push(BaseState {
+            id: "base_horizon_test".into(),
+            designation: "Node 01".into(),
+            region_id,
+            subregion_id: site_id.clone(),
+            integrity: 20,
+            stored_energy: 0,
+            energy_capacity: 100,
+            energy_remainder_ms: 0,
+            wear_remainder_ms: 0,
+            modules: vec![
+                BaseModuleKind::PowerArray,
+                BaseModuleKind::Communications,
+                BaseModuleKind::Observatory,
+            ],
+            disabled_modules: Vec::new(),
+        });
+        assert!(
+            state
+                .set_base_module_enabled(&site_id, BaseModuleKind::Observatory, false)
+                .ok
+        );
+        assert!(!state.horizon_progress().ready);
+
+        state.save(&path).unwrap();
+        let restored = GameState::load(&path).unwrap().state;
+        assert!(restored.horizon_reached);
+        let snapshot = restored.planet_snapshot().unwrap();
+        assert!(snapshot.system_map.available);
+        assert_eq!(snapshot.archive.records.len(), 5);
+    }
+
+    #[test]
+    fn archive_presentation_ack_enforces_order_and_idempotent_retries() {
+        let mut state = GameState::with_seed(53);
+        awaken(&mut state);
+        assert!(state.record_archive_observation(OBSERVATION_002, None));
+        assert_eq!(
+            state
+                .planet_snapshot()
+                .unwrap()
+                .archive
+                .unpresented_record_ids,
+            vec![OBSERVATION_001.to_owned(), OBSERVATION_002.to_owned()]
+        );
+
+        // Out-of-order acknowledgement for the second pending record is rejected without moving cursor.
+        let rejected = state.acknowledge_archive_presentation(OBSERVATION_002);
+        assert!(!rejected.ok);
+        assert_eq!(
+            rejected.code.as_deref(),
+            Some("archive_presentation_out_of_order")
+        );
+        assert_eq!(state.presented_archive_count, 0);
+
+        // In-order acknowledgement advances cursor cleanly.
+        assert!(state.acknowledge_archive_presentation(OBSERVATION_001).ok);
+        assert_eq!(state.presented_archive_count, 1);
+
+        // Retrying an earlier acknowledged record is an idempotent no-op.
+        let rev_before = state.state_revision;
+        assert!(state.acknowledge_archive_presentation(OBSERVATION_001).ok);
+        assert_eq!(state.presented_archive_count, 1);
+        assert_eq!(state.state_revision, rev_before);
+
+        // Now the second record is next and succeeds.
+        assert!(state.acknowledge_archive_presentation(OBSERVATION_002).ok);
+        assert_eq!(state.presented_archive_count, 2);
+        assert!(state
+            .planet_snapshot()
+            .unwrap()
+            .archive
+            .unpresented_record_ids
+            .is_empty());
     }
 }

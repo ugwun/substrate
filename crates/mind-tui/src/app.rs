@@ -142,6 +142,7 @@ pub struct App {
     globe_target_pitch: f64,
     last_seen_chapter: Option<u8>,
     suppress_initial_return_summary: bool,
+    pending_archive_ack_id: Option<String>,
 }
 
 impl Default for App {
@@ -190,6 +191,7 @@ impl Default for App {
             globe_target_pitch: 0.0,
             last_seen_chapter: None,
             suppress_initial_return_summary: false,
+            pending_archive_ack_id: None,
         }
     }
 }
@@ -288,7 +290,22 @@ impl App {
             .last_seen_chapter
             .is_some_and(|previous| planet.campaign.chapter_number > previous);
         self.last_seen_chapter = Some(planet.campaign.chapter_number);
-        let next_unpresented = planet.archive.unpresented_record_ids.first().cloned();
+        if let Some(pending_id) = self.pending_archive_ack_id.as_deref() {
+            if !planet
+                .archive
+                .unpresented_record_ids
+                .iter()
+                .any(|id| id == pending_id)
+            {
+                self.pending_archive_ack_id = None;
+            }
+        }
+        let next_unpresented = planet
+            .archive
+            .unpresented_record_ids
+            .iter()
+            .find(|id| self.pending_archive_ack_id.as_deref() != Some(id.as_str()))
+            .cloned();
         if next_unpresented != self.active_transmission_id {
             self.active_transmission_id = next_unpresented.clone();
             self.transmission_opened_at = next_unpresented.as_ref().map(|_| received_at);
@@ -1035,6 +1052,7 @@ impl App {
         self.active_transmission_id = None;
         self.transmission_opened_at = None;
         self.transmission_revealed = false;
+        self.pending_archive_ack_id = Some(record_id.clone());
         Some(record_id)
     }
 
@@ -1543,5 +1561,31 @@ mod tests {
             app.active_transmission_id.as_deref(),
             Some("observation_001")
         );
+    }
+
+    #[test]
+    fn dismissed_transmission_ignores_stale_unpresented_push_until_confirmed() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        let now = Instant::now();
+        engine.complete_onboarding([2, 2, 2]);
+        let snapshot = engine.planet().unwrap();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(snapshot.clone(), now);
+        app.show_return_summary = false;
+        app.transmission_revealed = true;
+
+        let acked = app.reveal_or_dismiss_transmission(now);
+        assert_eq!(acked.as_deref(), Some("observation_001"));
+        assert!(app.active_transmission_id.is_none());
+
+        // A concurrent snapshot push that still lists observation_001 does not flicker-reopen it.
+        app.apply_planet(snapshot, now);
+        assert!(app.active_transmission_id.is_none());
+
+        // Once the daemon confirms acknowledgement, pending suppression clears cleanly.
+        engine.acknowledge_archive_presentation("observation_001");
+        app.apply_planet(engine.planet().unwrap(), now);
+        assert!(app.active_transmission_id.is_none());
     }
 }

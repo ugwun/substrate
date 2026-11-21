@@ -334,8 +334,13 @@ fn reject_incompatible_daemon(error: &anyhow::Error, address: SocketAddr) -> Res
     if let Some(IpcError::IncompatibleProtocol { client, daemon }) =
         error.downcast_ref::<IpcError>()
     {
+        let cli_command = if cfg!(windows) {
+            r".\target\debug\mind-cli.exe"
+        } else {
+            "./target/debug/mind-cli"
+        };
         bail!(
-            "an older mind daemon is running at {address} (daemon protocol {daemon}, client protocol {client}); run `./target/debug/mind-cli daemon stop`, then retry"
+            "an older mind daemon is running at {address} (daemon protocol {daemon}, client protocol {client}); run `{cli_command} daemon stop`, then retry"
         );
     }
     Ok(())
@@ -400,7 +405,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(message.contains("older mind daemon"));
-        assert!(message.contains("mind-cli daemon stop"));
+        assert!(message.contains(&format!("{} daemon stop", executable_name("mind-cli"))));
         assert!(message.contains(&format!("protocol {}", PROTOCOL_VERSION - 1)));
         assert!(message.contains(&format!("protocol {PROTOCOL_VERSION}")));
     }
