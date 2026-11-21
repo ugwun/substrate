@@ -54,7 +54,7 @@ commands remain available:
 ./target/debug/mind-cli daemon stop
 ```
 
-Substrate is built to sit beside other work. `daemon status --line` prints a one-line
+Substrate is built to sit beside other work. Every view stays usable from 44×14 up: below 80×24 panels stack, long text compacts with explicit cues, and a local field too small for tiles becomes a coordinate grid with each sector's state. `daemon status --line` prints a one-line
 summary of the soonest operation for a shell prompt or status bar, and a terminal pane as
 small as 38×5 switches the TUI to a compact Pilot Strip with the current objective and
 countdown. `--title` mirrors progress into the terminal title (OSC 0), and `--bell` rings the
@@ -79,7 +79,7 @@ The current game uses save schema 11. Schema-11 adds durable discovery-transmiss
 
 ## How to play
 
-Substrate is designed to be learned from the interface. The persistent campaign header at the top of every workspace shows the active chapter (`CH I`–`CH V`) and step pips; wide layouts add the Mind's current open question, and **Planet** adds the next concrete action (compact layouts shorten these at word boundaries, and the Chapter Briefing always has the full text). Press `n` on **Planet** to focus the globe on the current campaign lead, or `c` at any time to open the full Chapter Briefing. The selected-region inspector lists available actions and explains exact blockers, while newly discovered archive records arrive as full-screen Discovery Transmissions. `Enter` performs the highlighted contextual action, while letter shortcuts shown in the inspector speed up familiar routines.
+Substrate is designed to be learned from the interface. The persistent campaign header at the top of every workspace shows the active chapter (`CH I`–`CH V`) and step pips; wide layouts add the Mind's current open question, and **Planet** adds the next concrete action (compact layouts shorten these at word boundaries; the Chapter Briefing shows the full text at 80×24 and above and a marked summary on smaller terminals). Press `n` on **Planet** to focus the globe on the current campaign lead, or `c` (outside a local field, where `c` controls communications) to open the Chapter Briefing. The selected-region inspector lists available actions and explains exact blockers, while newly discovered archive records arrive as full-screen Discovery Transmissions. `Enter` performs the highlighted contextual action, while letter shortcuts shown in the inspector speed up familiar routines.
 
 ### A first-session route
 

@@ -404,7 +404,17 @@ fn render_planet(
             render_region_inspector(frame, columns[1], app, planet, options, theme, now);
         }
     } else {
-        let body = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
+        // Stacked layout: the local field needs at least its four grid rows plus borders, so
+        // on short panes it takes that minimum and the inspector keeps the rest.
+        let field_rows = if app.local_view {
+            let minimum = u16::from(planet.network.subregion_rows.max(1)) + 2;
+            (rows[1].height * 56 / 100)
+                .max(minimum)
+                .min(rows[1].height.saturating_sub(3))
+        } else {
+            rows[1].height * 56 / 100
+        };
+        let body = Layout::vertical([Constraint::Length(field_rows), Constraint::Min(3)])
             .split(rows[1]);
         if app.local_view {
             render_local_sites(frame, body[0], app, planet, options, theme, now);
@@ -1031,11 +1041,13 @@ fn render_overview(
     ));
     summary_lines.extend(wrapped_field_lines(
         "LOCAL SITES",
-        &if planet.network.unlocked || !planet.network.subregions.is_empty() {
+        &if planet.campaign.chapter_number >= 4 {
             format!(
                 "{} surveyed // {} required for horizon",
                 horizon.surveyed_subregions, horizon.required_subregions
             )
+        } else if planet.network.unlocked || !planet.network.subregions.is_empty() {
+            format!("{} surveyed", horizon.surveyed_subregions)
         } else {
             "survey a region first to reveal local sectors".into()
         },
@@ -1044,12 +1056,20 @@ fn render_overview(
     ));
     summary_lines.extend(wrapped_field_lines(
         "NODES",
-        &format!(
-            "{} total // {} connected // {} beyond relay envelope",
-            planet.network.bases.len(),
-            horizon.connected_bases,
-            horizon.remote_bases
-        ),
+        &if planet.campaign.chapter_number >= 4 {
+            format!(
+                "{} total // {} connected // {} beyond relay envelope",
+                planet.network.bases.len(),
+                horizon.connected_bases,
+                horizon.remote_bases
+            )
+        } else {
+            format!(
+                "{} total // {} connected",
+                planet.network.bases.len(),
+                horizon.connected_bases
+            )
+        },
         right_inner_w,
         theme,
     ));
@@ -1200,11 +1220,11 @@ fn render_overview(
         &[
             KeyHint {
                 key: "ENTER",
-                label: "",
+                label: "go",
             },
             KeyHint {
                 key: "TAB",
-                label: "",
+                label: "view",
             },
             KeyHint {
                 key: "Q",
@@ -1212,7 +1232,7 @@ fn render_overview(
             },
             KeyHint {
                 key: "?",
-                label: "",
+                label: "help",
             },
         ]
     } else {
@@ -1961,9 +1981,10 @@ fn render_return_summary(
                 .find(|record| record.record_id == record_id)
         })
         .collect();
-    let width = area.width.saturating_sub(6).clamp(38, 86);
+    let width = area.width.saturating_sub(6).clamp(38, 86).min(area.width);
     let inner_w = usize::from(width.saturating_sub(2));
-    let max_inner_h = usize::from(area.height.saturating_sub(2).max(10).saturating_sub(2));
+    // Keep the header and two-row footer clear, like the other modals.
+    let max_inner_h = usize::from(area.height.saturating_sub(4)).saturating_sub(2);
     let wrap = |lines: Vec<Line<'static>>| crate::textwrap::hang_wrap(lines, inner_w);
     let sep = if options.ascii { " | " } else { " · " };
     let header = wrap(vec![
@@ -2168,6 +2189,27 @@ fn render_return_summary(
         body.extend(evidence_quote);
     }
     body.extend(tail);
+    // Last resort on very small terminals: compact, then keep the acknowledge hint pinned.
+    if body.len() > max_inner_h {
+        body.retain(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        });
+    }
+    if body.len() > max_inner_h && max_inner_h >= 2 {
+        let hint = body.pop();
+        body.truncate(max_inner_h - 2);
+        body.push(Line::styled(
+            if options.ascii {
+                "  ... larger terminal shows more"
+            } else {
+                "  … larger terminal shows more"
+            },
+            Style::default().fg(theme.muted),
+        ));
+        body.extend(hint);
+    }
     let height = u16::try_from(body.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
@@ -2489,10 +2531,12 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
                     .as_deref()
                     .is_some_and(|id| app.selected_subregion().is_some_and(|site| site.id == id));
                 if !on_target {
-                    (
-                        Some("N"),
-                        "Press N to select the node that needs attention.".to_owned(),
-                    )
+                    let wording = if planet.campaign.next_action_key.as_deref() == Some("O") {
+                        "Press N to select the node for the next Observation Array."
+                    } else {
+                        "Press N to select the node that needs attention."
+                    };
+                    (Some("N"), wording.to_owned())
                 } else if planet.campaign.next_action_key.as_deref() == Some("V") {
                     // Already on the node: V is inert here, so point at the module keys.
                     (Some("D/W/L/O"), planet.campaign.next_action.clone())
@@ -2519,7 +2563,12 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             }
             // Already inside the lead field: V would be inert, so point at N (lead sector) instead.
             Some("V") if in_lead => (Some("N"), planet.campaign.next_action.clone()),
-            Some("X" | "B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
+            // Campaign extraction leads are regional deposits: X acts from the globe.
+            Some("X") => (
+                Some("ESC"),
+                format!("Return to globe (Esc) — {}", planet.campaign.next_action),
+            ),
+            Some("B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
                 Some("ESC"),
                 format!("Return to globe (Esc) — {}", planet.campaign.next_action),
             ),
@@ -2532,10 +2581,8 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
         )
     {
         // Module and maintenance keys act only inside a local field; on the globe, lead with V.
-        (
-            Some("V"),
-            format!("In the local field: {}", planet.campaign.next_action),
-        )
+        // The daemon's text already names the node and key; lead with V to open the field.
+        (Some("V"), planet.campaign.next_action.clone())
     } else {
         (None, String::new())
     }
@@ -2847,6 +2894,123 @@ fn render_globe(
     );
 }
 
+/// Text-only local field for panes too small for bordered tiles: one row per field row, each
+/// sector shown as its coordinate and state, the selected sector highlighted. When even that
+/// does not fit, a one-line summary names the selected sector and asks for a larger terminal.
+#[allow(clippy::too_many_arguments)]
+fn render_compact_local_grid(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    app: &App,
+    planet: &PlanetSnapshot,
+    row_count: u16,
+    column_count: u16,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let sites = app.selected_subregions();
+    let selected_id = app.selected_subregion().map(|site| site.id.as_str());
+    let state_of = |site: &SubregionSnapshot| -> &'static str {
+        let scanning = planet
+            .network
+            .active_site_survey
+            .as_ref()
+            .is_some_and(|survey| survey.subregion_id == site.id);
+        if scanning {
+            "SCAN"
+        } else if site.base_id.is_some() {
+            "NODE"
+        } else {
+            match site.knowledge {
+                SubregionKnowledge::Unknown => "FOG",
+                SubregionKnowledge::Detected => "FRNT",
+                SubregionKnowledge::Surveyed => "SRVD",
+                SubregionKnowledge::Observed => "OBSV",
+            }
+        }
+    };
+    let coordinate = |site: &SubregionSnapshot| {
+        format!(
+            "{}{}",
+            char::from(b'A'.saturating_add(site.row)),
+            site.column + 1
+        )
+    };
+    if inner.height < row_count || inner.width < column_count * 3 {
+        let summary = app.selected_subregion().map_or_else(
+            || "LOCAL FIELD".to_owned(),
+            |site| {
+                format!(
+                    "{} {} {}",
+                    coordinate(site),
+                    site.designation,
+                    state_of(site)
+                )
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    truncate_chars(&summary, usize::from(inner.width), options.ascii),
+                    theme.selection_style().fg(theme.cyan_bright),
+                ),
+                Line::styled(
+                    truncate_chars(
+                        "Enlarge the terminal to see the 4x4 field.",
+                        usize::from(inner.width),
+                        options.ascii,
+                    ),
+                    Style::default().fg(theme.muted),
+                ),
+            ])
+            .style(theme.canvas_style()),
+            inner,
+        );
+        return;
+    }
+    let cell_w = usize::from(inner.width / column_count);
+    let mut lines = Vec::new();
+    for row in 0..row_count {
+        let mut spans = Vec::new();
+        for column in 0..column_count {
+            let Some(site) = sites
+                .iter()
+                .find(|site| u16::from(site.row) == row && u16::from(site.column) == column)
+            else {
+                spans.push(Span::raw(" ".repeat(cell_w)));
+                continue;
+            };
+            let label = if cell_w >= 8 {
+                format!("{} {}", coordinate(site), state_of(site))
+            } else {
+                coordinate(site)
+            };
+            let label: String = format!("{label:^cell_w$}").chars().take(cell_w).collect();
+            let style = if selected_id == Some(site.id.as_str()) {
+                theme.selection_style().fg(theme.cyan_bright).bold()
+            } else if site.knowledge == SubregionKnowledge::Unknown {
+                Style::default().fg(theme.faint)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            spans.push(Span::styled(label, style));
+        }
+        lines.push(Line::from(spans));
+    }
+    let spare = usize::from(inner.height.saturating_sub(row_count));
+    if spare > 0 {
+        lines.push(Line::styled(
+            truncate_chars(
+                "Compact field // enlarge for sector tiles",
+                usize::from(inner.width),
+                options.ascii,
+            ),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).style(theme.canvas_style()), inner);
+}
+
 fn render_local_sites(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2880,15 +3044,30 @@ fn render_local_sites(
     }
     let row_count = u16::from(planet.network.subregion_rows.max(1));
     let column_count = u16::from(planet.network.subregion_columns.max(1));
+    // Bordered tiles need at least three rows (border, one text row, border) and room for a
+    // short label; below that, draw a compact text grid so every sector stays identifiable.
+    if inner.height / row_count < 3 || inner.width / column_count < 6 {
+        render_compact_local_grid(
+            frame,
+            inner,
+            app,
+            planet,
+            row_count,
+            column_count,
+            options,
+            theme,
+        );
+        return;
+    }
     // Equal tile sizes: spare rows/columns become a centered margin instead of enlarging one
     // row or column (which made only that row show state labels and widened one column).
     let tile_h = (inner.height / row_count).max(1);
     let tile_w = (inner.width / column_count).max(1);
     let grid = Rect::new(
-        inner.x + (inner.width - tile_w * column_count) / 2,
-        inner.y + (inner.height - tile_h * row_count) / 2,
-        tile_w * column_count,
-        tile_h * row_count,
+        inner.x + inner.width.saturating_sub(tile_w * column_count) / 2,
+        inner.y + inner.height.saturating_sub(tile_h * row_count) / 2,
+        (tile_w * column_count).min(inner.width),
+        (tile_h * row_count).min(inner.height),
     );
     let rows = Layout::vertical(
         (0..row_count)
@@ -3356,6 +3535,20 @@ fn render_inspector_text(
     let inner_width = usize::from(area.width.saturating_sub(2));
     let inner_height = usize::from(area.height.saturating_sub(2));
     let mut rows = crate::textwrap::hang_wrap(text.lines, inner_width);
+    // A confirmation must always show what is being confirmed and how to answer: drop spacer
+    // rows first, then keep the opening rows plus the ENTER/ESC rows pinned at the bottom.
+    if confirming && rows.len() > inner_height {
+        rows.retain(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        });
+        if rows.len() > inner_height && inner_height >= 3 {
+            let tail = rows.split_off(rows.len() - 2);
+            rows.truncate(inner_height - 2);
+            rows.extend(tail);
+        }
+    }
     let is_heading = |line: &Line<'_>| {
         let plain: String = line
             .spans
@@ -5182,7 +5375,8 @@ fn render_onboarding(
 
     // Docked HUD/card heights: borders plus content rows (notice adds one), leaving no empty rows.
     let adjusting_hud_h = (6 + u16::from(app.notice.is_some())).min(chunks[1].height);
-    let confirm_card_h = 9.min(chunks[1].height);
+    // Five content rows plus borders; one extra when the status line may wrap on narrow panes.
+    let confirm_card_h = if chunks[1].width < 60 { 8 } else { 7 }.min(chunks[1].height);
     let reserved_rows = if confirming {
         confirm_card_h + 1
     } else {
@@ -5495,11 +5689,16 @@ fn render_dashboard(
     );
 
     let visible_height = events_area.height.saturating_sub(2) as usize;
-    let end = app.events.len().saturating_sub(app.event_scroll);
-    let start = end.saturating_sub(visible_height);
-    let lines = app
+    // Routine background acknowledgements are bookkeeping, not events worth reading here.
+    let shown: Vec<_> = app
         .events
         .iter()
+        .filter(|event| event.kind != EngineEventKind::ActivityReviewed)
+        .collect();
+    let end = shown.len().saturating_sub(app.event_scroll);
+    let start = end.saturating_sub(visible_height);
+    let lines = shown
+        .into_iter()
         .skip(start)
         .take(end.saturating_sub(start))
         .map(|event| {
@@ -5695,11 +5894,11 @@ fn connection_line(app: &App, theme: Theme, compact: bool) -> Line<'static> {
         &[
             KeyHint {
                 key: "R",
-                label: "",
+                label: "retry",
             },
             KeyHint {
                 key: "?",
-                label: "",
+                label: "help",
             },
             KeyHint {
                 key: "Q",
@@ -5752,25 +5951,46 @@ fn render_pilot_strip(
         .count();
     let sep = if options.ascii { " | " } else { " · " };
     let dot = if options.ascii { "*" } else { "◆" };
-    let line1 = Line::from(vec![
-        Span::styled(
-            format!(" {dot} SUBSTRATE"),
-            Style::default().fg(theme.gold).bold(),
+    let chapter = Span::styled(
+        format!(
+            "CH {}",
+            transmission::roman_chapter(planet.campaign.chapter_number)
         ),
-        Span::styled(sep, Style::default().fg(theme.faint)),
-        Span::styled(
-            format!(
-                "CH {}",
-                transmission::roman_chapter(planet.campaign.chapter_number)
+        Style::default().fg(theme.amber).bold(),
+    );
+    let map = Span::styled(
+        format!("MAP {surveyed}/{}", planet.regions.len()),
+        Style::default().fg(theme.cyan_bright),
+    );
+    // Drop header segments whole on very narrow panes instead of clipping the map count.
+    let candidates = [
+        vec![
+            Span::styled(
+                format!(" {dot} SUBSTRATE"),
+                Style::default().fg(theme.gold).bold(),
             ),
-            Style::default().fg(theme.amber).bold(),
-        ),
-        Span::styled(sep, Style::default().fg(theme.faint)),
-        Span::styled(
-            format!("MAP {surveyed}/{}", planet.regions.len()),
-            Style::default().fg(theme.cyan_bright),
-        ),
-    ]);
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            chapter.clone(),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            map.clone(),
+        ],
+        vec![
+            Span::styled(format!(" {dot} "), Style::default().fg(theme.gold).bold()),
+            chapter.clone(),
+            Span::styled(sep, Style::default().fg(theme.faint)),
+            map.clone(),
+        ],
+        vec![Span::raw(" "), map],
+    ];
+    let width_of = |spans: &[Span<'_>]| -> usize {
+        spans.iter().map(|span| span.content.chars().count()).sum()
+    };
+    let header = candidates
+        .iter()
+        .find(|spans| width_of(spans) <= usize::from(area.width))
+        .unwrap_or(&candidates[2])
+        .clone();
+    let line1 = Line::from(header);
 
     let status_line = if let Some((badge, highlight)) = app.next_event_badge(now) {
         let (glyph, glyph_color) = if !planet.archive.unpresented_record_ids.is_empty() {
@@ -6357,8 +6577,13 @@ fn render_session_menu(
                     Style::default().fg(theme.warning),
                 ));
             } else {
+                // Short form on narrow menus so "ESC resume" never splits across rows.
                 lines.push(Line::styled(
-                    "UP/DOWN select  //  ENTER choose  //  ESC resume",
+                    if menu_area.width < 54 {
+                        "UP/DN  ENTER  ESC resume"
+                    } else {
+                        "UP/DOWN select  //  ENTER choose  //  ESC resume"
+                    },
                     Style::default().fg(theme.muted),
                 ));
             }
@@ -6578,6 +6803,101 @@ mod tests {
         SubregionClass,
     };
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn local_field_test_app() -> App {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut planet = engine.planet().unwrap();
+        planet.network.unlocked = true;
+        planet.network.subregions.clear();
+        for slot in 0..16_u8 {
+            planet.network.subregions.push(SubregionSnapshot {
+                id: format!("{}_site_{}", planet.core_region_id, slot + 1),
+                designation: format!("R-081 / S-{}", slot + 1),
+                region_id: planet.core_region_id.clone(),
+                slot,
+                row: slot / 4,
+                column: slot % 4,
+                knowledge: if slot == 15 {
+                    SubregionKnowledge::Unknown
+                } else {
+                    SubregionKnowledge::Observed
+                },
+                class: Some(SubregionClass::ShelteredShelf),
+                hazard: Some(RiskLevel::Low),
+                energy_yield: Some(2),
+                deposit: None,
+                base_id: None,
+            });
+        }
+        let mut app = App::default();
+        app.apply_snapshot(status(true), Instant::now());
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app
+    }
+
+    #[test]
+    fn every_view_renders_without_panic_across_terminal_sizes() {
+        let widths = [20_u16, 30, 38, 44, 48, 56, 60, 72, 80, 100, 120];
+        let heights = [3_u16, 4, 5, 8, 12, 14, 15, 16, 20, 24, 36];
+        let mut app = local_field_test_app();
+        let workspaces = app.visible_workspaces();
+        for ascii in [false, true] {
+            let options = RenderOptions {
+                ascii,
+                no_color: ascii,
+            };
+            for &width in &widths {
+                for &height in &heights {
+                    for local in [false, true] {
+                        app.local_view = local;
+                        for &workspace in &workspaces {
+                            app.workspace = workspace;
+                            for overlay in 0..4 {
+                                app.show_help = overlay == 1;
+                                app.show_chapter_card = overlay == 2;
+                                app.show_return_summary = overlay == 3;
+                                let _ = screen(&app, width, height, options);
+                            }
+                        }
+                        app.show_help = false;
+                        app.show_chapter_card = false;
+                        app.show_return_summary = false;
+                        app.workspace = Workspace::Planet;
+                        app.open_session_menu();
+                        let _ = screen(&app, width, height, options);
+                        app.session_menu = None;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_local_field_keeps_every_sector_identifiable() {
+        let mut app = local_field_test_app();
+        app.workspace = Workspace::Planet;
+        app.local_view = true;
+        for (width, height) in [(44_u16, 14_u16), (48, 14), (48, 15), (60, 16), (44, 20)] {
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            for coordinate in ["A1", "B2", "C3", "D4"] {
+                assert!(
+                    text.contains(coordinate) || text.contains("Enlarge the terminal"),
+                    "{width}x{height} lost {coordinate}\n{text}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn node_lead_guides_to_the_node_not_a_frontier() {

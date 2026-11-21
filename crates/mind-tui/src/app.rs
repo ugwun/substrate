@@ -1837,13 +1837,15 @@ impl App {
     pub fn focus_campaign_lead(&mut self) -> bool {
         // Inside 4x4 local view, focus the actionable sector in this region first (e.g. a
         // connected node needing an Observatory/Lab, or a Detected frontier sector needing [S]).
-        // When the campaign lead points at another region, leave the local field and go there.
+        // When the campaign lead points at another region, or at a regional deposit (X acts
+        // from the globe), leave the local field and focus the lead region.
         let lead_is_here = self.planet.as_ref().is_none_or(|planet| {
-            planet
-                .campaign
-                .lead_region_id
-                .as_deref()
-                .is_none_or(|lead| Some(lead) == self.selected_region_id.as_deref())
+            planet.campaign.next_action_key.as_deref() != Some("X")
+                && planet
+                    .campaign
+                    .lead_region_id
+                    .as_deref()
+                    .is_none_or(|lead| Some(lead) == self.selected_region_id.as_deref())
         });
         if self.workspace == Workspace::Planet && self.local_view && lead_is_here {
             if let Some((slot, label)) = self.best_local_lead_slot() {

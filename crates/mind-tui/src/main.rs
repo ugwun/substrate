@@ -578,6 +578,9 @@ async fn handle_key(
             ) => app.cancel_confirmation_action(),
             _ => app.cancel_confirmation_action(),
         },
+        // While confirming, the inspector can still be paged so its full detail is reachable.
+        KeyCode::PageUp if app.pending_action.is_some() => app.scroll_region_panel(-4),
+        KeyCode::PageDown if app.pending_action.is_some() => app.scroll_region_panel(4),
         _ if app.pending_action.is_some() => {}
         KeyCode::Esc if app.workspace == Workspace::Planet && app.local_view => {
             app.leave_local_view();

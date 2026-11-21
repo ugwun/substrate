@@ -42,11 +42,21 @@ pub(crate) struct CampaignInput<'a> {
     pub subregions: &'a [SubregionSnapshot],
     pub offline_base_region_id: Option<&'a str>,
     pub offline_base_subregion_id: Option<&'a str>,
+    pub raw_inventory: ResourceStock,
     pub bases: &'a [BaseSnapshot],
     pub projects: &'a [BaseProjectSnapshot],
 }
 
 pub(crate) fn derive_campaign(input: &CampaignInput<'_>) -> CampaignSnapshot {
+    let mut snapshot = derive_campaign_unresolved(input);
+    snapshot.next_action = resolve_plurals(&snapshot.next_action);
+    for step in &mut snapshot.steps {
+        step.label = resolve_plurals(&step.label);
+    }
+    snapshot
+}
+
+fn derive_campaign_unresolved(input: &CampaignInput<'_>) -> CampaignSnapshot {
     if input.horizon_reached && input.has_observation_005 {
         return CampaignSnapshot {
             chapter_id: "chapter_05".into(),
@@ -707,6 +717,28 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
     }
 }
 
+/// Resolve "noun(s)" placeholders using the nearest preceding count: "1 region(s)" becomes
+/// "1 region" and "3 region(s)" becomes "3 regions".
+pub(crate) fn resolve_plurals(text: &str) -> String {
+    let tokens: Vec<&str> = text.split(' ').collect();
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some(at) = token.find("(s)") {
+            let count = tokens[..index].iter().rev().take(4).find_map(|previous| {
+                previous
+                    .trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u64>()
+                    .ok()
+            });
+            let suffix = if count == Some(1) { "" } else { "s" };
+            out.push(format!("{}{suffix}{}", &token[..at], &token[at + 3..]));
+        } else {
+            out.push((*token).to_owned());
+        }
+    }
+    out.join(" ")
+}
+
 /// Recovery guidance for the first offline or failing node, matched to its visible cause so the
 /// suggested key actually restores service.
 fn node_recovery(input: &CampaignInput<'_>, region_id: &str) -> (String, &'static str) {
@@ -788,6 +820,22 @@ fn observation_array_lead(
             None,
         );
     }
+    // A suspended array is the cheapest fix: restore it before building another.
+    if let Some(base) = input.bases.iter().find(|base| {
+        base.modules
+            .iter()
+            .any(|module| module.kind == BaseModuleKind::Observatory && !module.enabled)
+    }) {
+        return (
+            format!(
+                "Restore the suspended Observation Array at {}: press O on its node.",
+                region_label(input.regions, &base.region_id)
+            ),
+            "O",
+            Some(base.region_id.clone()),
+            Some(base.subregion_id.clone()),
+        );
+    }
     let host = input.bases.iter().find(|base| {
         base.connected
             && !base
@@ -822,6 +870,25 @@ fn observation_array_lead(
         silicate: cost.silicate.saturating_sub(have.silicate),
     };
     let label = region_label(input.regions, &host.region_id);
+    let raw = input.raw_inventory;
+    let refining_covers = short.structural <= raw.structural
+        && short.conductive <= raw.conductive
+        && short.silicate <= raw.silicate;
+    if short.structural + short.conductive + short.silicate > 0 && refining_covers {
+        return (
+            format!(
+                "Material for the next {noun} is refining; press O on the {label} node once it is ready."
+            ),
+            "O",
+            Some(host.region_id.clone()),
+            Some(host.subregion_id.clone()),
+        );
+    }
+    let short = ResourceStock {
+        structural: short.structural.saturating_sub(raw.structural),
+        conductive: short.conductive.saturating_sub(raw.conductive),
+        silicate: short.silicate.saturating_sub(raw.silicate),
+    };
     if short.structural + short.conductive + short.silicate > 0 {
         let mut parts = Vec::new();
         if short.structural > 0 {
@@ -833,7 +900,7 @@ fn observation_array_lead(
         if short.silicate > 0 {
             parts.push(format!("Si {}", short.silicate));
         }
-        let deposit = first_surveyed_deposit(input.regions, have);
+        let deposit = first_deposit_for(input.regions, short);
         return (
             format!(
                 "Extract {} more refined material (X) for the next {noun}, then press O at {label}.",
@@ -844,8 +911,13 @@ fn observation_array_lead(
             None,
         );
     }
+    let more = if h.observation_sites + building == 0 {
+        ""
+    } else {
+        " more"
+    };
     (
-        format!("Build {still_needed} more powered {noun}: press O on the {label} node."),
+        format!("Build {still_needed}{more} powered {noun}: press O on the {label} node."),
         "O",
         Some(host.region_id.clone()),
         Some(host.subregion_id.clone()),
@@ -893,6 +965,27 @@ fn first_surveyed_reachable(regions: &[RegionSnapshot]) -> Option<String> {
                 && region.knowledge >= RegionKnowledge::Surveyed
         })
         .max_by_key(|region| region.hop_distance_from_core)
+        .map(|region| region.id.clone())
+}
+
+/// First reachable surveyed deposit of a resource in `short`, so extraction guidance always
+/// points at material the next build actually needs.
+fn first_deposit_for(regions: &[RegionSnapshot], short: ResourceStock) -> Option<String> {
+    let needed = |kind: ResourceKind| match kind {
+        ResourceKind::Structural => short.structural > 0,
+        ResourceKind::Conductive => short.conductive > 0,
+        ResourceKind::Silicate => short.silicate > 0,
+    };
+    regions
+        .iter()
+        .find(|region| {
+            region.within_scout_range
+                && region.knowledge >= RegionKnowledge::Surveyed
+                && region
+                    .deposit
+                    .as_ref()
+                    .is_some_and(|deposit| deposit.remaining > 0 && needed(deposit.resource))
+        })
         .map(|region| region.id.clone())
 }
 
@@ -1003,4 +1096,22 @@ fn first_uncompared_surveyed_region(
                 })
         })
         .map(|region| region.id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_plurals;
+
+    #[test]
+    fn plural_placeholders_follow_the_nearest_count() {
+        assert_eq!(
+            resolve_plurals("Resolve 1 more local sector(s) via V -> S."),
+            "Resolve 1 more local sector via V -> S."
+        );
+        assert_eq!(
+            resolve_plurals("Connect 2 more powered node(s) (V -> B, P, C)."),
+            "Connect 2 more powered nodes (V -> B, P, C)."
+        );
+        assert_eq!(resolve_plurals("(3 region(s) left)."), "(3 regions left).");
+    }
 }

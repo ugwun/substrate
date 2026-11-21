@@ -780,6 +780,7 @@ impl GameState {
                 subregions: &network.subregions,
                 offline_base_region_id,
                 offline_base_subregion_id,
+                raw_inventory: self.raw_inventory,
                 bases: &network.bases,
                 projects: &network.active_projects,
             });
@@ -1784,9 +1785,9 @@ impl GameState {
         self.push_activity(
             ActivityKind::Survey,
             Some(survey.region_id.clone()),
-            format!(
+            crate::campaign::resolve_plurals(&format!(
                 "Focused local survey completed at {designation}; one analysis unit recorded and {frontier_revealed} adjacent sector(s) detected."
-            ),
+            )),
         );
         self.changed();
         let mut events = vec![GameAdvanceEvent::SubregionSurveyed];
@@ -2758,10 +2759,10 @@ impl GameState {
             if !self.base_projects.is_empty() {
                 return ObjectiveSnapshot {
                     title: "EXTEND PERMANENT PRESENCE".into(),
-                    guidance: format!(
+                    guidance: crate::campaign::resolve_plurals(&format!(
                         "{} network project(s) are assembling. Survey, extract, research, or plan the next node concurrently.",
                         self.base_projects.len()
-                    ),
+                    )),
                     complete: false,
                 };
             }
@@ -2809,10 +2810,10 @@ impl GameState {
             if horizon.connected_bases < HORIZON_REQUIRED_BASES {
                 return ObjectiveSnapshot {
                     title: "FORM A PLANETARY CHAIN".into(),
-                    guidance: format!(
+                    guidance: crate::campaign::resolve_plurals(&format!(
                         "Connect {} more powered node(s). Communications bridge three regional hops and extend field reach.",
                         HORIZON_REQUIRED_BASES - horizon.connected_bases
-                    ),
+                    )),
                     complete: false,
                 };
             }
@@ -2833,10 +2834,10 @@ impl GameState {
             if horizon.surveyed_regions < HORIZON_REQUIRED_REGIONS {
                 return ObjectiveSnapshot {
                     title: "WIDEN PLANETARY COVERAGE".into(),
-                    guidance: format!(
+                    guidance: crate::campaign::resolve_plurals(&format!(
                         "Survey {} more region(s). Use queued surveys and the communications chain to choose the route.",
                         HORIZON_REQUIRED_REGIONS - horizon.surveyed_regions
-                    ),
+                    )),
                     complete: false,
                 };
             }

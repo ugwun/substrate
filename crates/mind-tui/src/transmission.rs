@@ -735,7 +735,7 @@ pub fn render_chapter_card(
             ])
         })
         .collect();
-    let layouts: [&dyn Fn() -> Vec<Line<'static>>; 5] = [
+    let layouts: [&dyn Fn() -> Vec<Line<'static>>; 6] = [
         &|| {
             let mut lines = vec![
                 heading("OPEN QUESTION //", theme.amber),
@@ -792,6 +792,20 @@ pub fn render_chapter_card(
             lines.extend(steps_one_row.iter().cloned());
             lines.push(next.clone());
             lines
+        },
+        &|| {
+            // Smallest: the question and the next action, which matter most.
+            vec![
+                Line::styled(
+                    crate::ui::truncate_for_width(
+                        &terminal_text(&campaign.question, options.ascii),
+                        inner_w,
+                        options.ascii,
+                    ),
+                    Style::default().fg(theme.text_strong).bold(),
+                ),
+                next.clone(),
+            ]
         },
     ];
     let cue_text = match (inner_w >= 46, options.ascii) {
