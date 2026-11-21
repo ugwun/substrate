@@ -1,13 +1,17 @@
 use crate::connection::PlanetActionKind;
 use mind_core::protocol::{
-    DiagnosticPulseResult, EngineEvent, OnboardingCompletionResult, OperationalProfile,
-    PlanetActionResult, PlanetSnapshot, RegionSnapshot, ResearchProject, ScoutState,
-    StatusSnapshot,
+    BaseModuleKind, DiagnosticPulseResult, EngineEvent, ExtractorLoadout, ExtractorState,
+    NewPlaythroughResult, OnboardingCompletionResult, OperationalProfile, PlanetActionResult,
+    PlanetSnapshot, RegionSnapshot, ResearchProject, ResourceStock, ScoutState, StatusSnapshot,
+    SubregionKnowledge, SubregionSnapshot,
 };
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
 const EVENT_CACHE_CAPACITY: usize = 256;
 const IDLE_DELAY: Duration = Duration::from_secs(30);
+pub const LOCAL_FIELD_UNLOCK_GUIDANCE: &str =
+    "Build a relay, extend survey range, activate a research profile, then complete one automated operation.";
+pub const LOCAL_FIELD_SURVEY_GUIDANCE: &str = "Complete a regional survey here first.";
 const IDLE_ROTATION_SPEED: f64 = 0.085;
 const CAMERA_RESPONSE: f64 = 7.5;
 const MAX_FRAME_DELTA: Duration = Duration::from_millis(250);
@@ -32,7 +36,34 @@ pub enum Workspace {
     Planet,
     Overview,
     Research,
+    Archive,
+    SystemMap,
     System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMenuState {
+    Selecting,
+    ConfirmingNewPlaythrough,
+    StartingNewPlaythrough,
+    StoppingDaemon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMenuAction {
+    Resume,
+    Detach,
+    StopDaemon,
+    NewPlaythrough,
+}
+
+impl SessionMenuAction {
+    const ALL: [Self; 4] = [
+        Self::Resume,
+        Self::Detach,
+        Self::StopDaemon,
+        Self::NewPlaythrough,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,13 +71,31 @@ pub enum ContextAction {
     Deploy(String),
     Recall,
     Extract(String),
+    ConfigureExtractor(ExtractorLoadout),
     ConstructRelay(String),
     QueueSurvey(String),
     RemoveQueuedSurvey(String),
     SetExtractionRoute(String),
     ClearExtractionRoute,
     StartResearch(ResearchProject),
+    StartArchiveExperiment,
     ActivateProfile(OperationalProfile),
+    SurveySubregion(String),
+    ExtractSubregion {
+        region_id: String,
+        subregion_id: String,
+    },
+    EstablishBase(String),
+    MaintainBase(String),
+    ConstructBaseModule {
+        subregion_id: String,
+        module: BaseModuleKind,
+    },
+    SetBaseModuleEnabled {
+        subregion_id: String,
+        module: BaseModuleKind,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -60,16 +109,22 @@ pub struct App {
     pub event_scroll: usize,
     pub follow_events: bool,
     pub show_help: bool,
+    pub session_menu: Option<SessionMenuState>,
+    pub session_menu_selection: usize,
+    pub session_menu_message: Option<String>,
     pub notice: Option<String>,
     pub selected_band: usize,
     pub band_positions: [u8; 3],
     pub onboarding_view: OnboardingView,
     pub workspace: Workspace,
     pub selected_region_id: Option<String>,
+    pub local_view: bool,
+    pub selected_subregion_slot: usize,
     pub region_panel_scroll: u16,
     pub overview_selection: usize,
     pub overview_status_scroll: u16,
     pub research_selection: usize,
+    pub archive_selection: usize,
     pub show_return_summary: bool,
     pub pending_action: Option<ContextAction>,
     pub globe_yaw: f64,
@@ -95,16 +150,22 @@ impl Default for App {
             event_scroll: 0,
             follow_events: true,
             show_help: false,
+            session_menu: None,
+            session_menu_selection: 0,
+            session_menu_message: None,
             notice: None,
             selected_band: 0,
             band_positions: [1, 5, 9],
             onboarding_view: OnboardingView::Adjusting,
             workspace: Workspace::Planet,
             selected_region_id: None,
+            local_view: false,
+            selected_subregion_slot: 0,
             region_panel_scroll: 0,
             overview_selection: 0,
             overview_status_scroll: 0,
             research_selection: 0,
+            archive_selection: 0,
             show_return_summary: false,
             pending_action: None,
             globe_yaw: 0.0,
@@ -139,6 +200,14 @@ impl App {
     }
 
     pub fn apply_snapshot(&mut self, snapshot: StatusSnapshot, received_at: Instant) {
+        let returned_to_onboarding = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|current| current.onboarding.complete && !snapshot.onboarding.complete);
+        if returned_to_onboarding {
+            self.reset_local_playthrough_state();
+            self.notice = Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED".into());
+        }
         if let Some((previous_tick, previous_at)) = self.previous_tick_sample {
             let elapsed = received_at
                 .saturating_duration_since(previous_at)
@@ -176,7 +245,19 @@ impl App {
     }
 
     pub fn apply_planet(&mut self, planet: PlanetSnapshot, received_at: Instant) {
+        if self
+            .planet
+            .as_ref()
+            .is_some_and(|current| current.revision > planet.revision)
+        {
+            return;
+        }
         let initial_planet = self.planet.is_none();
+        let system_map_was_available = self
+            .planet
+            .as_ref()
+            .is_some_and(|planet| planet.system_map.available);
+        let system_map_became_available = planet.system_map.available && !system_map_was_available;
         let selected_is_valid = self
             .selected_region_id
             .as_ref()
@@ -184,8 +265,15 @@ impl App {
         let selection_changed = !selected_is_valid;
         if !selected_is_valid {
             self.selected_region_id = Some(planet.core_region_id.clone());
+            self.local_view = false;
+            self.selected_subregion_slot = 0;
         }
         self.planet = Some(planet);
+        if system_map_became_available {
+            self.workspace = Workspace::SystemMap;
+            self.pending_action = None;
+            self.notice = Some("SYSTEM MAP AVAILABLE // DEMO HORIZON REACHED".into());
+        }
         if initial_planet
             && self
                 .planet
@@ -195,6 +283,7 @@ impl App {
             self.show_return_summary = true;
         }
         self.clamp_overview_selection();
+        self.clamp_archive_selection();
         if selection_changed {
             self.region_panel_scroll = 0;
             self.focus_selected_region(true);
@@ -212,6 +301,81 @@ impl App {
         self.last_input = now;
     }
 
+    pub fn open_session_menu(&mut self) {
+        self.show_help = false;
+        self.session_menu = Some(SessionMenuState::Selecting);
+        self.session_menu_selection = 0;
+        self.session_menu_message = None;
+    }
+
+    pub fn close_session_menu(&mut self) {
+        if self.session_menu == Some(SessionMenuState::Selecting) {
+            self.session_menu = None;
+            self.session_menu_message = None;
+        }
+    }
+
+    pub fn move_session_menu_selection(&mut self, delta: i8) {
+        let count = SessionMenuAction::ALL.len() as isize;
+        self.session_menu_selection =
+            (self.session_menu_selection as isize + isize::from(delta)).rem_euclid(count) as usize;
+        self.session_menu_message = None;
+    }
+
+    pub fn selected_session_menu_action(&self) -> SessionMenuAction {
+        SessionMenuAction::ALL[self
+            .session_menu_selection
+            .min(SessionMenuAction::ALL.len() - 1)]
+    }
+
+    pub fn confirm_new_playthrough(&mut self) {
+        self.session_menu = Some(SessionMenuState::ConfirmingNewPlaythrough);
+        self.session_menu_message = None;
+    }
+
+    pub fn return_to_session_menu(&mut self) {
+        self.session_menu = Some(SessionMenuState::Selecting);
+        self.session_menu_message = None;
+    }
+
+    pub fn begin_new_playthrough(&mut self) {
+        self.session_menu = Some(SessionMenuState::StartingNewPlaythrough);
+        self.session_menu_message = None;
+    }
+
+    pub fn begin_daemon_stop(&mut self) {
+        self.session_menu = Some(SessionMenuState::StoppingDaemon);
+        self.session_menu_message = None;
+    }
+
+    pub fn session_action_unavailable(&mut self) {
+        self.session_menu_message = Some("A live daemon connection is required.".into());
+    }
+
+    pub fn new_playthrough_completed(&mut self, result: NewPlaythroughResult) {
+        if result.ok {
+            self.reset_local_playthrough_state();
+            self.notice = Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED".into());
+        } else {
+            self.session_menu = Some(SessionMenuState::Selecting);
+            self.session_menu_message = Some(format!(
+                "Could not create playthrough: {}. Existing progress is unchanged.",
+                result.code.as_deref().unwrap_or("unknown_error")
+            ));
+        }
+    }
+
+    pub fn lifecycle_failed(&mut self, error: impl Into<String>) {
+        self.session_menu = Some(SessionMenuState::Selecting);
+        self.session_menu_message = Some(format!("Lifecycle request failed: {}", error.into()));
+    }
+
+    fn reset_local_playthrough_state(&mut self) {
+        let connection = self.connection.clone();
+        *self = Self::default();
+        self.connection = connection;
+    }
+
     pub fn advance_globe_animation(&mut self, now: Instant) {
         let elapsed = now
             .saturating_duration_since(self.last_animation_frame)
@@ -220,6 +384,7 @@ impl App {
         self.last_animation_frame = now;
         if self.workspace != Workspace::Planet
             || self.show_help
+            || self.session_menu.is_some()
             || self.pending_action.is_some()
             || !matches!(self.connection, ConnectionState::Connected)
         {
@@ -236,15 +401,25 @@ impl App {
     }
 
     pub fn cycle_workspace(&mut self, reverse: bool) {
-        self.workspace = match (self.workspace, reverse) {
-            (Workspace::Planet, false) => Workspace::Overview,
-            (Workspace::Overview, false) => Workspace::Research,
-            (Workspace::Research, false) => Workspace::System,
-            (Workspace::System, false) => Workspace::Planet,
-            (Workspace::Planet, true) => Workspace::System,
-            (Workspace::Overview, true) => Workspace::Planet,
-            (Workspace::Research, true) => Workspace::Overview,
-            (Workspace::System, true) => Workspace::Research,
+        let system_map_available = self
+            .planet
+            .as_ref()
+            .is_some_and(|planet| planet.system_map.available);
+        self.workspace = match (self.workspace, reverse, system_map_available) {
+            (Workspace::Planet, false, _) => Workspace::Overview,
+            (Workspace::Overview, false, _) => Workspace::Research,
+            (Workspace::Research, false, _) => Workspace::Archive,
+            (Workspace::Archive, false, true) => Workspace::SystemMap,
+            (Workspace::Archive, false, false) => Workspace::System,
+            (Workspace::SystemMap, false, _) => Workspace::System,
+            (Workspace::System, false, _) => Workspace::Planet,
+            (Workspace::Planet, true, _) => Workspace::System,
+            (Workspace::Overview, true, _) => Workspace::Planet,
+            (Workspace::Research, true, _) => Workspace::Overview,
+            (Workspace::Archive, true, _) => Workspace::Research,
+            (Workspace::SystemMap, true, _) => Workspace::Archive,
+            (Workspace::System, true, true) => Workspace::SystemMap,
+            (Workspace::System, true, false) => Workspace::Archive,
         };
         self.pending_action = None;
         self.notice = None;
@@ -280,7 +455,81 @@ impl App {
             self.focus_selected_region(false);
         }
         self.region_panel_scroll = 0;
+        self.local_view = false;
+        self.selected_subregion_slot = 0;
         self.notice = None;
+    }
+
+    pub fn enter_local_view(&mut self) {
+        let network_unlocked = self
+            .planet
+            .as_ref()
+            .is_some_and(|planet| planet.network.unlocked);
+        if !network_unlocked {
+            self.notice = Some(format!(
+                "LOCAL FIELD LOCKED // {LOCAL_FIELD_UNLOCK_GUIDANCE}"
+            ));
+            return;
+        }
+        if self.selected_subregions().is_empty() {
+            self.notice = Some(format!(
+                "LOCAL FIELD UNAVAILABLE // {LOCAL_FIELD_SURVEY_GUIDANCE}"
+            ));
+            return;
+        }
+        self.local_view = true;
+        self.selected_subregion_slot = self
+            .selected_subregion_slot
+            .min(self.selected_subregions().len().saturating_sub(1));
+        if self
+            .selected_subregion()
+            .is_some_and(|site| site.knowledge == SubregionKnowledge::Unknown)
+        {
+            self.selected_subregion_slot = self
+                .selected_subregions()
+                .iter()
+                .position(|site| site.knowledge > SubregionKnowledge::Unknown)
+                .unwrap_or(0);
+        }
+        self.region_panel_scroll = 0;
+        self.notice = None;
+    }
+
+    pub fn leave_local_view(&mut self) {
+        self.local_view = false;
+        self.pending_action = None;
+        self.region_panel_scroll = 0;
+    }
+
+    pub fn move_subregion_selection(&mut self, row_delta: i8, column_delta: i8) {
+        let sites = self.selected_subregions();
+        if sites.is_empty() {
+            self.selected_subregion_slot = 0;
+            return;
+        }
+        let Some(current) = sites.get(self.selected_subregion_slot) else {
+            self.selected_subregion_slot = 0;
+            return;
+        };
+        let rows = self
+            .planet
+            .as_ref()
+            .map_or(1, |planet| planet.network.subregion_rows);
+        let columns = self
+            .planet
+            .as_ref()
+            .map_or(1, |planet| planet.network.subregion_columns);
+        let row = (i16::from(current.row) + i16::from(row_delta)).rem_euclid(i16::from(rows)) as u8;
+        let column = (i16::from(current.column) + i16::from(column_delta))
+            .rem_euclid(i16::from(columns)) as u8;
+        if let Some(index) = sites
+            .iter()
+            .position(|site| site.row == row && site.column == column)
+        {
+            self.selected_subregion_slot = index;
+        }
+        self.pending_action = None;
+        self.region_panel_scroll = 0;
     }
 
     pub fn selected_region(&self) -> Option<&RegionSnapshot> {
@@ -292,10 +541,202 @@ impl App {
             .find(|region| &region.id == selected)
     }
 
+    pub fn selected_subregions(&self) -> Vec<&SubregionSnapshot> {
+        let Some(region_id) = self.selected_region_id.as_deref() else {
+            return Vec::new();
+        };
+        self.planet
+            .as_ref()
+            .map(|planet| {
+                let mut sites: Vec<_> = planet
+                    .network
+                    .subregions
+                    .iter()
+                    .filter(|subregion| subregion.region_id == region_id)
+                    .collect();
+                sites.sort_by_key(|site| (site.row, site.column));
+                sites
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn selected_subregion(&self) -> Option<&SubregionSnapshot> {
+        self.selected_subregions()
+            .get(self.selected_subregion_slot)
+            .copied()
+    }
+
+    pub fn local_primary_action(&self) -> Option<ContextAction> {
+        if self.workspace != Workspace::Planet || !self.local_view {
+            return None;
+        }
+        self.subregion_survey_action()
+            .or_else(|| self.subregion_extraction_action())
+            .or_else(|| self.base_establishment_action())
+    }
+
+    pub fn subregion_survey_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        let site = self.selected_subregion()?;
+        let scout_present = planet.active_mission.as_ref().is_some_and(|mission| {
+            mission.target_region_id == region.id && mission.phase == ScoutState::Holding
+        });
+        (self.local_view
+            && site.knowledge == SubregionKnowledge::Detected
+            && scout_present
+            && planet.network.active_site_survey.is_none())
+        .then(|| ContextAction::SurveySubregion(site.id.clone()))
+    }
+
+    pub fn subregion_extraction_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        let site = self.selected_subregion()?;
+        (self.local_view
+            && site.knowledge >= SubregionKnowledge::Surveyed
+            && site
+                .deposit
+                .as_ref()
+                .is_some_and(|deposit| deposit.remaining > 0)
+            && planet.extractor.state == mind_core::protocol::ExtractorState::Ready
+            && region.within_scout_range)
+            .then(|| ContextAction::ExtractSubregion {
+                region_id: region.id.clone(),
+                subregion_id: site.id.clone(),
+            })
+    }
+
+    pub fn base_establishment_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let region = self.selected_region()?;
+        let site = self.selected_subregion()?;
+        let stock = planet.refined_inventory;
+        (self.local_view
+            && site.knowledge >= SubregionKnowledge::Surveyed
+            && region.within_scout_range
+            && site.base_id.is_none()
+            && !planet
+                .network
+                .bases
+                .iter()
+                .any(|base| base.region_id == region.id)
+            && !planet
+                .network
+                .active_projects
+                .iter()
+                .any(|project| project.region_id == region.id || project.subregion_id == site.id)
+            && planet.network.active_projects.len() < planet.network.project_capacity
+            && stock.structural >= 10
+            && stock.conductive >= 6
+            && stock.silicate >= 4)
+            .then(|| ContextAction::EstablishBase(site.id.clone()))
+    }
+
+    pub fn base_module_action(&self, module: BaseModuleKind) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let site = self.selected_subregion()?;
+        let base = planet
+            .network
+            .bases
+            .iter()
+            .find(|base| base.subregion_id == site.id)?;
+        let no_project = !planet
+            .network
+            .active_projects
+            .iter()
+            .any(|project| project.region_id == base.region_id);
+        let project_slot = planet.network.active_projects.len() < planet.network.project_capacity;
+        let has = |kind| base.modules.iter().any(|built| built.kind == kind);
+        let prerequisites = match module {
+            BaseModuleKind::PowerArray => true,
+            BaseModuleKind::Communications | BaseModuleKind::Depot => {
+                has(BaseModuleKind::PowerArray)
+            }
+            BaseModuleKind::Workshop | BaseModuleKind::Laboratory => {
+                has(BaseModuleKind::PowerArray) && has(BaseModuleKind::Communications)
+            }
+            BaseModuleKind::Observatory => {
+                has(BaseModuleKind::PowerArray)
+                    && has(BaseModuleKind::Communications)
+                    && planet
+                        .research
+                        .options
+                        .iter()
+                        .filter(|option| option.completed)
+                        .count()
+                        >= 2
+                    && planet.network.horizon.surveyed_subregions
+                        >= planet.network.horizon.required_subregions
+                    && planet.network.bases.iter().any(|candidate| {
+                        candidate
+                            .modules
+                            .iter()
+                            .any(|built| built.kind == BaseModuleKind::Laboratory && built.active)
+                    })
+            }
+        };
+        let cost = module.cost();
+        (!has(module)
+            && base.integrity > 20
+            && no_project
+            && project_slot
+            && prerequisites
+            && stock_contains(planet.refined_inventory, cost))
+        .then(|| ContextAction::ConstructBaseModule {
+            subregion_id: site.id.clone(),
+            module,
+        })
+    }
+
+    pub fn base_module_mode_action(&self, module: BaseModuleKind) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let site = self.selected_subregion()?;
+        let built = planet
+            .network
+            .bases
+            .iter()
+            .find(|base| base.subregion_id == site.id)?
+            .modules
+            .iter()
+            .find(|built| built.kind == module)?;
+        Some(ContextAction::SetBaseModuleEnabled {
+            subregion_id: site.id.clone(),
+            module,
+            enabled: !built.enabled,
+        })
+    }
+
+    pub fn base_maintenance_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        let site = self.selected_subregion()?;
+        let base = planet
+            .network
+            .bases
+            .iter()
+            .find(|base| base.subregion_id == site.id)?;
+        let no_project = !planet
+            .network
+            .active_projects
+            .iter()
+            .any(|project| project.region_id == base.region_id);
+        let project_slot = planet.network.active_projects.len() < planet.network.project_capacity;
+        let stock = planet.refined_inventory;
+        (base.integrity < 100
+            && no_project
+            && project_slot
+            && stock.structural >= 4
+            && stock.conductive >= 2)
+            .then(|| ContextAction::MaintainBase(site.id.clone()))
+    }
+
     pub fn primary_region_action(&self) -> Option<ContextAction> {
         let planet = self.planet.as_ref()?;
         if self.workspace != Workspace::Planet {
             return None;
+        }
+        if self.local_view {
+            return self.local_primary_action();
         }
         let region = self.selected_region()?;
         if self.scout_recall_action().is_some() {
@@ -370,6 +811,14 @@ impl App {
         .then_some(ContextAction::Recall)
     }
 
+    pub fn extractor_loadout_action(&self) -> Option<ContextAction> {
+        let planet = self.planet.as_ref()?;
+        (self.workspace == Workspace::Planet
+            && planet.extractor.state == ExtractorState::Ready
+            && planet.active_extraction.is_none())
+        .then(|| ContextAction::ConfigureExtractor(planet.extractor.loadout.next()))
+    }
+
     pub fn planet_action_completed(&mut self, kind: PlanetActionKind, result: PlanetActionResult) {
         self.pending_action = None;
         self.notice = Some(if result.ok {
@@ -377,11 +826,16 @@ impl App {
                 PlanetActionKind::Deploy => "SCOUT DEPLOYED".into(),
                 PlanetActionKind::Recall => "SCOUT RECALL INITIATED".into(),
                 PlanetActionKind::Extract => "EXTRACTOR DEPLOYED".into(),
+                PlanetActionKind::Loadout => "EXTRACTION RIG CONFIGURED".into(),
                 PlanetActionKind::Construct => "RELAY CONSTRUCTION STARTED".into(),
                 PlanetActionKind::Research => "RESEARCH COMMITTED".into(),
+                PlanetActionKind::Archive => "ARCHIVE COMPARISON STARTED".into(),
                 PlanetActionKind::Profile => "OPERATIONAL PROFILE ACTIVATED".into(),
                 PlanetActionKind::Automation => "AUTOMATION UPDATED".into(),
                 PlanetActionKind::Review => "ACTIVITY REVIEWED".into(),
+                PlanetActionKind::LocalSurvey => "LOCAL SURVEY STARTED".into(),
+                PlanetActionKind::BaseProject => "BASE PROJECT STARTED".into(),
+                PlanetActionKind::ModuleMode => "MODULE POWER MODE UPDATED".into(),
             }
         } else {
             format!(
@@ -516,10 +970,39 @@ impl App {
             .map(|record| record.activity_id)
     }
 
+    pub fn move_archive_selection(&mut self, delta: isize) {
+        let count = self
+            .planet
+            .as_ref()
+            .map_or(0, |planet| planet.archive.records.len());
+        if count == 0 {
+            self.archive_selection = 0;
+            return;
+        }
+        self.archive_selection = self
+            .archive_selection
+            .saturating_add_signed(delta)
+            .min(count - 1);
+    }
+
+    pub fn archive_experiment_action(&self) -> Option<ContextAction> {
+        let experiment = self.planet.as_ref()?.archive.experiment.as_ref()?;
+        (self.workspace == Workspace::Archive && experiment.available && !experiment.active)
+            .then_some(ContextAction::StartArchiveExperiment)
+    }
+
     fn research_entry_count(&self) -> usize {
         self.planet.as_ref().map_or(0, |planet| {
             planet.research.options.len() + planet.research.profiles.len()
         })
+    }
+
+    fn clamp_archive_selection(&mut self) {
+        let count = self
+            .planet
+            .as_ref()
+            .map_or(0, |planet| planet.archive.records.len());
+        self.archive_selection = self.archive_selection.min(count.saturating_sub(1));
     }
 
     pub fn open_selected_overview_region(&mut self) {
@@ -552,6 +1035,13 @@ impl App {
         if let Some(construction) = &planet.active_construction {
             targets.push(construction.region_id.as_str());
         }
+        targets.extend(
+            planet
+                .network
+                .active_projects
+                .iter()
+                .map(|project| project.region_id.as_str()),
+        );
         targets.extend(
             planet
                 .recent_reports
@@ -711,6 +1201,12 @@ fn normalize_angle(angle: f64) -> f64 {
     angle.rem_euclid(std::f64::consts::TAU)
 }
 
+fn stock_contains(stock: ResourceStock, required: ResourceStock) -> bool {
+    stock.structural >= required.structural
+        && stock.conductive >= required.conductive
+        && stock.silicate >= required.silicate
+}
+
 #[cfg(test)]
 fn angle_distance(left: f64, right: f64) -> f64 {
     ((left - right + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
@@ -819,6 +1315,111 @@ mod tests {
         app.cycle_workspace(true);
         assert_eq!(app.workspace, Workspace::System);
         app.cycle_workspace(true);
-        assert_eq!(app.workspace, Workspace::Research);
+        assert_eq!(app.workspace, Workspace::Archive);
+
+        let mut completed = engine.planet().unwrap();
+        completed.system_map.available = true;
+        app.apply_planet(completed, Instant::now());
+        assert_eq!(app.workspace, Workspace::SystemMap);
+        app.cycle_workspace(false);
+        assert_eq!(app.workspace, Workspace::System);
+        app.cycle_workspace(true);
+        assert_eq!(app.workspace, Workspace::SystemMap);
+    }
+
+    #[test]
+    fn stale_planet_notifications_cannot_regress_authoritative_presentation() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let current = engine.planet().unwrap();
+        let current_revision = current.revision;
+        let current_objective = current.objective.title.clone();
+        let mut app = App::default();
+        app.apply_planet(current, Instant::now());
+
+        let mut stale = engine.planet().unwrap();
+        stale.revision = current_revision.saturating_sub(1);
+        stale.objective.title = "STALE DATA".into();
+        app.apply_planet(stale, Instant::now());
+
+        assert_eq!(app.planet.as_ref().unwrap().revision, current_revision);
+        assert_eq!(
+            app.planet.as_ref().unwrap().objective.title,
+            current_objective
+        );
+    }
+
+    #[test]
+    fn authoritative_return_to_onboarding_clears_previous_playthrough_views() {
+        let established = mind_core::engine::MindEngine::new(20);
+        established.complete_onboarding([2, 2, 2]);
+        established.trigger_diagnostic_pulse();
+        let fresh = mind_core::engine::MindEngine::new(20);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(established.status(), now);
+        app.apply_planet(established.planet().unwrap(), now);
+        app.workspace = Workspace::System;
+        app.pending_action = Some(ContextAction::Recall);
+
+        app.apply_snapshot(fresh.status(), now + Duration::from_millis(50));
+
+        assert!(app.onboarding_pending());
+        assert!(app.planet.is_none());
+        assert!(app.events.iter().all(|event| {
+            event.kind != mind_core::protocol::EngineEventKind::OnboardingCompleted
+        }));
+        assert_eq!(app.workspace, Workspace::Planet);
+        assert!(app.pending_action.is_none());
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("NEW PLAYTHROUGH READY // COHERENCE REQUIRED")
+        );
+    }
+
+    #[test]
+    fn failed_new_playthrough_keeps_menu_open_and_explains_rollback() {
+        let mut app = App::default();
+        app.begin_new_playthrough();
+
+        app.new_playthrough_completed(NewPlaythroughResult {
+            ok: false,
+            code: Some("persistence_failed".into()),
+        });
+
+        assert_eq!(app.session_menu, Some(SessionMenuState::Selecting));
+        assert!(app
+            .session_menu_message
+            .as_deref()
+            .is_some_and(|message| message.contains("unchanged")));
+    }
+
+    #[test]
+    fn local_field_gate_explains_foundation_and_regional_survey_requirements() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+
+        app.enter_local_view();
+        assert!(!app.local_view);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "LOCAL FIELD LOCKED // Build a relay, extend survey range, activate a research profile, then complete one automated operation."
+            )
+        );
+
+        let mut unlocked = engine.planet().unwrap();
+        unlocked.network.unlocked = true;
+        app.apply_planet(unlocked, now);
+        app.enter_local_view();
+        assert!(!app.local_view);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("LOCAL FIELD UNAVAILABLE // Complete a regional survey here first.")
+        );
     }
 }

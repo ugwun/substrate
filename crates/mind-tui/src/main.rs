@@ -2,8 +2,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mind_core::config::{load_or_create, ConfigOverrides};
+use mind_core::protocol::BaseModuleKind;
 use mind_tui::{
-    app::{App, ConnectionState, ContextAction, OnboardingView, Workspace},
+    app::{
+        App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
+        Workspace,
+    },
     connection::{self, ConnectionCommand, ConnectionUpdate},
     ui::{self, RenderOptions},
 };
@@ -63,6 +67,7 @@ async fn run_dashboard(
     options: RenderOptions,
 ) -> Result<()> {
     let mut app = App::default();
+    app.open_session_menu();
     let mut draw_interval = time::interval(Duration::from_millis(160));
     draw_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
@@ -100,6 +105,13 @@ async fn run_dashboard(
                     Some(ConnectionUpdate::OnboardingCompleted(result)) => {
                         app.onboarding_completed(result);
                     }
+                    Some(ConnectionUpdate::NewPlaythroughCompleted(result)) => {
+                        app.new_playthrough_completed(result);
+                    }
+                    Some(ConnectionUpdate::DaemonStopped) => return Ok(()),
+                    Some(ConnectionUpdate::LifecycleFailed(error)) => {
+                        app.lifecycle_failed(error);
+                    }
                     Some(ConnectionUpdate::PlanetActionCompleted(kind, result)) => {
                         app.planet_action_completed(kind, result);
                     }
@@ -124,6 +136,13 @@ async fn handle_key(
         return Ok(true);
     }
     app.record_input(std::time::Instant::now());
+    if app.session_menu.is_some() {
+        return handle_session_menu(app, key, commands).await;
+    }
+    if key.code == KeyCode::Char('q') {
+        app.open_session_menu();
+        return Ok(false);
+    }
     if app.show_return_summary {
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
             if let Some(activity_id) = app.dismiss_return_summary() {
@@ -145,7 +164,7 @@ async fn handle_key(
 
     if app.snapshot.is_none() {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+            KeyCode::Esc => app.open_session_menu(),
             KeyCode::Char('?') => app.show_help = true,
             KeyCode::Char('r') => {
                 commands
@@ -160,7 +179,6 @@ async fn handle_key(
 
     if app.onboarding_pending() {
         match key.code {
-            KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('?') => app.show_help = true,
             KeyCode::Char('r') => {
                 commands
@@ -171,6 +189,7 @@ async fn handle_key(
             KeyCode::Esc if app.onboarding_view == OnboardingView::Confirming => {
                 app.cancel_confirmation();
             }
+            KeyCode::Esc => app.open_session_menu(),
             KeyCode::Up if app.onboarding_view == OnboardingView::Adjusting => {
                 app.select_previous_band();
             }
@@ -205,7 +224,6 @@ async fn handle_key(
     }
 
     match key.code {
-        KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('r') if !matches!(app.connection, ConnectionState::Connected) => {
             commands
@@ -229,6 +247,53 @@ async fn handle_key(
                     .await
                     .context("connection worker stopped")?;
             }
+            Some(ContextAction::ExtractSubregion {
+                region_id,
+                subregion_id,
+            }) => {
+                commands
+                    .send(ConnectionCommand::DeployExtractorAt(
+                        region_id,
+                        subregion_id,
+                    ))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::EstablishBase(subregion_id)) => {
+                commands
+                    .send(ConnectionCommand::EstablishBase(subregion_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::MaintainBase(subregion_id)) => {
+                commands
+                    .send(ConnectionCommand::MaintainBase(subregion_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::ConstructBaseModule {
+                subregion_id,
+                module,
+            }) => {
+                commands
+                    .send(ConnectionCommand::ConstructBaseModule(subregion_id, module))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(ContextAction::SetBaseModuleEnabled {
+                subregion_id,
+                module,
+                enabled,
+            }) => {
+                commands
+                    .send(ConnectionCommand::SetBaseModuleEnabled(
+                        subregion_id,
+                        module,
+                        enabled,
+                    ))
+                    .await
+                    .context("connection worker stopped")?;
+            }
             Some(
                 ContextAction::QueueSurvey(_)
                 | ContextAction::RemoveQueuedSurvey(_)
@@ -240,6 +305,29 @@ async fn handle_key(
             _ => app.cancel_confirmation_action(),
         },
         _ if app.pending_action.is_some() => {}
+        KeyCode::Esc if app.workspace == Workspace::Planet && app.local_view => {
+            app.leave_local_view();
+        }
+        KeyCode::Esc => app.open_session_menu(),
+        KeyCode::Char('v') if app.workspace == Workspace::Planet => {
+            if app.local_view {
+                app.leave_local_view();
+            } else {
+                app.enter_local_view();
+            }
+        }
+        KeyCode::Left if app.workspace == Workspace::Planet && app.local_view => {
+            app.move_subregion_selection(0, -1);
+        }
+        KeyCode::Right if app.workspace == Workspace::Planet && app.local_view => {
+            app.move_subregion_selection(0, 1);
+        }
+        KeyCode::Up if app.workspace == Workspace::Planet && app.local_view => {
+            app.move_subregion_selection(-1, 0);
+        }
+        KeyCode::Down if app.workspace == Workspace::Planet && app.local_view => {
+            app.move_subregion_selection(1, 0);
+        }
         KeyCode::Left if app.workspace == Workspace::Planet => {
             app.move_selection(
                 0,
@@ -305,10 +393,29 @@ async fn handle_key(
             Some(ContextAction::ConstructRelay(region_id)) => {
                 app.request_confirmation(ContextAction::ConstructRelay(region_id));
             }
+            Some(ContextAction::SurveySubregion(subregion_id)) => {
+                commands
+                    .send(ConnectionCommand::SurveySubregion(subregion_id))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            Some(action @ ContextAction::ExtractSubregion { .. })
+            | Some(action @ ContextAction::EstablishBase(_)) => {
+                app.request_confirmation(action);
+            }
             _ => {}
         },
         KeyCode::Char('s') if app.workspace == Workspace::Planet => {
-            if let Some(ContextAction::Deploy(region_id)) = app.scout_action() {
+            if app.local_view {
+                if let Some(ContextAction::SurveySubregion(subregion_id)) =
+                    app.subregion_survey_action()
+                {
+                    commands
+                        .send(ConnectionCommand::SurveySubregion(subregion_id))
+                        .await
+                        .context("connection worker stopped")?;
+                }
+            } else if let Some(ContextAction::Deploy(region_id)) = app.scout_action() {
                 commands
                     .send(ConnectionCommand::DeployScout(region_id))
                     .await
@@ -316,13 +423,70 @@ async fn handle_key(
             }
         }
         KeyCode::Char('x') if app.workspace == Workspace::Planet => {
-            if let Some(ContextAction::Extract(region_id)) = app.extraction_action() {
+            if app.local_view {
+                if let Some(action @ ContextAction::ExtractSubregion { .. }) =
+                    app.subregion_extraction_action()
+                {
+                    app.request_confirmation(action);
+                }
+            } else if let Some(ContextAction::Extract(region_id)) = app.extraction_action() {
                 app.request_confirmation(ContextAction::Extract(region_id));
             }
         }
+        KeyCode::Char('g') if app.workspace == Workspace::Planet => {
+            if let Some(ContextAction::ConfigureExtractor(loadout)) = app.extractor_loadout_action()
+            {
+                commands
+                    .send(ConnectionCommand::ConfigureExtractor(loadout))
+                    .await
+                    .context("connection worker stopped")?;
+            }
+        }
         KeyCode::Char('b') if app.workspace == Workspace::Planet => {
-            if let Some(ContextAction::ConstructRelay(region_id)) = app.construction_action() {
+            if app.local_view {
+                if let Some(action @ ContextAction::EstablishBase(_)) =
+                    app.base_establishment_action()
+                {
+                    app.request_confirmation(action);
+                }
+            } else if let Some(ContextAction::ConstructRelay(region_id)) = app.construction_action()
+            {
                 app.request_confirmation(ContextAction::ConstructRelay(region_id));
+            }
+        }
+        KeyCode::Char(key @ ('p' | 'c' | 'd' | 'w' | 'l' | 'o'))
+            if app.workspace == Workspace::Planet && app.local_view =>
+        {
+            let module = match key {
+                'p' => BaseModuleKind::PowerArray,
+                'c' => BaseModuleKind::Communications,
+                'd' => BaseModuleKind::Depot,
+                'w' => BaseModuleKind::Workshop,
+                'l' => BaseModuleKind::Laboratory,
+                'o' => BaseModuleKind::Observatory,
+                _ => unreachable!(),
+            };
+            if let Some(ContextAction::SetBaseModuleEnabled {
+                subregion_id,
+                module,
+                enabled,
+            }) = app.base_module_mode_action(module)
+            {
+                commands
+                    .send(ConnectionCommand::SetBaseModuleEnabled(
+                        subregion_id,
+                        module,
+                        enabled,
+                    ))
+                    .await
+                    .context("connection worker stopped")?;
+            } else if let Some(action) = app.base_module_action(module) {
+                app.request_confirmation(action);
+            }
+        }
+        KeyCode::Char('m') if app.workspace == Workspace::Planet && app.local_view => {
+            if let Some(action) = app.base_maintenance_action() {
+                app.request_confirmation(action);
             }
         }
         KeyCode::Char('r') if app.workspace == Workspace::Planet => {
@@ -394,6 +558,23 @@ async fn handle_key(
             }
             .context("connection worker stopped")?;
         }
+        KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Archive => {
+            app.move_archive_selection(-1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::Archive => {
+            app.move_archive_selection(1);
+        }
+        KeyCode::Enter if app.workspace == Workspace::Archive => {
+            if matches!(
+                app.archive_experiment_action(),
+                Some(ContextAction::StartArchiveExperiment)
+            ) {
+                commands
+                    .send(ConnectionCommand::StartArchiveExperiment)
+                    .await
+                    .context("connection worker stopped")?;
+            }
+        }
         KeyCode::Char('d')
             if app.workspace == Workspace::System
                 && matches!(app.connection, ConnectionState::Connected) =>
@@ -418,6 +599,57 @@ async fn handle_key(
     Ok(false)
 }
 
+async fn handle_session_menu(
+    app: &mut App,
+    key: KeyEvent,
+    commands: &mpsc::Sender<ConnectionCommand>,
+) -> Result<bool> {
+    match app.session_menu {
+        Some(SessionMenuState::Selecting) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.close_session_menu(),
+            KeyCode::Up | KeyCode::Char('k') => app.move_session_menu_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.move_session_menu_selection(1),
+            KeyCode::Enter => match app.selected_session_menu_action() {
+                SessionMenuAction::Resume => app.close_session_menu(),
+                SessionMenuAction::Detach => return Ok(true),
+                SessionMenuAction::StopDaemon => {
+                    if matches!(app.connection, ConnectionState::Connected) {
+                        app.begin_daemon_stop();
+                        commands
+                            .send(ConnectionCommand::StopDaemon)
+                            .await
+                            .context("connection worker stopped")?;
+                    } else {
+                        app.session_action_unavailable();
+                    }
+                }
+                SessionMenuAction::NewPlaythrough => {
+                    if matches!(app.connection, ConnectionState::Connected) {
+                        app.confirm_new_playthrough();
+                    } else {
+                        app.session_action_unavailable();
+                    }
+                }
+            },
+            _ => {}
+        },
+        Some(SessionMenuState::ConfirmingNewPlaythrough) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.return_to_session_menu(),
+            KeyCode::Enter => {
+                app.begin_new_playthrough();
+                commands
+                    .send(ConnectionCommand::StartNewPlaythrough)
+                    .await
+                    .context("connection worker stopped")?;
+            }
+            _ => {}
+        },
+        Some(SessionMenuState::StartingNewPlaythrough | SessionMenuState::StoppingDaemon)
+        | None => {}
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,7 +664,7 @@ mod tests {
         );
         app.connected();
         app.band_positions = [4, 4, 4];
-        let (commands, mut received) = mpsc::channel(2);
+        let (commands, mut received) = mpsc::channel(3);
 
         handle_key(
             &mut app,
@@ -476,6 +708,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_menu_exposes_detach_stop_and_confirmed_new_playthrough() {
+        let mut app = App::default();
+        app.connected();
+        let (commands, mut received) = mpsc::channel(4);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.session_menu, Some(SessionMenuState::Selecting));
+
+        app.move_session_menu_selection(2);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.session_menu, Some(SessionMenuState::StoppingDaemon));
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::StopDaemon)
+        ));
+
+        app.return_to_session_menu();
+        app.session_menu_selection = 3;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            app.session_menu,
+            Some(SessionMenuState::ConfirmingNewPlaythrough)
+        );
+        assert!(received.try_recv().is_err());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            app.session_menu,
+            Some(SessionMenuState::StartingNewPlaythrough)
+        );
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::StartNewPlaythrough)
+        ));
+
+        app.return_to_session_menu();
+        app.session_menu_selection = 1;
+        assert!(handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn disconnected_session_menu_does_not_issue_lifecycle_actions() {
+        let mut app = App::default();
+        app.open_session_menu();
+        app.session_menu_selection = 2;
+        let (commands, mut received) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(app.session_menu, Some(SessionMenuState::Selecting));
+        assert!(app.session_menu_message.is_some());
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn planet_region_keys_send_typed_actions() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
@@ -483,6 +805,7 @@ mod tests {
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
         app.connected();
+        app.show_return_summary = false;
         app.move_selection(0, 1);
         let target = app.selected_region_id.clone().unwrap();
         let (commands, mut received) = mpsc::channel(2);
@@ -515,6 +838,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extractor_rig_key_sends_typed_configuration() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        let (commands, mut received) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::ConfigureExtractor(
+                mind_core::protocol::ExtractorLoadout::Cargo
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn archive_enter_starts_only_the_visible_typed_experiment() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let mut planet = engine.planet().unwrap();
+        planet.archive.experiment = Some(mind_core::protocol::ArchiveExperimentSnapshot {
+            available: true,
+            active: false,
+            running: false,
+            remaining_ms: 75_000,
+            phase_total_ms: 75_000,
+            status: "Recovered timing blocks are ready for a repeatable comparison.".into(),
+        });
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(planet, std::time::Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        app.workspace = Workspace::Archive;
+        let (commands, mut received) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::StartArchiveExperiment)
+        ));
+    }
+
+    #[tokio::test]
     async fn overview_enter_returns_to_the_selected_operation_region() {
         let engine = mind_core::engine::MindEngine::new(20);
         engine.complete_onboarding([4, 4, 4]);
@@ -530,6 +913,7 @@ mod tests {
         let mut app = App::default();
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.show_return_summary = false;
         app.workspace = Workspace::Overview;
         let (commands, mut received) = mpsc::channel(1);
         handle_key(
@@ -553,6 +937,7 @@ mod tests {
         app.apply_snapshot(engine.status(), std::time::Instant::now());
         app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
         app.connected();
+        app.show_return_summary = false;
         let start = app.selected_region().unwrap().position.clone();
         let (commands, _received) = mpsc::channel(1);
 
@@ -566,5 +951,65 @@ mod tests {
         let selected = &app.selected_region().unwrap().position;
         assert_eq!(selected.latitude_band, start.latitude_band);
         assert_eq!(selected.longitude_sector, (start.longitude_sector + 5) % 20);
+    }
+
+    #[tokio::test]
+    async fn confirmed_local_operations_send_only_typed_commands() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([4, 4, 4]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), std::time::Instant::now());
+        app.apply_planet(engine.planet().unwrap(), std::time::Instant::now());
+        app.connected();
+        app.show_return_summary = false;
+        let (commands, mut received) = mpsc::channel(2);
+
+        app.pending_action = Some(ContextAction::ExtractSubregion {
+            region_id: "region_082".into(),
+            subregion_id: "region_082_site_2".into(),
+        });
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::DeployExtractorAt(region, site))
+                if region == "region_082" && site == "region_082_site_2"
+        ));
+
+        app.pending_action = Some(ContextAction::MaintainBase("region_082_site_2".into()));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::MaintainBase(site)) if site == "region_082_site_2"
+        ));
+
+        app.pending_action = Some(ContextAction::SetBaseModuleEnabled {
+            subregion_id: "region_082_site_2".into(),
+            module: BaseModuleKind::Communications,
+            enabled: false,
+        });
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(ConnectionCommand::SetBaseModuleEnabled(site, BaseModuleKind::Communications, false))
+                if site == "region_082_site_2"
+        ));
     }
 }

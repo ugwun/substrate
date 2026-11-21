@@ -4,10 +4,11 @@ use mind_core::{
     engine::MindEngine,
     protocol::{
         self, failure, method, notification, success, AcknowledgeActivityParams,
-        ActivateProfileParams, CompleteOnboardingParams, ConstructRelayParams,
-        DeployExtractorParams, DeployScoutParams, PlanetNotification, RegionAutomationParams,
-        RpcRequest, StartResearchParams, StatusNotification, SubscribeResult, UnsubscribeParams,
-        JSONRPC_VERSION, MAX_FRAME_BYTES,
+        ActivateProfileParams, CompleteOnboardingParams, ConfigureExtractorParams,
+        ConstructBaseModuleParams, ConstructRelayParams, DeployExtractorParams, DeployScoutParams,
+        PlanetNotification, RegionAutomationParams, RpcRequest, SetBaseModuleEnabledParams,
+        StartResearchParams, StatusNotification, SubregionParams, SubscribeResult,
+        UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     runtime::RuntimeMetadata,
 };
@@ -219,6 +220,7 @@ impl Drop for ClientGuard {
 struct ClientSubscriptions {
     status: Option<Uuid>,
     planet: Option<Uuid>,
+    planet_revision: Option<u64>,
 }
 
 async fn handle_connection(
@@ -278,12 +280,16 @@ async fn handle_connection(
                     }
                 }
                 if let (Some(subscription_id), Some(planet)) = (subscriptions.planet, engine.planet()) {
-                    let params = PlanetNotification {
-                        subscription_id,
-                        planet,
-                    };
-                    if write_value(&writer, &notification(method::PLANET_CHANGED, params)).await.is_err() {
-                        break;
+                    if subscriptions.planet_revision != Some(planet.revision) {
+                        let revision = planet.revision;
+                        let params = PlanetNotification {
+                            subscription_id,
+                            planet,
+                        };
+                        if write_value(&writer, &notification(method::PLANET_CHANGED, params)).await.is_err() {
+                            break;
+                        }
+                        subscriptions.planet_revision = Some(revision);
                     }
                 }
             }
@@ -322,6 +328,9 @@ async fn dispatch_frame(
     let (response, shutdown) = match request.method.as_str() {
         method::PING => (success(request.id, protocol::PingResult::current()), false),
         method::GET_STATUS => (success(request.id, engine.status()), false),
+        method::START_NEW_PLAYTHROUGH => {
+            (success(request.id, engine.start_new_playthrough()), false)
+        }
         method::TRIGGER_DIAGNOSTIC_PULSE => (
             success(request.id, engine.trigger_diagnostic_pulse()),
             false,
@@ -370,7 +379,11 @@ async fn dispatch_frame(
                 .and_then(|value| serde_json::from_value::<DeployExtractorParams>(value).ok());
             match params {
                 Some(params) => (
-                    success(request.id, engine.deploy_extractor(&params.region_id)),
+                    success(
+                        request.id,
+                        engine
+                            .deploy_extractor_at(&params.region_id, params.subregion_id.as_deref()),
+                    ),
                     false,
                 ),
                 None => (
@@ -378,6 +391,25 @@ async fn dispatch_frame(
                         request.id,
                         -32602,
                         "invalid extractor deployment parameters",
+                    ),
+                    false,
+                ),
+            }
+        }
+        method::CONFIGURE_EXTRACTOR => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<ConfigureExtractorParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(request.id, engine.configure_extractor(params.loadout)),
+                    false,
+                ),
+                None => (
+                    failure(
+                        request.id,
+                        -32602,
+                        "invalid extractor configuration parameters",
                     ),
                     false,
                 ),
@@ -398,6 +430,66 @@ async fn dispatch_frame(
                 ),
             }
         }
+        method::SURVEY_SUBREGION | method::ESTABLISH_BASE | method::MAINTAIN_BASE => {
+            let method_name = request.method.clone();
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<SubregionParams>(value).ok());
+            match params {
+                Some(params) => {
+                    let result = match method_name.as_str() {
+                        method::SURVEY_SUBREGION => engine.survey_subregion(&params.subregion_id),
+                        method::ESTABLISH_BASE => engine.establish_base(&params.subregion_id),
+                        _ => engine.maintain_base(&params.subregion_id),
+                    };
+                    (success(request.id, result), false)
+                }
+                None => (
+                    failure(request.id, -32602, "invalid subregion parameters"),
+                    false,
+                ),
+            }
+        }
+        method::CONSTRUCT_BASE_MODULE => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<ConstructBaseModuleParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(
+                        request.id,
+                        engine.construct_base_module(&params.subregion_id, params.module),
+                    ),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid base module parameters"),
+                    false,
+                ),
+            }
+        }
+        method::SET_BASE_MODULE_ENABLED => {
+            let params = request
+                .params
+                .and_then(|value| serde_json::from_value::<SetBaseModuleEnabledParams>(value).ok());
+            match params {
+                Some(params) => (
+                    success(
+                        request.id,
+                        engine.set_base_module_enabled(
+                            &params.subregion_id,
+                            params.module,
+                            params.enabled,
+                        ),
+                    ),
+                    false,
+                ),
+                None => (
+                    failure(request.id, -32602, "invalid base module mode parameters"),
+                    false,
+                ),
+            }
+        }
         method::START_RESEARCH => {
             let params = request
                 .params
@@ -413,6 +505,10 @@ async fn dispatch_frame(
                 ),
             }
         }
+        method::START_ARCHIVE_EXPERIMENT => (
+            success(request.id, engine.start_archive_experiment()),
+            false,
+        ),
         method::ACTIVATE_PROFILE => {
             let params = request
                 .params
@@ -501,22 +597,35 @@ async fn dispatch_frame(
                 ),
             }
         }
-        method::SUBSCRIBE_PLANET => {
-            if engine.planet().is_none() {
-                (failure(request.id, -32010, "onboarding required"), false)
-            } else {
-                let id = subscriptions.planet.get_or_insert_with(Uuid::new_v4);
-                (
-                    success(
-                        request.id,
-                        SubscribeResult {
-                            subscription_id: *id,
-                        },
-                    ),
-                    false,
-                )
+        method::SUBSCRIBE_PLANET => match engine.planet() {
+            None => (failure(request.id, -32010, "onboarding required"), false),
+            Some(planet) => {
+                if let Some(id) = subscriptions.planet {
+                    (
+                        success(
+                            request.id,
+                            SubscribeResult {
+                                subscription_id: id,
+                            },
+                        ),
+                        false,
+                    )
+                } else {
+                    let id = Uuid::new_v4();
+                    subscriptions.planet = Some(id);
+                    subscriptions.planet_revision = Some(planet.revision);
+                    (
+                        success(
+                            request.id,
+                            SubscribeResult {
+                                subscription_id: id,
+                            },
+                        ),
+                        false,
+                    )
+                }
             }
-        }
+        },
         method::UNSUBSCRIBE_PLANET => {
             let params = request
                 .params
@@ -526,6 +635,7 @@ async fn dispatch_frame(
                     let removed = subscriptions.planet.as_ref() == Some(&params.subscription_id);
                     if removed {
                         subscriptions.planet = None;
+                        subscriptions.planet_revision = None;
                     }
                     (success(request.id, removed), false)
                 }

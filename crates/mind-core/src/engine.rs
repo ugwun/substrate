@@ -1,8 +1,9 @@
 use crate::{
     game::{GameAdvanceEvent, GameError, GameState, LoadDisposition},
     protocol::{
-        DiagnosticPulseResult, EngineEvent, EngineEventKind, HealthState,
-        OnboardingCompletionResult, PlanetActionResult, PlanetSnapshot, StatusSnapshot,
+        DiagnosticPulseResult, EngineEvent, EngineEventKind, ExtractorLoadout, HealthState,
+        NewPlaythroughResult, OnboardingCompletionResult, PlanetActionResult, PlanetSnapshot,
+        StatusSnapshot,
     },
     PROTOCOL_VERSION,
 };
@@ -73,6 +74,11 @@ impl MindEngine {
             engine.record_event(
                 EngineEventKind::SaveReset,
                 "Previous alpha save reset for the expanded planetary model",
+            );
+        } else if disposition == LoadDisposition::PreviousMigrated {
+            engine.record_event(
+                EngineEventKind::SaveMigrated,
+                "Planetary save migrated to the current schema",
             );
         }
         Ok(engine)
@@ -153,9 +159,41 @@ impl MindEngine {
                                 EngineEventKind::AlphaMilestoneCompleted,
                                 "Extended reach proven by a completed survey",
                             ),
-                            GameAdvanceEvent::AlphaSliceCompleted => (
-                                EngineEventKind::AlphaSliceCompleted,
-                                "Research specialization and earned automation proven",
+                            GameAdvanceEvent::FoundationCompleted => (
+                                EngineEventKind::FoundationCompleted,
+                                "Routine automation proven; planetary network planning available",
+                            ),
+                            GameAdvanceEvent::SubregionSurveyed => (
+                                EngineEventKind::SubregionSurveyed,
+                                "Focused local survey completed",
+                            ),
+                            GameAdvanceEvent::BaseEstablished => (
+                                EngineEventKind::BaseEstablished,
+                                "Planetary foothold established",
+                            ),
+                            GameAdvanceEvent::BaseModuleCompleted => (
+                                EngineEventKind::BaseModuleCompleted,
+                                "Base module construction completed",
+                            ),
+                            GameAdvanceEvent::BaseMaintained => (
+                                EngineEventKind::BaseMaintained,
+                                "Base maintenance cycle completed",
+                            ),
+                            GameAdvanceEvent::BaseStrained => (
+                                EngineEventKind::BaseStrained,
+                                "A base reached an environmental strain threshold",
+                            ),
+                            GameAdvanceEvent::SolarHorizonReached => (
+                                EngineEventKind::SolarHorizonReached,
+                                "Solar horizon reached; system map is available",
+                            ),
+                            GameAdvanceEvent::ArchiveExperimentCompleted => (
+                                EngineEventKind::ArchiveExperimentCompleted,
+                                "Archive comparison experiment completed",
+                            ),
+                            GameAdvanceEvent::ArchiveObservationRecorded => (
+                                EngineEventKind::ArchiveObservationRecorded,
+                                "Permanent archive observation recorded",
                             ),
                             GameAdvanceEvent::ResearchCompleted => (
                                 EngineEventKind::ResearchCompleted,
@@ -297,6 +335,47 @@ impl MindEngine {
         result
     }
 
+    pub fn start_new_playthrough(&self) -> NewPlaythroughResult {
+        let _persistence_write = self
+            .game_state_file
+            .as_ref()
+            .map(|_| self.persistence_write());
+        let mut state = self.game();
+        let mut candidate = GameState::new_playthrough_after(state.state_revision());
+        if let Some(path) = &self.game_state_file {
+            if let Err(error) = candidate.save(path) {
+                drop(state);
+                self.set_persistence_error(Some(error.to_string()));
+                return NewPlaythroughResult {
+                    ok: false,
+                    code: Some("persistence_failed".into()),
+                };
+            }
+            if let Some(generation) = candidate.dirty_generation() {
+                candidate.mark_saved(generation);
+            }
+        }
+        *state = candidate;
+        drop(state);
+        self.set_persistence_error(None);
+
+        {
+            let mut history = self.history();
+            history.next_event_id = 1;
+            history.next_pulse_id = 1;
+            history.events.clear();
+            history.last_diagnostic = None;
+        }
+        self.record_event(
+            EngineEventKind::SaveReset,
+            "New playthrough created; onboarding is ready",
+        );
+        NewPlaythroughResult {
+            ok: true,
+            code: None,
+        }
+    }
+
     pub fn planet(&self) -> Option<PlanetSnapshot> {
         self.game().planet_snapshot()
     }
@@ -365,13 +444,29 @@ impl MindEngine {
     }
 
     pub fn deploy_extractor(&self, region_id: &str) -> PlanetActionResult {
+        self.deploy_extractor_at(region_id, None)
+    }
+
+    pub fn configure_extractor(&self, loadout: ExtractorLoadout) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.configure_extractor(loadout),
+            EngineEventKind::ExtractorConfigured,
+            "Extraction rig reconfigured",
+        )
+    }
+
+    pub fn deploy_extractor_at(
+        &self,
+        region_id: &str,
+        subregion_id: Option<&str>,
+    ) -> PlanetActionResult {
         let _persistence_write = self
             .game_state_file
             .as_ref()
             .map(|_| self.persistence_write());
         let mut state = self.game();
         let mut candidate = state.clone();
-        let mut result = candidate.deploy_extractor(region_id);
+        let mut result = candidate.deploy_extractor_at(region_id, subregion_id);
         if !result.ok {
             return result;
         }
@@ -395,6 +490,59 @@ impl MindEngine {
             "Extraction deployment launched",
         );
         result
+    }
+
+    pub fn survey_subregion(&self, subregion_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.survey_subregion(subregion_id),
+            EngineEventKind::SubregionSurveyed,
+            "Focused local survey started",
+        )
+    }
+
+    pub fn establish_base(&self, subregion_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.establish_base(subregion_id),
+            EngineEventKind::BaseProjectStarted,
+            "Planetary foothold project started",
+        )
+    }
+
+    pub fn construct_base_module(
+        &self,
+        subregion_id: &str,
+        module: crate::protocol::BaseModuleKind,
+    ) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.construct_base_module(subregion_id, module),
+            EngineEventKind::BaseProjectStarted,
+            "Base module project started",
+        )
+    }
+
+    pub fn set_base_module_enabled(
+        &self,
+        subregion_id: &str,
+        module: crate::protocol::BaseModuleKind,
+        enabled: bool,
+    ) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.set_base_module_enabled(subregion_id, module, enabled),
+            EngineEventKind::BaseModuleModeChanged,
+            if enabled {
+                "Base module restored"
+            } else {
+                "Base module suspended"
+            },
+        )
+    }
+
+    pub fn maintain_base(&self, subregion_id: &str) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.maintain_base(subregion_id),
+            EngineEventKind::BaseProjectStarted,
+            "Base maintenance project started",
+        )
     }
 
     pub fn construct_relay(&self, region_id: &str) -> PlanetActionResult {
@@ -435,6 +583,14 @@ impl MindEngine {
             |state| state.start_research(project),
             EngineEventKind::ResearchStarted,
             "Research direction committed",
+        )
+    }
+
+    pub fn start_archive_experiment(&self) -> PlanetActionResult {
+        self.commit_planet_action(
+            |state| state.start_archive_experiment(),
+            EngineEventKind::ArchiveExperimentStarted,
+            "Archive comparison experiment started",
         )
     }
 
@@ -671,7 +827,7 @@ mod tests {
         let completed = engine.complete_onboarding([4, 4, 4]);
         assert!(completed.ok);
         assert!(engine.status().onboarding.complete);
-        assert_eq!(engine.complete_onboarding([0, 0, 0]).state_revision, 1);
+        assert_eq!(engine.complete_onboarding([0, 0, 0]).state_revision, 2);
         let events = engine
             .status()
             .recent_events
@@ -693,6 +849,64 @@ mod tests {
             .filter(|event| event.kind == EngineEventKind::ShutdownRequested)
             .count();
         assert_eq!(shutdown_events, 1);
+    }
+
+    #[test]
+    fn new_playthrough_replaces_and_persists_progress_atomically() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("data/game_state.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let engine = MindEngine::persistent(
+            20,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7777),
+            path.clone(),
+        )
+        .unwrap();
+        let completed = engine.complete_onboarding([3, 3, 3]);
+        engine.trigger_diagnostic_pulse();
+
+        let result = engine.start_new_playthrough();
+
+        assert!(result.ok);
+        assert!(!engine.status().onboarding.complete);
+        assert!(engine.planet().is_none());
+        assert!(engine.status().last_diagnostic.is_none());
+        assert_eq!(engine.status().recent_events.len(), 1);
+        assert_eq!(
+            engine.status().recent_events[0].kind,
+            EngineEventKind::SaveReset
+        );
+        let loaded = GameState::load(&path).unwrap();
+        assert!(!loaded.state.onboarding().complete);
+        assert!(
+            loaded.state.state_revision() > completed.state_revision,
+            "the reset revision must remain monotonic for attached clients"
+        );
+    }
+
+    #[test]
+    fn new_playthrough_rolls_back_when_persistence_fails() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let path = data.join("game_state.json");
+        let engine = MindEngine::persistent(
+            20,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7777),
+            path.clone(),
+        )
+        .unwrap();
+        assert!(engine.complete_onboarding([3, 3, 3]).ok);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(data).unwrap();
+
+        let result = engine.start_new_playthrough();
+
+        assert!(!result.ok);
+        assert_eq!(result.code.as_deref(), Some("persistence_failed"));
+        assert!(engine.status().onboarding.complete);
+        assert!(engine.planet().is_some());
+        assert_eq!(engine.status().health, HealthState::Degraded);
     }
 
     #[test]

@@ -403,7 +403,7 @@ mod tests {
             .to_string();
         assert!(message.contains("older mind daemon"));
         assert!(message.contains("mind-cli daemon stop"));
-        assert!(message.contains("protocol 5"));
-        assert!(message.contains("protocol 6"));
+        assert!(message.contains(&format!("protocol {}", PROTOCOL_VERSION - 1)));
+        assert!(message.contains(&format!("protocol {PROTOCOL_VERSION}")));
     }
 }

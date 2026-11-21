@@ -1,7 +1,7 @@
 use mind_core::{
     config::{AppPaths, Config},
     ipc::{IpcClient, IpcNotification},
-    protocol::{OperationalProfile, ResearchProject, ScoutState},
+    protocol::{BaseModuleKind, ExtractorLoadout, OperationalProfile, ResearchProject, ScoutState},
     runtime::RuntimeMetadata,
 };
 use std::{net::SocketAddr, time::Duration};
@@ -65,6 +65,11 @@ async fn serves_status_subscription_and_shutdown() {
     assert_eq!(planet.latitude_bands, 10);
     assert_eq!(planet.longitude_sectors, 20);
     assert_eq!(planet.regions.len(), 200);
+    assert_eq!(planet.archive.records.len(), 1);
+    assert!(planet.archive.experiment.is_none());
+    let public_planet = serde_json::to_string(&planet).unwrap();
+    assert!(!public_planet.contains("archive_comparison_region_ids"));
+    assert!(!public_planet.contains("active_archive_experiment"));
     let target = planet
         .regions
         .iter()
@@ -72,6 +77,26 @@ async fn serves_status_subscription_and_shutdown() {
         .unwrap()
         .id
         .clone();
+    assert!(
+        client
+            .configure_extractor(ExtractorLoadout::Cargo)
+            .await
+            .unwrap()
+            .ok
+    );
+    assert_eq!(
+        client.planet().await.unwrap().extractor.loadout,
+        ExtractorLoadout::Cargo
+    );
+    assert_eq!(
+        client
+            .configure_extractor(ExtractorLoadout::Cargo)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("loadout_already_configured")
+    );
     let subscription_id = client.subscribe_status().await.unwrap();
     let planet_subscription_id = client.subscribe_planet().await.unwrap();
     assert_eq!(
@@ -100,6 +125,15 @@ async fn serves_status_subscription_and_shutdown() {
             .code
             .as_deref(),
         Some("research_locked")
+    );
+    assert_eq!(
+        client
+            .start_archive_experiment()
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("archive_observation_required")
     );
     assert_eq!(
         client
@@ -146,6 +180,15 @@ async fn serves_status_subscription_and_shutdown() {
             .as_deref(),
         Some("no_extraction_route")
     );
+    assert_eq!(
+        client
+            .set_base_module_enabled(target.clone(), BaseModuleKind::Communications, false)
+            .await
+            .unwrap()
+            .code
+            .as_deref(),
+        Some("base_required")
+    );
     assert!(client.acknowledge_activity(0).await.unwrap().ok);
     assert!(client.deploy_scout(target).await.unwrap().ok);
     let pulse = client.trigger_diagnostic_pulse().await.unwrap();
@@ -186,6 +229,42 @@ async fn serves_status_subscription_and_shutdown() {
         .unwrap()
         .unwrap();
     assert!(RuntimeMetadata::read(&runtime_file).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn creates_a_fresh_playthrough_over_ipc_without_stopping_the_daemon() {
+    let temp = TempDir::new().unwrap();
+    let paths = paths(&temp);
+    paths.ensure_directories().unwrap();
+    let config = Config {
+        address: "127.0.0.1:0".parse().unwrap(),
+        mcp_address: "127.0.0.1:0".parse().unwrap(),
+        tick_rate_hz: 100,
+        status_publish_interval_ms: 50,
+    };
+    let runtime_file = paths.runtime_file.clone();
+    let game_state_file = paths.game_state_file.clone();
+    let daemon = tokio::spawn(mind_daemon::run(config, paths));
+    let metadata = wait_for_metadata(&runtime_file).await;
+    let mut client = IpcClient::connect(metadata.address).await.unwrap();
+    assert!(client.complete_onboarding([3, 3, 3]).await.unwrap().ok);
+    let previous_revision = client.planet().await.unwrap().revision;
+
+    let result = client.start_new_playthrough().await.unwrap();
+
+    assert!(result.ok);
+    assert!(!client.status().await.unwrap().onboarding.complete);
+    assert!(client.planet().await.is_err());
+    let loaded = mind_core::game::GameState::load(&game_state_file).unwrap();
+    assert!(!loaded.state.onboarding().complete);
+    assert!(loaded.state.state_revision() > previous_revision);
+    assert!(client.shutdown().await.unwrap());
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), daemon)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

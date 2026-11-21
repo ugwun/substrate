@@ -15,6 +15,7 @@ pub mod method {
     pub const SUBSCRIBE_STATUS: &str = "mind.subscribe_status";
     pub const UNSUBSCRIBE_STATUS: &str = "mind.unsubscribe_status";
     pub const SHUTDOWN: &str = "daemon.shutdown";
+    pub const START_NEW_PLAYTHROUGH: &str = "mind.start_new_playthrough";
     pub const TRIGGER_DIAGNOSTIC_PULSE: &str = "mind.trigger_diagnostic_pulse";
     pub const COMPLETE_ONBOARDING: &str = "mind.complete_onboarding";
     pub const GET_PLANET: &str = "mind.get_planet";
@@ -23,6 +24,7 @@ pub mod method {
     pub const DEPLOY_SCOUT: &str = "mind.deploy_scout";
     pub const RECALL_SCOUT: &str = "mind.recall_scout";
     pub const DEPLOY_EXTRACTOR: &str = "mind.deploy_extractor";
+    pub const CONFIGURE_EXTRACTOR: &str = "mind.configure_extractor";
     pub const CONSTRUCT_RELAY: &str = "mind.construct_relay";
     pub const START_RESEARCH: &str = "mind.start_research";
     pub const ACTIVATE_PROFILE: &str = "mind.activate_profile";
@@ -31,6 +33,12 @@ pub mod method {
     pub const SET_EXTRACTION_ROUTE: &str = "mind.set_extraction_route";
     pub const CLEAR_EXTRACTION_ROUTE: &str = "mind.clear_extraction_route";
     pub const ACKNOWLEDGE_ACTIVITY: &str = "mind.acknowledge_activity";
+    pub const SURVEY_SUBREGION: &str = "mind.survey_subregion";
+    pub const ESTABLISH_BASE: &str = "mind.establish_base";
+    pub const CONSTRUCT_BASE_MODULE: &str = "mind.construct_base_module";
+    pub const SET_BASE_MODULE_ENABLED: &str = "mind.set_base_module_enabled";
+    pub const MAINTAIN_BASE: &str = "mind.maintain_base";
+    pub const START_ARCHIVE_EXPERIMENT: &str = "mind.start_archive_experiment";
     pub const STATUS_CHANGED: &str = "mind.status_changed";
     pub const PLANET_CHANGED: &str = "mind.planet_changed";
 }
@@ -81,13 +89,22 @@ pub enum EngineEventKind {
     ScoutRecallRequested,
     ScoutReturned,
     ExtractorDeployed,
+    ExtractorConfigured,
     ExtractionCompleted,
     ExtractorLost,
     ExtractorRebuilt,
     RelayConstructionStarted,
     RelayActivated,
     AlphaMilestoneCompleted,
-    AlphaSliceCompleted,
+    FoundationCompleted,
+    SubregionSurveyed,
+    BaseProjectStarted,
+    BaseEstablished,
+    BaseModuleCompleted,
+    BaseModuleModeChanged,
+    BaseMaintained,
+    BaseStrained,
+    SolarHorizonReached,
     ResearchStarted,
     ResearchCompleted,
     ProfileActivated,
@@ -95,6 +112,9 @@ pub enum EngineEventKind {
     ExtractionRouteSet,
     AutomationPaused,
     ActivityReviewed,
+    ArchiveExperimentStarted,
+    ArchiveExperimentCompleted,
+    ArchiveObservationRecorded,
     PersistenceDegraded,
     PersistenceRecovered,
     ShutdownRequested,
@@ -192,6 +212,87 @@ pub enum RiskLevel {
     High,
 }
 
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SubregionKnowledge {
+    Unknown,
+    Detected,
+    Surveyed,
+    Observed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubregionClass {
+    ShelteredShelf,
+    BasinFloor,
+    OpenPlain,
+    ExposedRidge,
+    FractureField,
+    PolarMargin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseModuleKind {
+    PowerArray,
+    Communications,
+    Depot,
+    Workshop,
+    Laboratory,
+    Observatory,
+}
+
+impl BaseModuleKind {
+    pub const fn cost(self) -> ResourceStock {
+        match self {
+            Self::PowerArray => ResourceStock {
+                structural: 6,
+                conductive: 5,
+                silicate: 4,
+            },
+            Self::Communications => ResourceStock {
+                structural: 4,
+                conductive: 8,
+                silicate: 3,
+            },
+            Self::Depot => ResourceStock {
+                structural: 8,
+                conductive: 4,
+                silicate: 4,
+            },
+            Self::Workshop => ResourceStock {
+                structural: 10,
+                conductive: 6,
+                silicate: 6,
+            },
+            Self::Laboratory => ResourceStock {
+                structural: 6,
+                conductive: 10,
+                silicate: 8,
+            },
+            Self::Observatory => ResourceStock {
+                structural: 8,
+                conductive: 12,
+                silicate: 12,
+            },
+        }
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::PowerArray => "Power array",
+            Self::Communications => "Communications relay",
+            Self::Depot => "Regional depot",
+            Self::Workshop => "Field workshop",
+            Self::Laboratory => "Analysis laboratory",
+            Self::Observatory => "Observation array",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractorState {
@@ -200,6 +301,75 @@ pub enum ExtractorState {
     Extracting,
     Returning,
     Rebuilding,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractorLoadout {
+    #[default]
+    Balanced,
+    Cargo,
+    Shielded,
+}
+
+impl ExtractorLoadout {
+    pub const ALL: [Self; 3] = [Self::Balanced, Self::Cargo, Self::Shielded];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced rig",
+            Self::Cargo => "Cargo rig",
+            Self::Shielded => "Shielded rig",
+        }
+    }
+
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::Balanced => "standard capacity, exposure, and cycle time",
+            Self::Cargo => "+2 cargo, one higher risk tier, 25% slower travel",
+            Self::Shielded => "-1 cargo, one lower risk tier, 50% slower travel",
+        }
+    }
+
+    pub const fn cargo_delta(self) -> i32 {
+        match self {
+            Self::Balanced => 0,
+            Self::Cargo => 2,
+            Self::Shielded => -1,
+        }
+    }
+
+    pub const fn travel_percent(self) -> u64 {
+        match self {
+            Self::Balanced => 100,
+            Self::Cargo => 125,
+            Self::Shielded => 150,
+        }
+    }
+
+    pub const fn extraction_duration_ms(self) -> u64 {
+        match self {
+            Self::Balanced => 30_000,
+            Self::Cargo => 35_000,
+            Self::Shielded => 40_000,
+        }
+    }
+
+    pub const fn rebuild_duration_ms(self) -> u64 {
+        match self {
+            Self::Balanced => 60_000,
+            Self::Cargo => 75_000,
+            Self::Shielded => 90_000,
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Balanced => Self::Cargo,
+            Self::Cargo => Self::Shielded,
+            Self::Shielded => Self::Balanced,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -272,17 +442,21 @@ pub struct ExtractionProbeSnapshot {
     pub designation: String,
     pub state: ExtractorState,
     pub rebuild_remaining_ms: u64,
+    pub loadout: ExtractorLoadout,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ActiveExtractionSnapshot {
     pub mission_id: u64,
     pub target_region_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_subregion_id: Option<String>,
     pub phase: ExtractorState,
     pub remaining_ms: u64,
     pub phase_total_ms: u64,
     pub risk: RiskLevel,
     pub cargo_capacity: u32,
+    pub loadout: ExtractorLoadout,
     pub automated: bool,
 }
 
@@ -298,6 +472,137 @@ pub struct ObjectiveSnapshot {
     pub title: String,
     pub guidance: String,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SystemMapSnapshot {
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ArchiveRecordSnapshot {
+    pub record_id: String,
+    pub title: String,
+    pub medium: String,
+    pub observation: String,
+    pub interpretation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_id: Option<String>,
+    pub discovered_at_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ArchiveExperimentSnapshot {
+    pub available: bool,
+    pub active: bool,
+    pub running: bool,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ArchiveSnapshot {
+    pub records: Vec<ArchiveRecordSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment: Option<ArchiveExperimentSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SubregionSnapshot {
+    pub id: String,
+    pub designation: String,
+    pub region_id: String,
+    pub slot: u8,
+    pub row: u8,
+    pub column: u8,
+    pub knowledge: SubregionKnowledge,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<SubregionClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hazard: Option<RiskLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_yield: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit: Option<DepositSnapshot>,
+    pub base_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BaseModuleSnapshot {
+    pub kind: BaseModuleKind,
+    pub enabled: bool,
+    pub active: bool,
+    pub generation: u32,
+    pub demand: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BaseSnapshot {
+    pub id: String,
+    pub designation: String,
+    pub region_id: String,
+    pub subregion_id: String,
+    pub integrity: u32,
+    pub generation: u32,
+    pub demand: u32,
+    pub stored_energy: u32,
+    pub energy_capacity: u32,
+    pub connected: bool,
+    pub modules: Vec<BaseModuleSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BaseProjectSnapshot {
+    pub project_id: u64,
+    pub region_id: String,
+    pub subregion_id: String,
+    pub module: Option<BaseModuleKind>,
+    pub maintenance: bool,
+    pub logistics_supported: bool,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+    pub cost: ResourceStock,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SiteSurveySnapshot {
+    pub subregion_id: String,
+    pub remaining_ms: u64,
+    pub phase_total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct HorizonProgressSnapshot {
+    pub surveyed_regions: usize,
+    pub required_regions: usize,
+    pub surveyed_subregions: usize,
+    pub required_subregions: usize,
+    pub connected_bases: usize,
+    pub required_bases: usize,
+    pub remote_bases: usize,
+    pub required_remote_bases: usize,
+    pub observation_sites: usize,
+    pub required_observation_sites: usize,
+    pub analysis_sites: usize,
+    pub required_analysis_sites: usize,
+    pub completed_research: usize,
+    pub required_research: usize,
+    pub automation_proven: bool,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanetaryNetworkSnapshot {
+    pub unlocked: bool,
+    pub subregion_rows: u8,
+    pub subregion_columns: u8,
+    pub subregions: Vec<SubregionSnapshot>,
+    pub bases: Vec<BaseSnapshot>,
+    pub active_projects: Vec<BaseProjectSnapshot>,
+    pub active_site_survey: Option<SiteSurveySnapshot>,
+    pub project_capacity: usize,
+    pub horizon: HorizonProgressSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -407,6 +712,9 @@ pub struct PlanetSnapshot {
     pub extraction_route: ExtractionRouteSnapshot,
     pub unreviewed_activity: Vec<ActivityRecord>,
     pub objective: ObjectiveSnapshot,
+    pub archive: ArchiveSnapshot,
+    pub system_map: SystemMapSnapshot,
+    pub network: PlanetaryNetworkSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -417,6 +725,31 @@ pub struct DeployScoutParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct DeployExtractorParams {
     pub region_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subregion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigureExtractorParams {
+    pub loadout: ExtractorLoadout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SubregionParams {
+    pub subregion_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConstructBaseModuleParams {
+    pub subregion_id: String,
+    pub module: BaseModuleKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SetBaseModuleEnabledParams {
+    pub subregion_id: String,
+    pub module: BaseModuleKind,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -466,6 +799,13 @@ pub struct OnboardingCompletionResult {
     pub code: Option<String>,
     pub state_revision: u64,
     pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NewPlaythroughResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

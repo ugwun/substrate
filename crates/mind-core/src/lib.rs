@@ -9,4 +9,4 @@ pub mod runtime;
 
 pub const DAEMON_BINARY: &str = "mind-daemon";
 pub const TUI_BINARY: &str = "mind-tui";
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 13;

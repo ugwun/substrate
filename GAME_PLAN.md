@@ -189,12 +189,21 @@ This distinction permits meaningful setbacks without making rare discoveries
 repeatable chores. A canonical main save must not use a prestige reset that erases
 knowledge or requires the player to rediscover it.
 
+A player may deliberately create a separate new playthrough from the session menu. This
+is a confirmed whole-save replacement that returns to onboarding, not a progression
+mechanic, reward multiplier, or required loop within the canonical journey.
+
 ## 5. Interface Contract
 
 Substrate is a keyboard-first graphical TUI. Mouse support may arrive later, but no
 core action may depend on it. Common actions should use selection and contextual
 controls, every screen should provide help, unavailable actions should explain their
 blockers, and destructive actions should require a clear confirmation.
+
+Launch into a clear session menu that distinguishes continuing from detaching while the
+daemon remains active, gracefully saving and stopping all services, and deliberately
+creating a new playthrough. New-playthrough creation must receive a separate destructive
+confirmation and must leave existing progress intact if fresh state cannot be persisted.
 
 ### Visual direction
 
@@ -220,12 +229,14 @@ The workspace model is:
 - **Research:** available directions, requirements, active work, completed knowledge,
   and operational profiles.
 - **System:** connection state, daemon telemetry, diagnostics, and engine events.
-- **Archive:** a future permanent record of approved discoveries and their
-  player-visible context.
+- **System Map:** the current demo's concluding, read-only local-system observation
+  frame; it remains hidden until its daemon-owned milestone and exposes no later action.
+- **Archive:** the implemented permanent record of approved discoveries, keeping
+  player-visible observations distinct from their current interpretations.
 
-When subregions are introduced, Planet should provide the transition between the
-globe-scale region and its local view without creating a separate command model or
-duplicating regional actions in Overview.
+Planet provides the transition between the globe-scale region and its spatial local
+field without creating a separate command model or duplicating regional actions in
+Overview.
 
 ### Presentation requirements
 
@@ -238,7 +249,8 @@ The interface should preserve:
 - immediate player control on the next input;
 - distinct textual and symbolic state cues rather than color alone;
 - wide, narrow, ASCII, monochrome, disconnected, stale, and reconnecting states;
-- terminal restoration and detach-without-shutdown behavior.
+- terminal restoration, detach-without-shutdown behavior, and explicit graceful
+  save-and-stop behavior.
 
 ## 6. Story and Discovery
 
@@ -308,7 +320,8 @@ without penalty.
   reconnects and restarts.
 - Transport remains local-only unless the security model is deliberately redesigned.
 - The attach-only TUI reconnects automatically, marks retained snapshots as stale, and
-  never stops the daemon when it detaches.
+  never stops the daemon when it detaches. It may request daemon-owned graceful shutdown
+  or atomic new-playthrough creation only through explicit session-menu actions.
 - Linux is the current acceptance target while paths and process behavior remain
   portable enough for later platform validation.
 
@@ -318,53 +331,70 @@ repository skills.
 
 ## 9. Roadmap
 
-### Current: first playable alpha
+### Current: multi-hour planetary demo
 
-The repository has completed Phase 0's technical foundation and Phase 1's first
-globe-survey loop. It also contains focused slices of Phase 2's geological economy and
-Phase 3's research and loss systems:
+The repository has completed Phase 0's technical foundation, Phase 1's globe-survey
+loop, focused Phase 2 and Phase 3 economy, research, loss, and automation systems, and
+the first Phase 4 planetary-network slice. They form one multi-hour demo arc:
 
-- graphical onboarding and one-command startup;
+- a startup/session menu, one-command startup, and graphical onboarding;
 - a persistent regional planet with fog, surveys, probes, and mission progress;
 - variable deposits, risky extraction, rebuilding, refining, and initial range
   infrastructure;
+- balanced, cargo, and shielded extraction rigs whose capacity, exposure, timing, and
+  recovery tradeoffs combine with research and local support;
 - competing research directions and operational profiles;
 - earned survey and extraction automation;
+- sixteen stable sectors in a 4-by-4 local field per region, with adjacency-driven
+  focused-survey frontiers, energy, hazards, deposits, and base-placement tradeoffs;
+- footholds, player-controlled module load shedding, geographic communication chains,
+  depot-backed construction throughput, local extraction support, environmental wear,
+  workshops, and funded recovery;
+- five ordered, creator-approved permanent observations integrated with onboarding,
+  focused local surveys, a powered-laboratory comparison, and independent regions;
+- broad regional and local coverage, distributed analysis, and observation as the
+  concluding planetary objective;
 - local-first Planet interaction, global Overview detail, return summaries, and
-  contextual guidance.
+  contextual guidance;
+- a daemon-owned concluding milestone that opens a read-only solar-horizon map and
+  stops before system-scale play.
 
 The README is the authority for the exact behavior and controls available in the
 current build.
 
-### Next: prove and deepen the alpha
+### Next: prove, narrate, and deepen the demo
 
-The immediate priority is to make the existing 60–90 minute learning arc intuitive,
-well paced, visually compelling, and resilient under real play:
+The immediate priority is to make the complete roughly three-hour baseline arc
+intuitive, strategically varied, atmospheric, and resilient under real play:
 
 1. Playtest onboarding, navigation, objectives, blockers, return summaries, and the
-   path from surveying through research and automation.
+   path from surveying through research, automation, local sites, powered nodes, and
+   distributed observation.
 2. Tune operation durations, costs, resource distribution, risk, recovery, and
    information density from observed play rather than adding rewards to mask friction.
 3. Strengthen the terminal-native graphical presentation and establish the
    pixel-art-inspired visual language across the globe, operations, and feedback.
-4. Complete the geological and research slices with energy, transport, loadout
-   tradeoffs, environmental requirements, damage, recovery, and salvage.
+4. Deepen transport, modular scout roles, terrain access, storage, damage, recovery,
+   and salvage choices around the implemented extractor rigs, local energy, and
+   integrity model.
 5. Expand automation only where players have demonstrated understanding and meaningful
    choices remain visible.
-6. Preserve restart continuity, fallback rendering, reconnect behavior, and
+6. Playtest and deepen the implemented creator-approved, guarantee-paced observations
+   and permanent archive delivery; add further material only after separate approval.
+7. Preserve restart continuity, fallback rendering, reconnect behavior, and
    spoiler-safe data boundaries while the systems deepen.
 
-This stage is complete when a new player can progress through the alpha without an
+This stage is complete when a new player can progress through the demo without an
 external guide, explain their current goal and blockers, recover from material loss,
-and leave with more than one sensible next plan.
+reach the solar-horizon map, and understand that it is the current build's terminal
+boundary.
 
 ### Later: expand scale without duplicating chores
 
 | Phase | Direction | Intended outcome |
 | --- | --- | --- |
-| 4 | Subregions, bases, and planetary network | Globe regions open into locally legible subregions where temporary reach becomes durable infrastructure with power, production, routes, failure, and recovery. |
 | 5 | External co-processor | Optional research-gated tools, SKILLS, scoped policies, approvals, and audits assist without bypassing the game. |
-| 6 | Breadcrumb progression | A permanent archive and approved, guarantee-paced discoveries connect investigation to planetary play. |
+| 6 | Breadcrumb progression | Expand the implemented permanent archive with separately approved, guarantee-paced discoveries that connect investigation to planetary play. |
 | 7 | Breadth and longevity | More environments, probe roles, production choices, events, visual effects, balance depth, and optional pulses support long-running saves. |
 
 Later phases should unfold only after the preceding loop is understandable. New
@@ -377,6 +407,8 @@ Substrate succeeds when:
 
 - a new player can awaken, read the globe, and launch a useful operation without a
   command manual;
+- the complete demo arc carries that player through specialization and earned
+  automation to a legible solar-horizon ending without exposing later system-scale play;
 - a returning player can understand what changed and choose a useful next action
   within minutes;
 - a relaxed session produces meaningful progress without constant supervision;

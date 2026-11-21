@@ -1,10 +1,12 @@
 use crate::{
     protocol::{
         self, decode_result, method, AcknowledgeActivityParams, ActivateProfileParams,
-        CompleteOnboardingParams, ConstructRelayParams, DeployExtractorParams, DeployScoutParams,
-        DiagnosticPulseResult, OnboardingCompletionResult, PingResult, PlanetActionResult,
-        PlanetNotification, PlanetSnapshot, ProtocolError, RegionAutomationParams, ResearchProject,
-        RpcIncoming, StartResearchParams, StatusNotification, StatusSnapshot, SubscribeResult,
+        BaseModuleKind, CompleteOnboardingParams, ConfigureExtractorParams,
+        ConstructBaseModuleParams, ConstructRelayParams, DeployExtractorParams, DeployScoutParams,
+        DiagnosticPulseResult, ExtractorLoadout, NewPlaythroughResult, OnboardingCompletionResult,
+        PingResult, PlanetActionResult, PlanetNotification, PlanetSnapshot, ProtocolError,
+        RegionAutomationParams, ResearchProject, RpcIncoming, SetBaseModuleEnabledParams,
+        StartResearchParams, StatusNotification, StatusSnapshot, SubregionParams, SubscribeResult,
         UnsubscribeParams, JSONRPC_VERSION, MAX_FRAME_BYTES,
     },
     PROTOCOL_VERSION,
@@ -98,6 +100,10 @@ impl IpcClient {
         self.call(method::SHUTDOWN, None).await
     }
 
+    pub async fn start_new_playthrough(&mut self) -> Result<NewPlaythroughResult, IpcError> {
+        self.call(method::START_NEW_PLAYTHROUGH, None).await
+    }
+
     pub async fn trigger_diagnostic_pulse(&mut self) -> Result<DiagnosticPulseResult, IpcError> {
         self.call(method::TRIGGER_DIAGNOSTIC_PULSE, None).await
     }
@@ -142,10 +148,84 @@ impl IpcClient {
         &mut self,
         region_id: impl Into<String>,
     ) -> Result<PlanetActionResult, IpcError> {
+        self.deploy_extractor_at(region_id, None::<String>).await
+    }
+
+    pub async fn deploy_extractor_at(
+        &mut self,
+        region_id: impl Into<String>,
+        subregion_id: Option<impl Into<String>>,
+    ) -> Result<PlanetActionResult, IpcError> {
         let params = serde_json::to_value(DeployExtractorParams {
             region_id: region_id.into(),
+            subregion_id: subregion_id.map(Into::into),
         })?;
         self.call(method::DEPLOY_EXTRACTOR, Some(params)).await
+    }
+
+    pub async fn configure_extractor(
+        &mut self,
+        loadout: ExtractorLoadout,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(ConfigureExtractorParams { loadout })?;
+        self.call(method::CONFIGURE_EXTRACTOR, Some(params)).await
+    }
+
+    pub async fn survey_subregion(
+        &mut self,
+        subregion_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(SubregionParams {
+            subregion_id: subregion_id.into(),
+        })?;
+        self.call(method::SURVEY_SUBREGION, Some(params)).await
+    }
+
+    pub async fn establish_base(
+        &mut self,
+        subregion_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(SubregionParams {
+            subregion_id: subregion_id.into(),
+        })?;
+        self.call(method::ESTABLISH_BASE, Some(params)).await
+    }
+
+    pub async fn construct_base_module(
+        &mut self,
+        subregion_id: impl Into<String>,
+        module: BaseModuleKind,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(ConstructBaseModuleParams {
+            subregion_id: subregion_id.into(),
+            module,
+        })?;
+        self.call(method::CONSTRUCT_BASE_MODULE, Some(params)).await
+    }
+
+    pub async fn set_base_module_enabled(
+        &mut self,
+        subregion_id: impl Into<String>,
+        module: BaseModuleKind,
+        enabled: bool,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(SetBaseModuleEnabledParams {
+            subregion_id: subregion_id.into(),
+            module,
+            enabled,
+        })?;
+        self.call(method::SET_BASE_MODULE_ENABLED, Some(params))
+            .await
+    }
+
+    pub async fn maintain_base(
+        &mut self,
+        subregion_id: impl Into<String>,
+    ) -> Result<PlanetActionResult, IpcError> {
+        let params = serde_json::to_value(SubregionParams {
+            subregion_id: subregion_id.into(),
+        })?;
+        self.call(method::MAINTAIN_BASE, Some(params)).await
     }
 
     pub async fn construct_relay(
@@ -164,6 +244,10 @@ impl IpcClient {
     ) -> Result<PlanetActionResult, IpcError> {
         let params = serde_json::to_value(StartResearchParams { project })?;
         self.call(method::START_RESEARCH, Some(params)).await
+    }
+
+    pub async fn start_archive_experiment(&mut self) -> Result<PlanetActionResult, IpcError> {
+        self.call(method::START_ARCHIVE_EXPERIMENT, None).await
     }
 
     pub async fn activate_profile(
