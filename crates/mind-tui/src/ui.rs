@@ -101,36 +101,36 @@ fn dim_color_toward_canvas(
 }
 
 /// Dim every cell in `area` behind a centered modal smoothly (no stripes, no competing text fragments).
-fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
+fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme, ascii: bool) {
     if theme.no_color() {
         return;
     }
     let buf = frame.buffer_mut();
     let footer_start = area.y.saturating_add(area.height.saturating_sub(2));
+    let x_end = area.x.saturating_add(area.width);
     for y in area.y..area.y.saturating_add(area.height) {
         let in_footer = y >= footer_start;
-        for x in area.x..area.x.saturating_add(area.width) {
-            let cell = &mut buf[(x, y)];
-            let sym = cell.symbol();
+        // Snapshot the row so neighbour checks see original glyphs, not already-blanked cells.
+        let row: Vec<String> = (area.x..x_end)
+            .map(|x| buf[(x, y)].symbol().to_owned())
+            .collect();
+        let is_rule = |sym: &str| matches!(sym, "-" | "=" | "+");
+        for x in area.x..x_end {
+            let i = usize::from(x - area.x);
+            let sym = row[i].as_str();
             let is_pixel_block = matches!(sym, "▀" | "▄" | "█" | " ");
+            // Box-drawing glyphs are always borders. In the ASCII tier, `|` and `+` are borders, and
+            // `-`/`=` only when they continue a horizontal rule; a lone `-` (as in "R-081") is text
+            // and must be blanked like any other fragment.
+            let left_rule = i > 0 && is_rule(&row[i - 1]);
+            let right_rule = row.get(i + 1).is_some_and(|next| is_rule(next));
             let is_border = matches!(
                 sym,
-                "│" | "─"
-                    | "╭"
-                    | "╮"
-                    | "╰"
-                    | "╯"
-                    | "║"
-                    | "═"
-                    | "╔"
-                    | "╗"
-                    | "╚"
-                    | "╝"
-                    | "+"
-                    | "-"
-                    | "|"
-                    | "="
-            );
+                "│" | "─" | "╭" | "╮" | "╰" | "╯" | "║" | "═" | "╔" | "╗" | "╚" | "╝"
+            ) || (ascii
+                && (matches!(sym, "|" | "+")
+                    || (matches!(sym, "-" | "=") && (left_rule || right_rule))));
+            let cell = &mut buf[(x, y)];
             if is_pixel_block {
                 let fg = dim_color_toward_canvas(cell.fg, theme.canvas, 0.70);
                 let bg = dim_color_toward_canvas(cell.bg, theme.canvas, 0.70);
@@ -145,6 +145,16 @@ fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
             }
         }
     }
+}
+
+/// Smallest scroll offset that keeps the selected row span fully visible (or its top, if taller).
+fn selection_scroll(total: usize, height: usize, selected: Option<(usize, usize)>) -> usize {
+    let max_scroll = total.saturating_sub(height);
+    let Some((start, end)) = selected else {
+        return 0;
+    };
+    let wanted = end.saturating_sub(height);
+    wanted.min(start).min(max_scroll)
 }
 
 /// Wrap `text` into lines with a hanging indent of `indent` spaces on continuation rows.
@@ -275,12 +285,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
         }
     }
     if app.session_menu.is_some() {
-        dim_backdrop(frame, area, theme);
+        dim_backdrop(frame, area, theme, options.ascii);
         render_session_menu(frame, area, app, options, theme);
         return;
     }
     if app.show_return_summary {
-        dim_backdrop(frame, area, theme);
+        dim_backdrop(frame, area, theme, options.ascii);
         render_return_summary(frame, area, app, options, theme);
     } else if let (Some(planet), Some((index, record))) =
         (&app.planet, app.active_transmission_record())
@@ -312,12 +322,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
         );
     } else if app.show_chapter_card {
         if let Some(planet) = &app.planet {
-            dim_backdrop(frame, area, theme);
+            dim_backdrop(frame, area, theme, options.ascii);
             transmission::render_chapter_card(frame, area, &planet.campaign, options, theme);
         }
     }
     if app.show_help {
-        dim_backdrop(frame, area, theme);
+        dim_backdrop(frame, area, theme, options.ascii);
         render_help(frame, area, app.help_scroll, options, theme);
     } else if let Some(progress) = app.transition_progress(now) {
         art::render_crt_wipe(frame, area, progress, options, theme);
@@ -409,6 +419,10 @@ fn render_planet(
         KeyHint {
             key: "N",
             label: "lead",
+        },
+        KeyHint {
+            key: "PGUP/DN",
+            label: "inspect",
         },
         KeyHint {
             key: "P/C/D/W/L/O",
@@ -1248,6 +1262,17 @@ fn render_research(
         return;
     };
     let research = &planet.research;
+    let block = panel(
+        " RESEARCH & SPECIALIZATION ",
+        options,
+        theme,
+        PanelTone::Focused,
+    );
+    let inner = block.inner(rows[1]);
+    let show_topology = research.unlocked && inner.height >= 20 && inner.width >= 52;
+    let wrap_width = usize::from(inner.width.max(20));
+    // Row span of the highlighted entry (title + its wrapped detail) so the body can scroll to it.
+    let mut selected_rows: Option<(usize, usize)> = None;
     let mut lines = vec![field_line(
         "ANALYSIS",
         format!("{} units available", research.analysis_units),
@@ -1297,6 +1322,7 @@ fn render_research(
             } else {
                 "LOCKED"
             };
+            let entry_start = lines.len();
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{marker} {:<22}", option.title),
@@ -1325,10 +1351,17 @@ fn render_research(
                     Style::default().fg(theme.muted),
                 ),
             ]));
-            lines.push(Line::styled(
-                format!("    {}", option.summary),
+            lines.extend(wrap_indented_lines(
+                vec![Span::raw("    ")],
+                4,
+                &option.summary,
+                4,
+                wrap_width,
                 Style::default().fg(theme.muted),
             ));
+            if index == app.research_selection {
+                selected_rows = Some((entry_start, lines.len()));
+            }
         }
         lines.push(Line::raw(""));
         lines.push(section_line("OPERATIONAL PROFILES", theme));
@@ -1350,41 +1383,68 @@ fn render_research(
             } else {
                 "LOCKED"
             };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{marker} {:<16}", profile.title),
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    format!(" {state:<9} "),
-                    Style::default().fg(if profile.active {
-                        theme.success
-                    } else if profile.unlocked {
-                        theme.cyan
-                    } else {
-                        theme.muted
-                    }),
-                ),
-                Span::styled(profile.summary.clone(), Style::default().fg(theme.muted)),
-            ]));
+            let entry_start = lines.len();
+            lines.extend(wrap_indented_lines(
+                vec![
+                    Span::styled(
+                        format!("{marker} {:<16}", profile.title),
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(
+                        format!(" {state:<9} "),
+                        Style::default().fg(if profile.active {
+                            theme.success
+                        } else if profile.unlocked {
+                            theme.cyan
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                ],
+                29,
+                &profile.summary,
+                29,
+                wrap_width,
+                Style::default().fg(theme.muted),
+            ));
+            if offset + index == app.research_selection {
+                selected_rows = Some((entry_start, lines.len()));
+            }
         }
         if field_operation_active {
-            lines.push(Line::styled(
-                "    Profiles can be changed when survey and extraction probes are not in flight.",
+            lines.extend(wrap_indented_lines(
+                vec![Span::raw("    ")],
+                4,
+                "Profiles can be changed when survey and extraction probes are not in flight.",
+                4,
+                wrap_width,
                 Style::default().fg(theme.muted),
             ));
         }
     }
-    let block = panel(
-        " RESEARCH & SPECIALIZATION ",
-        options,
-        theme,
-        PanelTone::Focused,
-    );
-    let inner = block.inner(rows[1]);
+    let body_height = usize::from(if show_topology {
+        inner.height.saturating_sub(7)
+    } else {
+        inner.height
+    });
+    let scroll = selection_scroll(lines.len(), body_height, selected_rows);
+    let more_below = scroll + body_height < lines.len();
+    let block = if scroll > 0 || more_below {
+        panel(
+            if more_below {
+                " RESEARCH & SPECIALIZATION [more ▼] "
+            } else {
+                " RESEARCH & SPECIALIZATION [▲] "
+            },
+            options,
+            theme,
+            PanelTone::Focused,
+        )
+    } else {
+        block
+    };
     frame.render_widget(block, rows[1]);
     frame.render_widget(Block::default().style(theme.panel_style()), inner);
-    let show_topology = research.unlocked && inner.height >= 20 && inner.width >= 52;
     let body_area = if show_topology {
         let splits = Layout::vertical([
             Constraint::Length(6),
@@ -1446,7 +1506,7 @@ fn render_research(
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .style(theme.panel_style()),
         body_area,
     );
@@ -1695,19 +1755,20 @@ fn render_archive(
             app.globe_phase,
             theme,
         ));
+        detail_lines.extend([Line::from(""), section_line("OBSERVATION", theme)]);
+        detail_lines.extend(paragraph_lines(
+            &terminal_text(&record.observation, options.ascii),
+            Style::default().fg(theme.text),
+        ));
         detail_lines.extend([
             Line::from(""),
-            section_line("OBSERVATION", theme),
-            Line::styled(
-                terminal_text(&record.observation, options.ascii),
-                Style::default().fg(theme.text),
-            ),
-            Line::from(""),
             section_line("CURRENT INTERPRETATION", theme),
-            Line::styled(
-                terminal_text(&record.interpretation, options.ascii),
-                Style::default().fg(theme.muted),
-            ),
+        ]);
+        detail_lines.extend(paragraph_lines(
+            &terminal_text(&record.interpretation, options.ascii),
+            Style::default().fg(theme.muted),
+        ));
+        detail_lines.extend([
             Line::from(""),
             Line::styled(
                 "ARCHIVE STATUS // permanent knowledge",
@@ -1785,12 +1846,15 @@ fn render_archive(
                 )),
             panels[0],
         );
-        frame.render_widget(
-            Paragraph::new(detail)
-                .wrap(Wrap { trim: true })
-                .style(theme.panel_style())
-                .block(panel(" OBSERVATION ", options, theme, PanelTone::Standard)),
+        render_inspector_text(
+            frame,
             panels[1],
+            detail,
+            app.archive_detail_scroll,
+            "OBSERVATION",
+            false,
+            options,
+            theme,
         );
     }
     let mut hints = vec![
@@ -1801,6 +1865,10 @@ fn render_archive(
         KeyHint {
             key: "V",
             label: "replay transmission",
+        },
+        KeyHint {
+            key: "PGUP/DN",
+            label: "scroll",
         },
         KeyHint {
             key: "TAB",
@@ -1821,6 +1889,14 @@ fn render_archive(
         );
     }
     render_workspace_footer(frame, rows[2], app, now, &hints, theme);
+}
+
+/// Split authored text on line breaks so paragraph boundaries survive rendering (a single
+/// `Line` would join "…signature.\nI had…" into "signature.I had").
+fn paragraph_lines(text: &str, style: Style) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|paragraph| Line::styled(paragraph.trim_end().to_owned(), style))
+        .collect()
 }
 
 fn terminal_text(value: &str, ascii: bool) -> String {
@@ -1872,14 +1948,11 @@ fn render_return_summary(
         })
         .collect();
     let width = area.width.saturating_sub(6).clamp(38, 86);
-    let extra_evidence_lines = if archived_evidence.is_empty() { 0 } else { 5 };
-    let height = (planet.unreviewed_activity.len() as u16 + 16 + extra_evidence_lines)
-        .min(area.height.saturating_sub(4))
-        .max(12);
-    let popup = centered_rect(width, height, area);
-    frame.render_widget(Clear, popup);
+    let inner_w = usize::from(width.saturating_sub(2));
+    let max_inner_h = usize::from(area.height.saturating_sub(2).max(10).saturating_sub(2));
+    let wrap = |lines: Vec<Line<'static>>| crate::textwrap::hang_wrap(lines, inner_w);
     let sep = if options.ascii { " | " } else { " · " };
-    let mut lines = vec![
+    let header = wrap(vec![
         Line::from(vec![
             Span::styled(
                 format!(
@@ -1920,39 +1993,50 @@ fn render_return_summary(
                 Style::default().fg(theme.muted),
             ),
         ]),
-    ];
-    if planet.unreviewed_activity.is_empty() {
-        lines.push(Line::styled(
+    ]);
+    // Newest-last activity entries, each pre-wrapped so row counts are exact.
+    let activity: Vec<Vec<Line<'static>>> = if planet.unreviewed_activity.is_empty() {
+        vec![wrap(vec![Line::styled(
             "  No unreviewed operational changes.",
             Style::default().fg(theme.muted),
-        ));
+        )])]
     } else {
-        let max_rows = height.saturating_sub(12).max(2) as usize;
-        for record in planet.unreviewed_activity.iter().rev().take(max_rows).rev() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  #{:03} ", record.activity_id),
-                    Style::default().fg(theme.faint),
+        planet
+            .unreviewed_activity
+            .iter()
+            .map(|record| {
+                wrap(vec![Line::from(vec![
+                    Span::styled(
+                        format!("  #{:03} ", record.activity_id),
+                        Style::default().fg(theme.faint),
+                    ),
+                    Span::styled(record.summary.clone(), Style::default().fg(theme.text)),
+                ])])
+            })
+            .collect()
+    };
+    let (evidence_head, evidence_quote) = if let Some(evidence) = archived_evidence.last() {
+        (
+            wrap(vec![
+                Line::raw(""),
+                Line::styled(
+                    format!(
+                        "NEW EVIDENCE RECORDED // {} ({})",
+                        evidence.title.to_uppercase(),
+                        evidence.medium.to_uppercase()
+                    ),
+                    Style::default().fg(theme.gold).bold(),
                 ),
-                Span::styled(record.summary.clone(), Style::default().fg(theme.text)),
-            ]));
-        }
-    }
-    if let Some(evidence) = archived_evidence.last() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            format!(
-                "NEW EVIDENCE RECORDED // {} ({})",
-                evidence.title.to_uppercase(),
-                evidence.medium.to_uppercase()
-            ),
-            Style::default().fg(theme.gold).bold(),
-        ));
-        lines.push(Line::styled(
-            terminal_text(&evidence.observation, options.ascii),
-            Style::default().fg(theme.text_strong),
-        ));
-    }
+            ]),
+            wrap(paragraph_lines(
+                &terminal_text(&evidence.observation, options.ascii),
+                Style::default().fg(theme.text_strong),
+            )),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let raw = planet.raw_inventory;
     let refined = planet.refined_inventory;
     let surveyed = planet
@@ -2022,9 +2106,61 @@ fn render_return_summary(
         key_span("Esc", theme),
         Span::styled(" acknowledge and continue", Style::default().fg(theme.cyan)),
     ]));
+    let tail = wrap(lines);
+
+    // Fit to the viewport: header, evidence title and tail (stores, CURRENT, NEXT, acknowledge hint)
+    // always show. The newest event is kept, then as much of the quote as fits, then older events.
+    let budget = max_inner_h.saturating_sub(header.len() + evidence_head.len() + tail.len());
+    let activity_rows = |count: usize| -> usize {
+        let shown: usize = activity.iter().rev().take(count).map(Vec::len).sum();
+        shown + usize::from(count < activity.len())
+    };
+    let quote_rows = evidence_quote
+        .len()
+        .min(budget.saturating_sub(activity_rows(1)));
+    let mut shown_events = 1.min(activity.len());
+    while shown_events < activity.len() && activity_rows(shown_events + 1) + quote_rows <= budget {
+        shown_events += 1;
+    }
+    let mut body = header;
+    let hidden_events = activity.len() - shown_events;
+    if hidden_events > 0 {
+        body.push(Line::styled(
+            format!("  +{hidden_events} earlier"),
+            Style::default().fg(theme.faint),
+        ));
+    }
+    for entry in &activity[hidden_events..] {
+        body.extend(entry.iter().cloned());
+    }
+    body.extend(evidence_head);
+    if quote_rows < evidence_quote.len() {
+        body.extend(
+            evidence_quote
+                .into_iter()
+                .take(quote_rows.saturating_sub(1)),
+        );
+        if quote_rows > 0 {
+            body.push(Line::styled(
+                if options.ascii {
+                    "  ... full record in the queued transmission"
+                } else {
+                    "  … full record in the queued transmission"
+                },
+                Style::default().fg(theme.muted),
+            ));
+        }
+    } else {
+        body.extend(evidence_quote);
+    }
+    body.extend(tail);
+    let height = u16::try_from(body.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let popup = centered_rect(width, height, area);
+    frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
+        Paragraph::new(body)
             .style(theme.raised_style())
             .block(panel(" RETURN SUMMARY ", options, theme, PanelTone::Modal)),
         popup,
@@ -2179,14 +2315,22 @@ fn render_workspace_header(
                 " NEXT // ",
                 Style::default().fg(theme.amber).bold(),
             )];
-            if let Some(key) = &planet.campaign.next_action_key {
+            let (override_key, override_text) = local_next_override(app, planet);
+            if let Some(key) = override_key.or(planet.campaign.next_action_key.as_deref()) {
                 spans.push(Span::styled(format!(" {key} "), theme.key_style()));
                 spans.push(Span::raw(" "));
             }
             let badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
             let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
             let max_action = total_width.saturating_sub(used + badge.len() + 1);
-            let action = terminal_text(&planet.campaign.next_action, options.ascii);
+            let action = terminal_text(
+                if override_text.is_empty() {
+                    &planet.campaign.next_action
+                } else {
+                    &override_text
+                },
+                options.ascii,
+            );
             let clipped = truncate_chars(&action, max_action, options.ascii);
             let pad = total_width.saturating_sub(used + clipped.chars().count() + badge.len());
             spans.push(Span::styled(
@@ -2233,37 +2377,7 @@ fn render_workspace_header(
                 " NEXT // ",
                 Style::default().fg(theme.amber).bold(),
             )];
-            let (override_key, override_text) = if app.local_view {
-                let in_lead =
-                    planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref();
-                match planet.campaign.next_action_key.as_deref() {
-                    Some("V") if in_lead => {
-                        let selected_detected = app
-                            .selected_subregion()
-                            .is_some_and(|s| s.knowledge == SubregionKnowledge::Detected);
-                        if selected_detected {
-                            (
-                                Some("S"),
-                                "Press S to run a focused local survey on this FRONTIER sector."
-                                    .to_owned(),
-                            )
-                        } else {
-                            (
-                                Some("N"),
-                                "Press N (or Arrows) to select a FRONTIER sector, then press S to survey."
-                                    .to_owned(),
-                            )
-                        }
-                    }
-                    Some("X" | "B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
-                        Some("ESC"),
-                        format!("Return to globe (Esc) — {}", planet.campaign.next_action),
-                    ),
-                    _ => (None, String::new()),
-                }
-            } else {
-                (None, String::new())
-            };
+            let (override_key, override_text) = local_next_override(app, planet);
             let display_key = override_key.or(planet.campaign.next_action_key.as_deref());
             let display_action = if override_text.is_empty() {
                 planet.campaign.next_action.as_str()
@@ -2300,6 +2414,47 @@ fn render_workspace_header(
     frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), area);
 }
 
+/// Local-field NEXT guidance: while a 4x4 field is open, translate the campaign's globe-level
+/// instruction into the key that acts on the selected sector, keeping the campaign progress counter.
+fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static str>, String) {
+    let base_action = planet.campaign.next_action.trim_end_matches('.');
+    let progress = base_action
+        .rfind('(')
+        .filter(|_| base_action.ends_with(')'))
+        .map(|at| format!(" {}", &base_action[at..]))
+        .unwrap_or_default();
+    // While a focused survey resolves, the campaign's own monitoring text is already correct.
+    if app.local_view && planet.network.active_site_survey.is_none() {
+        let in_lead =
+            planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref();
+        match planet.campaign.next_action_key.as_deref() {
+            Some("V") if in_lead => {
+                let selected_detected = app
+                    .selected_subregion()
+                    .is_some_and(|s| s.knowledge == SubregionKnowledge::Detected);
+                if selected_detected {
+                    (
+                        Some("S"),
+                        format!("Press S to survey this FRONTIER sector{progress}."),
+                    )
+                } else {
+                    (
+                        Some("N"),
+                        format!("Press N or arrows for a FRONTIER, then S to survey{progress}."),
+                    )
+                }
+            }
+            Some("X" | "B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
+                Some("ESC"),
+                format!("Return to globe (Esc) — {}", planet.campaign.next_action),
+            ),
+            _ => (None, String::new()),
+        }
+    } else {
+        (None, String::new())
+    }
+}
+
 fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
@@ -2307,15 +2462,26 @@ fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
     if max_chars <= 3 {
         return text.chars().take(max_chars).collect();
     }
-    if ascii {
-        let mut out: String = text.chars().take(max_chars - 3).collect();
-        out.push_str("...");
-        out
+    let ellipsis = if ascii { "..." } else { "…" };
+    let budget = max_chars - ellipsis.chars().count();
+    let head: String = text.chars().take(budget).collect();
+    // Prefer a word boundary so no word is cut mid-way; fall back to a hard cut only when the
+    // last boundary would waste more than ~40% of the budget.
+    let next_is_space = text.chars().nth(budget).is_some_and(char::is_whitespace);
+    let cut = if next_is_space {
+        head.trim_end().to_owned()
     } else {
-        let mut out: String = text.chars().take(max_chars - 1).collect();
-        out.push('…');
-        out
-    }
+        match head.rfind(' ') {
+            Some(at) if head[..at].chars().count() * 5 >= budget * 3 => head[..at].to_owned(),
+            _ => head,
+        }
+    };
+    let cut = cut
+        .trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '/' | '·' | '(' | ',' | ';' | ':' | '-' | '|')
+        })
+        .to_owned();
+    format!("{cut}{ellipsis}")
 }
 
 fn planet_store_header_line(
@@ -2621,14 +2787,24 @@ fn render_local_sites(
         );
         return;
     }
-    let row_count = u32::from(planet.network.subregion_rows.max(1));
-    let column_count = u32::from(planet.network.subregion_columns.max(1));
+    let row_count = u16::from(planet.network.subregion_rows.max(1));
+    let column_count = u16::from(planet.network.subregion_columns.max(1));
+    // Equal tile sizes: spare rows/columns become a centered margin instead of enlarging one
+    // row or column (which made only that row show state labels and widened one column).
+    let tile_h = (inner.height / row_count).max(1);
+    let tile_w = (inner.width / column_count).max(1);
+    let grid = Rect::new(
+        inner.x + (inner.width - tile_w * column_count) / 2,
+        inner.y + (inner.height - tile_h * row_count) / 2,
+        tile_w * column_count,
+        tile_h * row_count,
+    );
     let rows = Layout::vertical(
         (0..row_count)
-            .map(|_| Constraint::Fill(1))
+            .map(|_| Constraint::Length(tile_h))
             .collect::<Vec<_>>(),
     )
-    .split(inner);
+    .split(grid);
     let min_tile_inner_rows = rows
         .iter()
         .map(|r| r.height.saturating_sub(2))
@@ -2638,7 +2814,7 @@ fn render_local_sites(
     for (row_index, row_area) in rows.iter().enumerate() {
         let columns = Layout::horizontal(
             (0..column_count)
-                .map(|_| Constraint::Fill(1))
+                .map(|_| Constraint::Length(tile_w))
                 .collect::<Vec<_>>(),
         )
         .split(*row_area);
@@ -2681,6 +2857,10 @@ fn render_local_sites(
             });
             if min_tile_inner_rows < 5 && art_lines.len() > 1 {
                 art_lines.truncate(1);
+            }
+            // A single text row shows the sector ID rather than decoration.
+            if min_tile_inner_rows < 2 {
+                art_lines.clear();
             }
             let mut lines = art_lines;
             let sep = if options.ascii { "-" } else { "·" };
@@ -3049,29 +3229,72 @@ fn render_local_inspector(
             Text::from(lines)
         },
     );
+    let confirming = app.pending_action.is_some();
+    render_inspector_text(
+        frame,
+        area,
+        text,
+        app.region_panel_scroll,
+        if confirming {
+            "SITE CONFIRMATION"
+        } else {
+            "LOCAL INSPECTOR"
+        },
+        confirming,
+        options,
+        theme,
+    );
+}
+
+/// Render an inspector body pre-wrapped with hanging indents, clamped scroll, and an overflow cue
+/// in the title (`[PgDn ▼]`, `[PgUp ▲]`, or both) whenever content extends beyond the panel.
+#[allow(clippy::too_many_arguments)]
+fn render_inspector_text(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: Text<'static>,
+    scroll: u16,
+    title: &str,
+    confirming: bool,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let inner_height = usize::from(area.height.saturating_sub(2));
+    let rows = crate::textwrap::hang_wrap(text.lines, inner_width);
+    let max_scroll = rows.len().saturating_sub(inner_height);
+    let scroll = usize::from(scroll).min(max_scroll);
+    let more_above = scroll > 0;
+    let more_below = scroll < max_scroll;
+    let cue = match (more_above, more_below, options.ascii) {
+        (false, false, _) => "",
+        (false, true, true) => " [PgDn more]",
+        (false, true, false) => " [PgDn ▼]",
+        (true, false, true) => " [PgUp]",
+        (true, false, false) => " [PgUp ▲]",
+        (true, true, true) => " [PgUp/PgDn]",
+        (true, true, false) => " [PgUp/PgDn ▲▼]",
+    };
+    let full_title = format!(" {title}{cue} ");
+    let block = panel(
+        &full_title,
+        options,
+        theme,
+        if confirming {
+            PanelTone::Modal
+        } else {
+            PanelTone::Standard
+        },
+    );
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .scroll((app.region_panel_scroll, 0))
-            .style(if app.pending_action.is_some() {
+        Paragraph::new(rows)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+            .style(if confirming {
                 theme.raised_style()
             } else {
                 theme.panel_style()
             })
-            .block(panel(
-                if app.pending_action.is_some() {
-                    " SITE CONFIRMATION "
-                } else {
-                    " LOCAL INSPECTOR "
-                },
-                options,
-                theme,
-                if app.pending_action.is_some() {
-                    PanelTone::Modal
-                } else {
-                    PanelTone::Standard
-                },
-            )),
+            .block(block),
         area,
     );
 }
@@ -3649,30 +3872,20 @@ fn render_region_inspector(
             Text::from(lines)
         },
     );
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .scroll((app.region_panel_scroll, 0))
-            .style(if app.pending_action.is_some() {
-                theme.raised_style()
-            } else {
-                theme.panel_style()
-            })
-            .block(panel(
-                if app.pending_action.is_some() {
-                    " REGION CONFIRMATION "
-                } else {
-                    " REGION INSPECTOR "
-                },
-                options,
-                theme,
-                if app.pending_action.is_some() {
-                    PanelTone::Modal
-                } else {
-                    PanelTone::Standard
-                },
-            )),
+    let confirming = app.pending_action.is_some();
+    render_inspector_text(
+        frame,
         area,
+        text,
+        app.region_panel_scroll,
+        if confirming {
+            "REGION CONFIRMATION"
+        } else {
+            "REGION INSPECTOR"
+        },
+        confirming,
+        options,
+        theme,
     );
 }
 
@@ -4703,30 +4916,57 @@ fn render_workspace_footer(
             ]);
         }
     }
-    if matches!(app.connection, ConnectionState::Connected) {
-        if let Some((badge, highlight)) = app.next_event_badge(now) {
-            spans.extend([
-                separator(theme),
-                Span::styled(
-                    badge,
-                    Style::default()
-                        .fg(if highlight {
-                            theme.gold
-                        } else {
-                            theme.cyan_bright
-                        })
-                        .bold(),
-                ),
-            ]);
-        }
-    }
-    if let Some(notice) = &app.notice {
+    let max_w = usize::from(area.width).saturating_sub(2);
+    let badge = if matches!(app.connection, ConnectionState::Connected) {
+        app.next_event_badge(now)
+    } else {
+        None
+    };
+    // Fit the status row without clipping: a long notice first displaces the NEXT badge, then is
+    // shortened at a word boundary with an ellipsis.
+    let spans_width =
+        |spans: &[Span<'_>]| -> usize { spans.iter().map(|s| s.content.chars().count()).sum() };
+    let sep_width = spans_width(&[separator(theme)]);
+    let base_width = spans_width(&spans);
+    let notice_width = app
+        .notice
+        .as_ref()
+        .map_or(0, |notice| notice.chars().count() + sep_width);
+    let badge_width = badge
+        .as_ref()
+        .map_or(0, |(text, _)| text.chars().count() + sep_width);
+    let status_budget = if area.width < 140 {
+        max_w
+    } else {
+        max_w.saturating_sub(max_w / 2)
+    };
+    let keep_badge =
+        app.notice.is_none() || base_width + notice_width + badge_width <= status_budget;
+    if let (true, Some((badge, highlight))) = (keep_badge, badge) {
         spans.extend([
             separator(theme),
-            Span::styled(notice.clone(), Style::default().fg(theme.text)),
+            Span::styled(
+                badge,
+                Style::default()
+                    .fg(if highlight {
+                        theme.gold
+                    } else {
+                        theme.cyan_bright
+                    })
+                    .bold(),
+            ),
         ]);
     }
-    let max_w = usize::from(area.width).saturating_sub(2);
+    if let Some(notice) = &app.notice {
+        let room = status_budget.saturating_sub(spans_width(&spans) + sep_width);
+        spans.extend([
+            separator(theme),
+            Span::styled(
+                truncate_chars(notice, room.max(12), true),
+                Style::default().fg(theme.text),
+            ),
+        ]);
+    }
     let content = if area.width < 140 {
         Text::from(vec![
             Line::from(spans),
@@ -4808,6 +5048,14 @@ fn render_onboarding(
     ])
     .split(area);
 
+    // Docked HUD/card heights: borders plus content rows (notice adds one), leaving no empty rows.
+    let adjusting_hud_h = (6 + u16::from(app.notice.is_some())).min(chunks[1].height);
+    let confirm_card_h = 9.min(chunks[1].height);
+    let reserved_rows = if confirming {
+        confirm_card_h + 1
+    } else {
+        adjusting_hud_h + 1
+    };
     let canvas_buf = cinematic::build_coherence_buffer(
         chunks[1].width,
         chunks[1].height,
@@ -4815,6 +5063,7 @@ fn render_onboarding(
         app.selected_band,
         app.globe_phase,
         confirming,
+        reserved_rows,
     );
     crate::raster::blit_to_frame(&canvas_buf, frame, chunks[1], tier);
 
@@ -4841,7 +5090,7 @@ fn render_onboarding(
     // 3. Sleek floating HUD docked in the lower portion of the full-bleed canvas.
     match app.onboarding_view {
         OnboardingView::Adjusting => {
-            let hud_h = 8.min(chunks[1].height);
+            let hud_h = adjusting_hud_h;
             let hud_w = chunks[1].width.saturating_sub(4).clamp(42, 76);
             let hud_y = chunks[1].y + chunks[1].height.saturating_sub(hud_h + 1);
             let hud_x = chunks[1].x + chunks[1].width.saturating_sub(hud_w) / 2;
@@ -4947,7 +5196,7 @@ fn render_onboarding(
             let submitting = app.onboarding_view == OnboardingView::Submitting;
             let connected = matches!(app.connection, ConnectionState::Connected);
             let card_w = chunks[1].width.saturating_sub(4).clamp(42, 68);
-            let card_h = 9.min(chunks[1].height);
+            let card_h = confirm_card_h;
             let card_y = chunks[1].y + chunks[1].height.saturating_sub(card_h + 1);
             let card_x = chunks[1].x + chunks[1].width.saturating_sub(card_w) / 2;
             let card_area = Rect::new(card_x, card_y, card_w, card_h);
@@ -5233,23 +5482,23 @@ fn render_dashboard(
         &[
             KeyHint {
                 key: "D",
-                label: "",
+                label: "pulse",
             },
             KeyHint {
                 key: "UP/DN",
-                label: "",
+                label: "events",
             },
             KeyHint {
                 key: "F",
-                label: "",
+                label: "follow",
             },
             KeyHint {
                 key: "TAB",
-                label: "",
+                label: "view",
             },
             KeyHint {
                 key: "?",
-                label: "",
+                label: "help",
             },
             KeyHint {
                 key: "Q",
@@ -5287,7 +5536,11 @@ fn render_dashboard(
     let content = if footer_area.width < 100 {
         Text::from(vec![
             Line::from(footer),
-            Line::from(hint_spans(hints, theme)),
+            Line::from(fit_hint_spans(
+                hints,
+                usize::from(footer_area.width).saturating_sub(2),
+                theme,
+            )),
         ])
     } else {
         footer.push(separator(theme));
@@ -5498,8 +5751,9 @@ fn render_help(
         key_line("Q / CTRL-C", "session menu / detach", theme),
         key_line("TAB / 1-7", "cycle or jump to workspace", theme),
         key_line("N", "focus campaign lead", theme),
-        key_line("C", "chapter brief (comms local)", theme),
-        key_line("R / ? / ESC", "reconnect / close help", theme),
+        key_line("C", "chapter briefing (globe view)", theme),
+        key_line("R", "reconnect to the daemon", theme),
+        key_line("? / ESC", "close this help", theme),
         Line::from(""),
         section_line("OVERVIEW / PROBES / RESEARCH", theme),
         key_line("ARROWS", "select entry or probe", theme),
@@ -6018,6 +6272,37 @@ mod tests {
         SubregionClass,
     };
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn truncation_ends_on_a_word_boundary() {
+        let text =
+            "If this signature persists across unrelated sites, does one planet contain all of it?";
+        let cut = truncate_chars(text, 40, true);
+        assert!(cut.ends_with("..."), "{cut}");
+        assert!(cut.chars().count() <= 40, "{cut}");
+        let stem = cut.trim_end_matches("...");
+        assert!(
+            text.starts_with(stem) && text[stem.len()..].starts_with(' '),
+            "{cut}"
+        );
+        assert_eq!(truncate_chars("short", 40, false), "short");
+    }
+
+    #[test]
+    fn selection_scroll_keeps_the_selected_span_visible() {
+        assert_eq!(selection_scroll(30, 10, Some((2, 4))), 0);
+        assert_eq!(selection_scroll(30, 10, Some((18, 20))), 10);
+        assert_eq!(selection_scroll(30, 10, Some((28, 30))), 20);
+        assert_eq!(selection_scroll(8, 10, Some((6, 8))), 0);
+        assert_eq!(selection_scroll(30, 10, None), 0);
+    }
+
+    #[test]
+    fn paragraph_breaks_survive_rendering() {
+        let lines = paragraph_lines("First sentence.\nSecond paragraph.", Style::default());
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].spans[0].content, "Second paragraph.");
+    }
 
     fn status(complete: bool) -> StatusSnapshot {
         StatusSnapshot {

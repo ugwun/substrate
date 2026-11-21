@@ -38,17 +38,27 @@ cargo build --workspace
 ./target/debug/mind-cli play
 ```
 
-`play` starts the daemon if necessary and opens the session menu. From there you can
-continue, detach while the simulation keeps running, save and stop the daemon completely,
-or create a confirmed new playthrough. The lower-level lifecycle commands remain available:
+`play` starts the daemon if necessary. A fresh world goes straight into the Awakening and
+Coherence opening; a returning session opens the session menu, where you can continue,
+detach while the simulation keeps running, save and stop the daemon completely, or create a
+confirmed new playthrough (`Q` reopens it at any time). `play --resume` (or `mind-tui
+--resume`) skips the menu and returns directly to the game. The lower-level lifecycle
+commands remain available:
 
 ```sh
 ./target/debug/mind-cli daemon start
 ./target/debug/mind-cli daemon status
 ./target/debug/mind-cli daemon status --watch
+./target/debug/mind-cli daemon status --line
 ./target/debug/mind-tui
 ./target/debug/mind-cli daemon stop
 ```
+
+Substrate is built to sit beside other work. `daemon status --line` prints a one-line
+summary of the soonest operation for a shell prompt or status bar, and a terminal pane as
+small as 38×5 switches the TUI to a compact Pilot Strip with the current objective and
+countdown. `--title` mirrors progress into the terminal title (OSC 0), and `--bell` rings the
+terminal bell when an operation completes; both are opt-in.
 
 After rebuilding across an IPC protocol change, `play` reports when an older daemon
 still owns the configured endpoint. Run `./target/debug/mind-cli daemon stop` once and
@@ -166,7 +176,7 @@ Global controls:
 
 Probe Bay controls:
 
-- Left/Right, Up/Down, or `1`/`2`: switch between the Survey Scout and Extraction Probe blueprints
+- Left/Right or Up/Down: switch between the Survey Scout and Extraction Probe blueprints
 - `g`: swap the extractor between balanced, cargo, and shielded rigs live while ready
 - Enter: jump to the selected probe's current or target region on **Planet**
 
@@ -174,14 +184,14 @@ Planet controls:
 
 - arrow keys: navigate one region on the 10-by-20 globe
 - Shift-arrow keys: jump two latitude bands or five longitude sectors
-- `n`: focus the globe on the active campaign lead region
+- `n`: focus the active campaign lead (in the local field, the lead sector when the lead is in this region; otherwise the lead region on the globe)
 - Enter: use the selected region's primary available action
 - `s`: deploy the protected survey scout (also redeploys directly while holding)
 - `x`: prepare a risky extraction from a surveyed deposit
 - `g`: cycle the extractor between balanced, cargo, and shielded rigs
 - `b`: prepare relay construction at a surveyed site once materials are ready
 - `r`: recall the scout when its active operation belongs to the selected region
-- `a`: queue or clear the earned routine available in the selected region
+- `a`: before automation, queue or clear one survey waypoint for the scout's next region; once earned, queue or clear the routine available in the selected region
 - `v`: enter the selected region's 4-by-4 local field once that region has been surveyed; before it is available, the footer and region inspector explain the regional-survey requirement
 - Page Up/Page Down: scroll the persistent region inspector
 - Esc: cancel an extraction or construction confirmation
@@ -195,11 +205,16 @@ Local-field controls:
 - `d`, `w`: build or toggle depot and workshop modules
 - `l`, `o`: build or toggle laboratory and observation modules
 - `m`: maintenance project for a weathered node
+- `n`: select the campaign's lead sector in this region
+- Page Up/Page Down: scroll the local inspector (its title shows `[PgDn ▼]` when more is below)
 - Esc or `v`: return to the globe
+
+Letter commands accept either case, so Shift or Caps Lock never blocks input. Archive scrolls
+long observations with Page Up/Page Down.
 
 The selected region eases into view after navigation. After 30 seconds without keyboard input, the globe begins rotating without changing the selected region or authoritative world state; the next input immediately takes control.
 
-Planet's always-visible inspector puts active work in the selected region first. It shows mission identifiers, phases, progress, remaining time, accepted extraction rig, exposure and capacity, local construction, core processing or rebuilding, queued survey position, extraction-route state, the latest local report, discovered facts, local structures and probes, available actions, and a separate explanation for each blocked action. After the foundation chapter, Planet switches in place between the globe and a spatial 4-by-4 local field while preserving the parent region. The field and inspector expose only discovered terrain, energy, hazard, deposits, projects, base power, integrity, connectivity, modules, and contextual operations; fog, frontier, survey, infrastructure, and active work remain distinct without relying on color. A persistent header summarizes mapped coverage, gathered and refined stores, fabrication, active profile, and analysis. Risky extraction and material-consuming construction require confirmation. Overview adds aggregate power, node, project, coverage, and horizon progress without dispatching regional commands. Research presents available directions, active work, permanent completions, and profiles. Archive keeps discovered player-visible observations permanently, separates them from their current interpretation, and presents the visible state and controls of its powered-laboratory comparison. System Map is hidden until the mechanical horizon and ordered observations are complete, then opens automatically with a read-only local-system diagram and explicit demo boundary. Reattaching after the daemon has continued running presents only unreviewed visible operations, current stores and objective, and practical next destinations. System retains daemon diagnostics and event navigation.
+Planet's always-visible inspector puts active work in the selected region first. It shows mission identifiers, phases, progress, remaining time, accepted extraction rig, exposure and capacity, local construction, core processing or rebuilding, queued survey position, extraction-route state, the latest local report, discovered facts, local structures and probes, available actions, and a separate explanation for each blocked action. Once a region's regional survey completes, Planet can switch in place between the globe and that region's spatial 4-by-4 local field while preserving the parent region; foothold construction and local extraction join it after the foundation chapter. The field and inspector expose only discovered terrain, energy, hazard, deposits, projects, base power, integrity, connectivity, modules, and contextual operations; fog, frontier, survey, infrastructure, and active work remain distinct without relying on color. A persistent header summarizes mapped coverage, gathered and refined stores, fabrication, active profile, and analysis. Risky extraction and material-consuming construction require confirmation. Overview adds aggregate power, node, project, coverage, and horizon progress without dispatching regional commands. Research presents available directions, active work, permanent completions, and profiles. Archive keeps discovered player-visible observations permanently, separates them from their current interpretation, and presents the visible state and controls of its powered-laboratory comparison. System Map is hidden until the mechanical horizon and ordered observations are complete, then opens automatically with a read-only local-system diagram and explicit demo boundary. Reattaching after the daemon has continued running presents only unreviewed visible operations, current stores and objective, and practical next destinations. System retains daemon diagnostics and event navigation.
 
 The starting scout can initially reach regions up to two graph hops from the core. Arrival permanently detects broad terrain; completing a regional survey records conditions, deposits, honest extraction risk, and one analysis unit. Deposits contain deterministic amounts from 8 to 24 units. The extraction probe's balanced rig carries four units. The cargo rig adds two units but raises exposure one tier, slows travel by 25%, lengthens extraction to 35 seconds, and takes 75 seconds to rebuild after loss. The shielded rig sacrifices one unit, lowers exposure one tier, slows travel by 50%, lengthens extraction to 40 seconds, and takes 90 seconds to rebuild after loss. The selected rig stacks with research profiles and local depot or workshop support, while every mission retains the exact capacity, risk, timing, and recovery accepted at deployment. A probe may be permanently lost with its cargo at the displayed 5%, 15%, or 30% risk; the core always rebuilds it so progression cannot softlock. Returned material refines automatically. A relay costs 8 structural, 6 conductive, and 6 silicate units, takes 90 seconds to construct, and extends reach by two hops. Surveying beyond the original range opens research: Reach adds a network hop and faster surveys, Resilience lowers extraction risk by one tier, and Throughput adds two cargo units, faster refining, and one additional concurrent base-project slot. Completing any direction earns a bounded survey queue and automation for manually proven extraction routes.
 

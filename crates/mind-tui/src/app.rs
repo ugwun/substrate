@@ -147,6 +147,7 @@ pub struct App {
     pub probe_panel_scroll: u16,
     pub research_selection: usize,
     pub archive_selection: usize,
+    pub archive_detail_scroll: u16,
     pub show_return_summary: bool,
     pub active_transmission_id: Option<String>,
     pub replay_transmission_id: Option<String>,
@@ -215,6 +216,7 @@ impl Default for App {
             probe_panel_scroll: 0,
             research_selection: 0,
             archive_selection: 0,
+            archive_detail_scroll: 0,
             show_return_summary: false,
             active_transmission_id: None,
             replay_transmission_id: None,
@@ -1791,7 +1793,15 @@ impl App {
     pub fn focus_campaign_lead(&mut self) -> bool {
         // Inside 4x4 local view, focus the actionable sector in this region first (e.g. a
         // connected node needing an Observatory/Lab, or a Detected frontier sector needing [S]).
-        if self.workspace == Workspace::Planet && self.local_view {
+        // When the campaign lead points at another region, leave the local field and go there.
+        let lead_is_here = self.planet.as_ref().is_none_or(|planet| {
+            planet
+                .campaign
+                .lead_region_id
+                .as_deref()
+                .is_none_or(|lead| Some(lead) == self.selected_region_id.as_deref())
+        });
+        if self.workspace == Workspace::Planet && self.local_view && lead_is_here {
             if let Some((slot, label)) = self.best_local_lead_slot() {
                 self.selected_subregion_slot = slot;
                 self.pending_action = None;
@@ -1897,6 +1907,18 @@ impl App {
             .archive_selection
             .saturating_add_signed(delta)
             .min(count - 1);
+        self.archive_detail_scroll = 0;
+    }
+
+    pub fn scroll_archive_detail(&mut self, amount: i16) {
+        self.archive_detail_scroll = if amount.is_negative() {
+            self.archive_detail_scroll
+                .saturating_sub(amount.unsigned_abs())
+        } else {
+            self.archive_detail_scroll
+                .saturating_add(amount as u16)
+                .min(64)
+        };
     }
 
     pub fn archive_experiment_action(&self) -> Option<ContextAction> {

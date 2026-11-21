@@ -151,12 +151,18 @@ pub fn build_coherence_buffer(
     selected_band: usize,
     phase: f64,
     confirming: bool,
+    reserved_bottom_rows: u16,
 ) -> PixelBuffer {
     let pw = usize::from(width.max(24));
     let ph = usize::from(height.max(10)) * 2;
     let mut buf = PixelBuffer::new(pw, ph, Rgb(1, 12, 20));
     let wf = pw as f32;
-    let hf = ph as f32;
+    // Waves, datum and glow live in the stage above the docked HUD so no trough hides under it.
+    let stage_rows = height
+        .max(10)
+        .saturating_sub(reserved_bottom_rows)
+        .max(height.max(10) / 2);
+    let sh = f32::from(stage_rows) * 2.0;
     let t = phase as f32;
     let aligned = positions[0] == positions[1] && positions[1] == positions[2];
 
@@ -202,8 +208,8 @@ pub fn build_coherence_buffer(
 
     // Central vertical phase datum line & lock aura.
     let cx = wf * 0.5;
-    let cy = hf * 0.44;
-    buf.stroke_line(cx, hf * 0.08, cx, hf * 0.78, Rgb(24, 72, 88), 0.65);
+    let cy = sh * 0.48;
+    buf.stroke_line(cx, sh * 0.08, cx, sh * 0.94, Rgb(24, 72, 88), 0.65);
 
     if aligned || confirming {
         let pulse = (t * TAU * 1.4).sin() * 0.15 + 0.85;
@@ -211,7 +217,7 @@ pub fn build_coherence_buffer(
             cx,
             cy,
             wf * 0.24,
-            hf * 0.26,
+            sh * 0.30,
             Rgb(64, 214, 216),
             0.55 * pulse,
         );
@@ -219,7 +225,7 @@ pub fn build_coherence_buffer(
             cx,
             cy,
             wf * 0.10,
-            hf * 0.12,
+            sh * 0.14,
             Rgb(250, 210, 84),
             0.65 * pulse,
         );
@@ -228,14 +234,14 @@ pub fn build_coherence_buffer(
     // Three full-width luminous harmonic wave curves representing the 3 alignment bands.
     let margin = (wf * 0.06).max(3.0);
     let span = (wf - margin * 2.0).max(8.0);
-    let amp = (hf * 0.11).max(2.5);
+    let amp = (sh * 0.11).max(2.5);
 
     for (band, &slot) in positions.iter().enumerate() {
         let is_selected = band == selected_band && !confirming;
         let band_cy = if aligned || confirming {
             cy + (band as f32 - 1.0) * 1.2
         } else {
-            hf * (0.26 + band as f32 * 0.18)
+            sh * (0.24 + band as f32 * 0.24)
         };
         let slot_angle = (f32::from(slot % 12) / 12.0) * TAU;
         let col = if aligned || confirming {
@@ -831,7 +837,7 @@ fn draw_discovery_005_wider_frame(buf: &mut PixelBuffer, t: f32, r: f32) {
 /// Projected terminal cell `(col, row, corona_rows)` of the Local Star during Solar Horizon pullback.
 pub fn solar_horizon_star_cell(width: u16, height: u16, elapsed_secs: f32) -> (u16, u16, u16) {
     let pw = usize::from(width.max(24)) as f32;
-    let ph = (usize::from(height.max(10)) * 2) as f32;
+    let ph = (usize::from(height.max(4)) * 2) as f32;
     let p = (elapsed_secs / 2.6).clamp(0.0, 1.0);
     let eased = 1.0 - (1.0 - p).powi(3);
     let star_x = pw * (0.14 + 0.14 * eased);
@@ -851,7 +857,7 @@ pub fn solar_horizon_world_cell(
     phase: f64,
 ) -> (u16, u16) {
     let pw = usize::from(width.max(24)) as f32;
-    let ph = (usize::from(height.max(10)) * 2) as f32;
+    let ph = (usize::from(height.max(4)) * 2) as f32;
     let p = (elapsed_secs / 2.6).clamp(0.0, 1.0);
     let eased = 1.0 - (1.0 - p).powi(3);
     let t = phase as f32;
@@ -875,7 +881,7 @@ pub fn build_solar_horizon_buffer(
     phase: f64,
 ) -> PixelBuffer {
     let pw = usize::from(width.max(24));
-    let ph = usize::from(height.max(10)) * 2;
+    let ph = usize::from(height.max(4)) * 2;
     let mut buf = PixelBuffer::new(pw, ph, Rgb(1, 10, 18));
     let p = (elapsed_secs / 2.6).clamp(0.0, 1.0);
     let eased = 1.0 - (1.0 - p).powi(3);
@@ -996,7 +1002,8 @@ fn draw_solar_frame_internal(buf: &mut PixelBuffer, eased: f32, t: f32) {
         for &(nx, ny, vis, col) in &candidates {
             if vis {
                 let ox = wf * nx;
-                let oy = hf * ny;
+                // Keep each return and its glow clear of the bottom legend band (2 rows = 4 px).
+                let oy = (hf * ny).min(hf - 7.0);
                 buf.add_radial_glow(ox, oy, 3.2, 2.6, col, 0.55 * eased);
                 buf.set(ox.round() as i32, oy.round() as i32, col, 0.95);
             }
@@ -1651,11 +1658,11 @@ mod tests {
             ),
             (
                 "coherence_drift",
-                build_coherence_buffer(80, 24, [1, 5, 9], 0, 0.25, false),
+                build_coherence_buffer(80, 24, [1, 5, 9], 0, 0.25, false, 7),
             ),
             (
                 "coherence_lock",
-                build_coherence_buffer(80, 24, [4, 4, 4], 1, 0.50, true),
+                build_coherence_buffer(80, 24, [4, 4, 4], 1, 0.50, true, 10),
             ),
             (
                 "solar_horizon",

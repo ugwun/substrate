@@ -315,6 +315,16 @@ async fn run_dashboard(
     }
 }
 
+fn normalize_letter_case(mut key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(c) = key.code {
+        if c.is_ascii_uppercase() {
+            key.code = KeyCode::Char(c.to_ascii_lowercase());
+            key.modifiers.remove(event::KeyModifiers::SHIFT);
+        }
+    }
+    key
+}
+
 async fn handle_key(
     app: &mut App,
     key: KeyEvent,
@@ -328,6 +338,8 @@ async fn handle_key(
     {
         return Ok(true);
     }
+    // Hints display uppercase letters; accept either case (Shift or Caps Lock) for every command.
+    let key = normalize_letter_case(key);
     let now = std::time::Instant::now();
     app.record_input(now);
     app.clear_transition();
@@ -868,6 +880,12 @@ async fn handle_key(
         KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::Archive => {
             app.move_archive_selection(1);
         }
+        KeyCode::PageUp if app.workspace == Workspace::Archive => {
+            app.scroll_archive_detail(-4);
+        }
+        KeyCode::PageDown if app.workspace == Workspace::Archive => {
+            app.scroll_archive_detail(4);
+        }
         KeyCode::Char('v') if app.workspace == Workspace::Archive => {
             app.open_archive_replay(now);
         }
@@ -963,6 +981,16 @@ async fn handle_session_menu(
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn letter_commands_accept_either_case() {
+        let upper = normalize_letter_case(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(upper.code, KeyCode::Char('n'));
+        assert!(!upper.modifiers.contains(KeyModifiers::SHIFT));
+        let other = normalize_letter_case(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert_eq!(other.code, KeyCode::Char('?'));
+        assert!(other.modifiers.contains(KeyModifiers::SHIFT));
+    }
 
     #[tokio::test]
     async fn aligned_onboarding_requires_observe_then_awaken() {

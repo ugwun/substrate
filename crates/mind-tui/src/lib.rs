@@ -6,6 +6,7 @@ pub mod connection;
 pub mod globe;
 pub mod probes;
 pub mod raster;
+pub mod textwrap;
 pub mod theme;
 pub mod transmission;
 pub mod ui;

@@ -11,7 +11,7 @@ use ratatui::{
     style::{Modifier, Style},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use std::time::Instant;
@@ -214,15 +214,24 @@ fn render_blueprint_panel(
 
     // Bottom: Crisp craft hardware callout + live status banner.
     let callout_line = if !selected_extractor {
-        let mode = match planet.scout.state {
-            ScoutState::Surveying => "ACTIVE SCAN SWEEP",
-            ScoutState::Outbound | ScoutState::Returning => "TRANSIT BURN",
-            ScoutState::Holding => "HOLDING ON STATION",
-            ScoutState::Ready => "STANDBY AT CORE",
+        let narrow = chunks[2].width < 42;
+        let mode = match (planet.scout.state, narrow) {
+            (ScoutState::Surveying, false) => "ACTIVE SCAN SWEEP",
+            (ScoutState::Surveying, true) => "SCANNING",
+            (ScoutState::Outbound | ScoutState::Returning, false) => "TRANSIT BURN",
+            (ScoutState::Outbound | ScoutState::Returning, true) => "TRANSIT",
+            (ScoutState::Holding, false) => "HOLDING ON STATION",
+            (ScoutState::Holding, true) => "ON STATION",
+            (ScoutState::Ready, false) => "STANDBY AT CORE",
+            (ScoutState::Ready, true) => "STANDBY",
         };
         Line::from(vec![
             Span::styled(
-                "WIDE SENSOR DISH",
+                if narrow {
+                    "SENSOR DISH"
+                } else {
+                    "WIDE SENSOR DISH"
+                },
                 Style::default().fg(theme.cyan_bright).bold(),
             ),
             Span::styled(" // ", Style::default().fg(theme.faint)),
@@ -537,6 +546,9 @@ fn render_telemetry_panel(
     ));
 
     let inner_h = usize::from(area.height.saturating_sub(2));
+    // Pre-wrap with hanging indents so values continue under the value column and the overflow
+    // cue counts real rendered rows.
+    let lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
     let total_lines = lines.len();
     let title_str = if total_lines > inner_h {
         if options.ascii {
@@ -566,8 +578,11 @@ fn render_telemetry_panel(
         ));
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((app.probe_panel_scroll, 0))
+            .scroll((
+                app.probe_panel_scroll
+                    .min(u16::try_from(total_lines.saturating_sub(inner_h)).unwrap_or(u16::MAX)),
+                0,
+            ))
             .style(theme.panel_style())
             .block(block),
         area,
