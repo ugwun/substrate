@@ -362,6 +362,13 @@ async fn handle_key(
         return Ok(false);
     }
     if app.show_return_summary {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+            && crossterm::terminal::size()
+                .is_ok_and(|(width, height)| !ui::return_summary_visible(app, width, height))
+        {
+            app.notice = Some("ENLARGE THE TERMINAL TO READ THE SUMMARY".into());
+            return Ok(false);
+        }
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
             if let Some(activity_id) = app.dismiss_return_summary() {
                 commands
@@ -726,12 +733,16 @@ async fn handle_key(
                         .send(ConnectionCommand::SurveySubregion(subregion_id))
                         .await
                         .context("connection worker stopped")?;
+                } else {
+                    app.notice = Some("SURVEY UNAVAILABLE HERE // SEE SITE OPERATIONS".into());
                 }
             } else if let Some(ContextAction::Deploy(region_id)) = app.scout_action() {
                 commands
                     .send(ConnectionCommand::DeployScout(region_id))
                     .await
                     .context("connection worker stopped")?;
+            } else {
+                app.notice = Some("SCOUT UNAVAILABLE HERE // SEE REGION OPERATIONS".into());
             }
         }
         KeyCode::Char('x') if app.workspace == Workspace::Planet => {

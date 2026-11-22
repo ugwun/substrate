@@ -515,7 +515,8 @@ pub struct CampaignSnapshot {
 pub enum CampaignLeadKind {
     /// Run a focused survey on a detected frontier sector.
     Frontier,
-    /// Stabilize an offline or failing node by shedding load or funding maintenance.
+    /// Recover a node: restore a suspended power or communications module, fund maintenance,
+    /// or shed load, matching the visible cause.
     Node,
 }
 

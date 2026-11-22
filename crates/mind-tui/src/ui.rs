@@ -1511,19 +1511,41 @@ fn render_research(
     let last_selected =
         app.research_selection + 1 >= research.options.len() + research.profiles.len();
     // The last entry scrolls to the very end so its trailing explanation is always reachable.
-    let scroll = if last_selected && selected_rows.is_some() {
+    let mut scroll = if last_selected && selected_rows.is_some() {
         lines.len().saturating_sub(body_height)
     } else {
         selection_scroll(lines.len(), body_height, selected_rows)
     };
+    // Snap the top to a whole entry or section heading so no orphaned detail row (such as a
+    // wrapped cost) opens the panel, as long as the selection stays fully visible.
+    if scroll > 0 {
+        let is_boundary = |line: &Line<'_>| {
+            let plain: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            plain.starts_with("> ")
+                || plain.trim_end().ends_with(" //")
+                || (plain.starts_with("  ") && !plain[2..].starts_with(' '))
+        };
+        let (sel_start, sel_end) = selected_rows.unwrap_or((scroll, scroll));
+        if let Some(boundary) = (scroll..lines.len()).find(|&row| is_boundary(&lines[row])) {
+            if boundary <= sel_start && boundary + body_height >= sel_end {
+                scroll = boundary;
+            }
+        }
+    }
     let more_below = scroll + body_height < lines.len();
     let block = if scroll > 0 || more_below {
         panel(
-            match (more_below, options.ascii) {
-                (true, true) => " RESEARCH & SPECIALIZATION [more v] ",
-                (true, false) => " RESEARCH & SPECIALIZATION [more ▼] ",
-                (false, true) => " RESEARCH & SPECIALIZATION [^] ",
-                (false, false) => " RESEARCH & SPECIALIZATION [▲] ",
+            match (scroll > 0, more_below, options.ascii) {
+                (true, true, true) => " RESEARCH & SPECIALIZATION [^v] ",
+                (true, true, false) => " RESEARCH & SPECIALIZATION [▲▼] ",
+                (false, _, true) => " RESEARCH & SPECIALIZATION [v] ",
+                (false, _, false) => " RESEARCH & SPECIALIZATION [▼] ",
+                (true, false, true) => " RESEARCH & SPECIALIZATION [^] ",
+                (true, false, false) => " RESEARCH & SPECIALIZATION [▲] ",
             },
             options,
             theme,
@@ -2076,7 +2098,7 @@ fn render_return_summary(
     let max_inner_h = usize::from(area.height.saturating_sub(4)).saturating_sub(2);
     let wrap = |lines: Vec<Line<'static>>| crate::textwrap::hang_wrap(lines, inner_w);
     let sep = if options.ascii { " | " } else { " · " };
-    let header = wrap(vec![
+    let mut header = wrap(vec![
         Line::from(vec![
             Span::styled(
                 format!(
@@ -2232,6 +2254,17 @@ fn render_return_summary(
 
     // Fit to the viewport: header, evidence title and tail (stores, CURRENT, NEXT, acknowledge hint)
     // always show. The newest event is kept, then as much of the quote as fits, then older events.
+    // On short terminals the away events matter more than the chapter question: drop the
+    // question rows (everything between the chapter line and the WHILE YOU WERE AWAY row)
+    // before any event is shortened.
+    let first_event_rows = activity.last().map_or(0, Vec::len);
+    if header.len() + evidence_head.len() + tail.len() + first_event_rows > max_inner_h
+        && header.len() > 2
+    {
+        let away = header.pop();
+        header.truncate(1);
+        header.extend(away);
+    }
     let budget = max_inner_h.saturating_sub(header.len() + evidence_head.len() + tail.len());
     let activity_rows = |count: usize| -> usize {
         let shown: usize = activity.iter().rev().take(count).map(Vec::len).sum();
@@ -5516,7 +5549,16 @@ fn render_workspace_footer(
         if text.chars().count() <= badge_room {
             return Some((text, highlight));
         }
-        let (head, tail) = text.rsplit_once(' ').unwrap_or((text.as_str(), ""));
+        // Keep the countdown, plus any "(+N)" count of further timers that follows it.
+        let (mut head, mut tail) = text.rsplit_once(' ').unwrap_or((text.as_str(), ""));
+        let owned_tail;
+        if tail.starts_with("(+") {
+            if let Some((rest, countdown)) = head.rsplit_once(' ') {
+                owned_tail = format!("{countdown} {tail}");
+                head = rest;
+                tail = owned_tail.as_str();
+            }
+        }
         let tail_width = tail.chars().count();
         if badge_room < tail_width + 8 {
             return None;
@@ -6386,6 +6428,12 @@ fn render_pilot_strip(
             truncate_chars(&format!(" {text}"), width, options.ascii),
             Style::default().fg(theme.gold).bold(),
         ));
+        let hint = if app.show_return_summary && rows_left < 3 {
+            // Too short to show the event: it stays pending until the strip is taller.
+            " enlarge to read"
+        } else {
+            hint
+        };
         if rows_left >= 3 && app.show_return_summary {
             if let Some(first) = planet.unreviewed_activity.last() {
                 lines.push(Line::styled(
@@ -6671,6 +6719,16 @@ fn pilot_confirmation_rows(
     )
 }
 
+/// Whether the Return Summary (latest event plus its continue hint) is visible at this size.
+/// Input keeps the summary pending when it is not, so nothing is dismissed unread.
+#[must_use]
+pub fn return_summary_visible(app: &App, width: u16, height: u16) -> bool {
+    if width >= 44 && height >= 14 {
+        return true;
+    }
+    width >= 24 && height >= 5 && app.planet.is_some() && !app.onboarding_pending()
+}
+
 /// Whether a pending confirmation is fully visible at this terminal size, using the same
 /// thresholds as `render`: the full interface always shows its compact card, the Pilot Strip
 /// shows it only when it fits, and the resize screen never shows it. Input refuses Enter
@@ -6706,19 +6764,34 @@ pub fn pilot_confirmation_fits(app: &App, width: u16, height: u16, ascii: bool) 
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
+    // Word-wrapped body and a title that shrinks with the terminal, so nothing is cut mid-word.
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let title = [" RESIZE // MIN 44x14 ", " RESIZE ", " 44x14 "]
+        .into_iter()
+        .find(|title| title.chars().count() + 2 <= usize::from(area.width))
+        .unwrap_or("");
+    let body = if inner_width >= 30 {
+        vec![
+            "Substrate needs at least 44x14.".to_owned(),
+            format!("Current terminal: {}x{}", area.width, area.height),
+        ]
+    } else {
+        vec![
+            "Minimum 44x14".to_owned(),
+            format!("Current {}x{}", area.width, area.height),
+        ]
+    };
+    let lines = crate::textwrap::hang_wrap(
+        body.into_iter()
+            .map(|text| Line::styled(text, Style::default().fg(theme.text)))
+            .collect(),
+        inner_width.max(1),
+    );
     frame.render_widget(
-        Paragraph::new(format!(
-            "Substrate needs at least 44x14.\nCurrent terminal: {}x{}",
-            area.width, area.height
-        ))
-        .alignment(Alignment::Center)
-        .style(theme.raised_style())
-        .block(panel(
-            " RESIZE // MIN 44x14 ",
-            options,
-            theme,
-            PanelTone::Warning,
-        )),
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(theme.raised_style())
+            .block(panel(title, options, theme, PanelTone::Warning)),
         area,
     );
 }
@@ -6753,7 +6826,7 @@ fn render_help(
         key_line("TAB / 1-7", "cycle or jump to workspace", theme),
         key_line("N", "focus campaign lead", theme),
         key_line("C", "chapter briefing (globe view)", theme),
-        key_line("R", "reconnect to the daemon", theme),
+        key_line("R", "reconnect (when offline)", theme),
         key_line("? / ESC", "close this help", theme),
         Line::from(""),
         section_line("OVERVIEW / PROBES / RESEARCH", theme),
@@ -7533,6 +7606,26 @@ mod tests {
             assert!(!text.contains("ENTER"), "{width}x{height}\n{text}");
         }
         assert!(confirmation_visible(&app, 80, 24, true));
+        // The resize screen itself never cuts a word or a number.
+        for (width, height) in [(23_u16, 12_u16), (20, 8), (30, 4)] {
+            app.pending_action = None;
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            if width < 24 {
+                assert!(text.contains("44x14"), "{width}x{height}\n{text}");
+                assert!(
+                    text.contains(&format!("{width}x{height}")),
+                    "{width}x{height}\n{text}"
+                );
+            }
+        }
     }
 
     #[test]

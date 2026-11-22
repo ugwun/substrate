@@ -832,7 +832,7 @@ fn observation_array_lead(
             format!(
                 "{building} Observation Array project(s) underway; keep their nodes powered and connected."
             ),
-            "TAB",
+            "",
             None,
             None,
         );

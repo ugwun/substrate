@@ -85,7 +85,7 @@ Substrate is designed to be learned from the interface. The persistent campaign 
 
 1. Complete Coherence by aligning the three signal gaps until the oscilloscope locks.
    There is no timer or failure state. Awakening delivers the first permanent observation
-   as a full-screen Discovery Transmission (`Space`/`Enter` to reveal and file it in
+   as a full-screen Discovery Transmission (`Space` reveals it; `Enter` or `Esc` files it in
    **Archive**).
 2. On **Planet**, press `n` to jump to the highlighted campaign lead (or move from the
    core to a reachable unknown region) and deploy the survey scout with `Enter` or `s`.
