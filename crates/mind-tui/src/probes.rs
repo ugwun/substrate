@@ -246,65 +246,83 @@ fn render_blueprint_panel(
     }
     blit_to_frame(&buf, frame, chunks[1], app.color_tier(options));
 
-    // Bottom: Crisp craft hardware callout + live status banner.
-    let callout_line = if !selected_extractor {
-        let narrow = chunks[2].width < 42;
-        let mode = match (planet.scout.state, narrow) {
-            (ScoutState::Surveying, false) => "ACTIVE SCAN SWEEP",
-            (ScoutState::Surveying, true) => "SCANNING",
-            (ScoutState::Outbound | ScoutState::Returning, false) => "TRANSIT BURN",
-            (ScoutState::Outbound | ScoutState::Returning, true) => "TRANSIT",
-            (ScoutState::Holding, false) => "HOLDING ON STATION",
-            (ScoutState::Holding, true) => "ON STATION",
-            (ScoutState::Ready, false) => "STANDBY AT CORE",
-            (ScoutState::Ready, true) => "STANDBY",
+    // Bottom: Crisp craft hardware callout + live status banner. Each callout picks the most
+    // detailed complete form that fits the panel, so a state or countdown is never cut.
+    let callout_width = usize::from(chunks[2].width);
+    let fit_callout = |candidates: Vec<(String, Option<String>)>| -> (String, Option<String>) {
+        let width_of = |(head, tail): &(String, Option<String>)| {
+            head.chars().count() + tail.as_ref().map_or(0, |tail| tail.chars().count() + 4)
         };
-        Line::from(vec![
-            Span::styled(
-                if narrow {
-                    "SENSOR DISH"
-                } else {
-                    "WIDE SENSOR DISH"
-                },
-                Style::default().fg(theme.cyan_bright).bold(),
-            ),
-            Span::styled(" // ", Style::default().fg(theme.faint)),
-            Span::styled(mode, Style::default().fg(theme.amber)),
-        ])
+        let fallback = candidates.last().cloned().unwrap_or_default();
+        candidates
+            .into_iter()
+            .find(|candidate| width_of(candidate) <= callout_width)
+            .unwrap_or(fallback)
+    };
+    let callout_line = if !selected_extractor {
+        let (long_mode, short_mode) = match planet.scout.state {
+            ScoutState::Surveying => ("ACTIVE SCAN SWEEP", "SCANNING"),
+            ScoutState::Outbound | ScoutState::Returning => ("TRANSIT BURN", "TRANSIT"),
+            ScoutState::Holding => ("HOLDING ON STATION", "ON STATION"),
+            ScoutState::Ready => ("STANDBY AT CORE", "STANDBY"),
+        };
+        let (head, tail) = fit_callout(vec![
+            ("WIDE SENSOR DISH".into(), Some(long_mode.into())),
+            ("SENSOR DISH".into(), Some(long_mode.into())),
+            ("SENSOR DISH".into(), Some(short_mode.into())),
+            (short_mode.into(), None),
+        ]);
+        let mut spans = vec![Span::styled(
+            head,
+            Style::default().fg(theme.cyan_bright).bold(),
+        )];
+        if let Some(tail) = tail {
+            spans.push(Span::styled(" // ", Style::default().fg(theme.faint)));
+            spans.push(Span::styled(tail, Style::default().fg(theme.amber)));
+        }
+        Line::from(spans)
     } else if rebuilding {
-        Line::from(vec![Span::styled(
-            format!(
-                "GANTRY ACTIVE // FABRICATING {rebuild_pct}% // {}s",
-                remaining_rebuild.div_ceil(1_000)
+        let seconds = remaining_rebuild.div_ceil(1_000);
+        let (head, _) = fit_callout(vec![
+            (
+                format!("GANTRY ACTIVE // FABRICATING {rebuild_pct}% // {seconds}s"),
+                None,
             ),
+            (format!("FABRICATING {rebuild_pct}% // {seconds}s"), None),
+            (format!("FAB {rebuild_pct}% {seconds}s"), None),
+        ]);
+        Line::from(vec![Span::styled(
+            head,
             Style::default().fg(theme.gold).bold(),
         )])
     } else {
-        let rig_callout = if chunks[2].width < 42 {
-            match planet.extractor.loadout {
-                ExtractorLoadout::Balanced => "BALANCED FRAME",
-                ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS",
-                ExtractorLoadout::Shielded => "ABLATIVE CANOPY",
+        let (long_rig, short_rig) = match planet.extractor.loadout {
+            ExtractorLoadout::Balanced => ("BALANCED FRAME // TWIN ORE PODS", "BALANCED FRAME"),
+            ExtractorLoadout::Cargo => {
+                ("+2 OUTBOARD HOPPERS // EXPANDED BAY", "+2 OUTBOARD HOPPERS")
             }
-        } else {
-            match planet.extractor.loadout {
-                ExtractorLoadout::Balanced => "BALANCED FRAME // TWIN ORE PODS",
-                ExtractorLoadout::Cargo => "+2 OUTBOARD HOPPERS // EXPANDED BAY",
-                ExtractorLoadout::Shielded => "ABLATIVE CANOPY // SHIELD PLATING",
-            }
+            ExtractorLoadout::Shielded => ("ABLATIVE CANOPY // SHIELD PLATING", "ABLATIVE CANOPY"),
         };
-        Line::from(vec![
-            Span::styled(rig_callout, Style::default().fg(theme.cyan_bright).bold()),
-            Span::styled(" // ", Style::default().fg(theme.faint)),
-            Span::styled(
-                if planet.extractor.state == ExtractorState::Ready {
-                    "G SWAP RIG"
-                } else {
-                    "RIG LOCKED"
-                },
-                Style::default().fg(theme.muted),
-            ),
-        ])
+        let lock = if planet.extractor.state == ExtractorState::Ready {
+            "G SWAP RIG"
+        } else {
+            "RIG LOCKED"
+        };
+        let (head, tail) = fit_callout(vec![
+            (long_rig.into(), Some(lock.into())),
+            (short_rig.into(), Some(lock.into())),
+            (short_rig.into(), None),
+            (lock.into(), None),
+        ]);
+        let mut spans = vec![Span::styled(
+            head,
+            Style::default().fg(theme.cyan_bright).bold(),
+        )];
+        if let Some(tail) = tail {
+            spans.push(Span::styled(" // ", Style::default().fg(theme.faint)));
+            spans.push(Span::styled(tail, Style::default().fg(theme.muted)));
+        }
+        Line::from(spans)
     };
 
     let banner_width = usize::from(chunks[2].width);

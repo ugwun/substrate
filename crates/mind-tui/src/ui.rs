@@ -2264,9 +2264,9 @@ fn render_return_summary(
     let info = wrap(lines);
     // Enter/Esc acknowledge on the last page; earlier pages step forward so no away event is
     // ever acknowledged unseen. Kept on one row so it survives being pinned.
-    let hint_line = |page: Option<(usize, usize)>| -> Line<'static> {
-        let label = match page {
-            Some((current, total)) => format!(" next page {}/{total}", current + 1),
+    let hint_line = |next: Option<String>| -> Line<'static> {
+        let label = match next {
+            Some(next) => next,
             None if inner_w < 40 => " continue".to_owned(),
             None => " acknowledge and continue".to_owned(),
         };
@@ -2296,7 +2296,7 @@ fn render_return_summary(
     let fits_all = |tail_rows: usize| fixed_rows + tail_rows <= max_inner_h;
 
     let mut body = header;
-    let mut pages = 1usize;
+    let mut next_page = 0u64;
     if fits_all(full_tail) || fits_all(1) {
         let keep_info = fits_all(full_tail);
         let tail_rows = if keep_info { full_tail } else { 1 };
@@ -2328,37 +2328,66 @@ fn render_return_summary(
         }
         body.push(hint_line(None));
     } else {
-        // Page the events oldest first; the evidence title joins the last page when it fits.
+        // Page the events oldest first from the anchored activity id, so a resize never skips
+        // an event; new evidence joins the last page when it fits, or gets a page of its own.
         let budget = max_inner_h.saturating_sub(body.len() + 1).max(1);
-        let mut page_starts = vec![0usize];
-        let mut used = 0usize;
-        for (index, entry) in activity.iter().enumerate() {
-            let rows = entry.len().min(budget);
-            if used + rows > budget && used > 0 {
-                page_starts.push(index);
-                used = 0;
-            }
-            used += rows;
-        }
-        pages = page_starts.len();
-        let page = app.return_summary_page.min(pages - 1);
-        let from = page_starts[page];
-        let to = page_starts.get(page + 1).copied().unwrap_or(activity.len());
-        let mut shown: Vec<Line<'static>> = Vec::new();
-        for entry in &activity[from..to] {
-            shown.extend(entry.iter().take(budget).cloned());
-        }
-        shown.truncate(budget);
-        let room = budget.saturating_sub(shown.len());
-        body.extend(shown);
-        if page + 1 == pages && room >= evidence_head.len() {
+        let anchor = app.return_summary_anchor;
+        let records = &planet.unreviewed_activity;
+        if anchor == u64::MAX && !evidence_head.is_empty() {
+            let room = budget.saturating_sub(evidence_head.len());
             body.extend(evidence_head);
+            if room < evidence_quote.len() {
+                body.extend(evidence_quote.into_iter().take(room.saturating_sub(1)));
+                if room > 0 {
+                    let ellipsis = if options.ascii { "..." } else { "…" };
+                    body.push(Line::styled(
+                        format!("  {ellipsis} full record follows"),
+                        Style::default().fg(theme.muted),
+                    ));
+                }
+            } else {
+                body.extend(evidence_quote);
+            }
+            body.push(hint_line(None));
+        } else {
+            let from = records
+                .iter()
+                .position(|record| record.activity_id >= anchor)
+                .unwrap_or(0)
+                .min(activity.len().saturating_sub(1));
+            let mut to = from;
+            let mut used = 0usize;
+            while to < activity.len() {
+                let rows = activity[to].len().min(budget);
+                if used + rows > budget && to > from {
+                    break;
+                }
+                used += rows;
+                to += 1;
+            }
+            let mut shown: Vec<Line<'static>> = Vec::new();
+            for entry in &activity[from..to] {
+                shown.extend(entry.iter().take(budget).cloned());
+            }
+            shown.truncate(budget);
+            let room = budget.saturating_sub(shown.len());
+            body.extend(shown);
+            let label = if to < activity.len() {
+                next_page = records
+                    .get(to)
+                    .map_or(0, |record| record.activity_id.max(1));
+                Some(format!(" next ({} more)", activity.len() - to))
+            } else if !evidence_head.is_empty() && room < evidence_head.len() {
+                next_page = u64::MAX;
+                Some(" next (new evidence)".to_owned())
+            } else {
+                body.extend(evidence_head);
+                None
+            };
+            body.push(hint_line(label));
         }
-        body.push(hint_line((page + 1 < pages).then_some((page, pages))));
     }
-    app.scroll_limits
-        .summary_pages
-        .set(u16::try_from(pages).unwrap_or(u16::MAX));
+    app.scroll_limits.summary_next.set(next_page);
     // Last resort on very small terminals: compact, then keep the acknowledge hint pinned.
     if body.len() > max_inner_h {
         body.retain(|line| {
@@ -2743,6 +2772,13 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             }
             // Already inside the lead field: V would be inert, so point at N (lead sector) instead.
             Some("V") if in_lead => (Some("N"), planet.campaign.next_action.clone()),
+            // In another region's field, module and field keys act on the wrong node: N leaves
+            // for the lead region first.
+            Some("V" | "O" | "M" | "P" | "C" | "D" | "W" | "L")
+                if !in_lead && planet.campaign.lead_region_id.is_some() =>
+            {
+                (Some("N"), planet.campaign.next_action.clone())
+            }
             // Campaign extraction leads are regional deposits: X acts from the globe. The ESC
             // chip says how to get there, so the daemon's text (target and next node) stays whole.
             Some("X") => (Some("ESC"), planet.campaign.next_action.clone()),
@@ -7237,8 +7273,8 @@ fn compact_session_menu_rows(
             "REPLACE ALL PROGRESS WITH A NEW WORLD?".to_owned(),
             vec![
                 format!(" ENTER replace{sep}ESC back"),
-                format!(" ENTER replace{sep}ESC"),
-                " ENTER / ESC".to_owned(),
+                format!(" ENTER new{sep}ESC back"),
+                " ENTER new ESC back".to_owned(),
             ],
         ),
         SessionMenuState::StartingNewPlaythrough => ("CREATING WORLD...".to_owned(), Vec::new()),
@@ -7258,9 +7294,15 @@ fn compact_session_menu_rows(
     let key_text: Vec<&str> = keys.iter().map(String::as_str).collect();
     let key_row =
         (!keys.is_empty()).then(|| Line::styled(fit(&key_text), Style::default().fg(theme.muted)));
-    let status_fits = status_rows
-        .iter()
-        .all(|row| crate::textwrap::line_width(row) <= width);
+    // The key row must actually show its keys: an empty fallback never counts as fitting.
+    let keys_fit = key_row.as_ref().is_none_or(|row| {
+        let text: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+        text.contains("ENTER") && text.contains("ESC")
+    });
+    let status_fits = keys_fit
+        && status_rows
+            .iter()
+            .all(|row| crate::textwrap::line_width(row) <= width);
     let needed = status_rows.len() + usize::from(key_row.is_some());
     if status_fits && needed <= height {
         let mut rows = Vec::new();
@@ -9589,6 +9631,23 @@ mod tests {
             },
         );
         assert!(shielded.contains("ABLATIVE CANOPY"), "{shielded}");
+        for width in [44_u16, 60, 76, 80, 100] {
+            let text = screen(
+                &app,
+                width,
+                24,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            for line in text.lines().filter(|line| line.contains("RIG LOCK")) {
+                assert!(
+                    line.contains("RIG LOCKED"),
+                    "{width}x24 cut the rig state\n{text}"
+                );
+            }
+        }
 
         // Verify rebuilding state displays the assembly gantry.
         planet.extractor.state = ExtractorState::Rebuilding;
@@ -9606,6 +9665,23 @@ mod tests {
         );
         assert!(rebuilding.contains("GANTRY ACTIVE"), "{rebuilding}");
         assert!(rebuilding.contains("FABRICATING"), "{rebuilding}");
+        // At every width the rebuild callout keeps its percent and countdown whole.
+        for width in [44_u16, 60, 76, 80, 100] {
+            let text = screen(
+                &app,
+                width,
+                24,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            assert!(
+                text.lines()
+                    .any(|line| line.contains("% ") && line.contains("45s")),
+                "{width}x24 lost the rebuild countdown\n{text}"
+            );
+        }
 
         // Enter jumps cleanly to Planet focused on the probe's region.
         assert!(app.focus_selected_probe_region());
@@ -10383,6 +10459,9 @@ mod tests {
             (24, 3),
             (23, 12),
             (20, 8),
+            (11, 9),
+            (16, 6),
+            (12, 4),
         ] {
             let text = screen(&app, width, height, options);
             if session_confirmation_visible(&app, width, height, true) {
@@ -10545,7 +10624,7 @@ mod tests {
             no_color: true,
         };
         for (width, height) in [(44_u16, 14_u16), (60, 16), (80, 24)] {
-            app.return_summary_page = 0;
+            app.return_summary_anchor = 0;
             let mut seen = std::collections::BTreeSet::new();
             for _ in 0..10 {
                 let text = screen(&app, width, height, options);
@@ -10559,12 +10638,29 @@ mod tests {
                     assert!(text.contains("continue"), "{width}x{height}\n{text}");
                     break;
                 }
-                assert!(text.contains("next page"), "{width}x{height}\n{text}");
+                assert!(text.contains("next ("), "{width}x{height}\n{text}");
             }
             assert_eq!(seen.len(), 7, "{width}x{height} hid an event: {seen:?}");
         }
+        // Resizing mid-way never skips an event: page at 44x14, then grow and keep paging.
+        app.return_summary_anchor = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        let sizes = [(44_u16, 14_u16), (60, 16), (80, 24), (44, 14), (80, 24)];
+        for (step, (width, height)) in sizes.iter().cycle().take(12).enumerate() {
+            let text = screen(&app, *width, *height, options);
+            for id in 501..=507 {
+                if text.contains(&format!("#{id}")) {
+                    seen.insert(id);
+                }
+            }
+            if !app.advance_return_summary() {
+                break;
+            }
+            assert!(step < 11, "paging never finished");
+        }
+        assert_eq!(seen.len(), 7, "a resize skipped an event: {seen:?}");
         assert!(app.dismiss_return_summary().is_some());
-        assert_eq!(app.return_summary_page, 0);
+        assert_eq!(app.return_summary_anchor, 0);
     }
 
     #[test]
@@ -10579,7 +10675,26 @@ mod tests {
             ascii: true,
             no_color: true,
         };
-        for (width, height) in [(44_u16, 16_u16), (44, 18), (44, 24), (48, 18), (60, 20)] {
+        for (width, height) in [
+            (44_u16, 14_u16),
+            (44, 16),
+            (44, 18),
+            (44, 24),
+            (48, 18),
+            (60, 20),
+        ] {
+            // New evidence is always named on some page before the summary can be acknowledged.
+            app.return_summary_anchor = 0;
+            let mut named = false;
+            for _ in 0..12 {
+                let page = screen(&app, width, height, options);
+                named |= page.contains("NEW EVIDENCE RECORDED");
+                if !app.advance_return_summary() {
+                    break;
+                }
+            }
+            assert!(named, "{width}x{height} never named the new evidence");
+            app.return_summary_anchor = 0;
             let text = screen(&app, width, height, options);
             for line in text.lines() {
                 if line.contains("full record") {

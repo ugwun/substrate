@@ -1806,7 +1806,8 @@ impl GameState {
             ActivityKind::Survey,
             Some(survey.region_id.clone()),
             crate::campaign::resolve_plurals(&format!(
-                "Focused local survey completed at {designation}; one analysis unit recorded and {frontier_revealed} adjacent sector(s) detected."
+                "Focused local survey completed at {designation}; one analysis unit recorded and {frontier_revealed} adjacent {}.",
+                if frontier_revealed == 1 { "sector detected" } else { "sectors detected" }
             )),
         );
         self.changed();

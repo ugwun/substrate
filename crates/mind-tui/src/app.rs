@@ -127,8 +127,9 @@ pub struct ScrollLimits {
     pub overview_rows: std::cell::Cell<u16>,
     /// Whole System events visible on the current page.
     pub event_rows: std::cell::Cell<u16>,
-    /// Pages the Return Summary needs to show every away event at the current size.
-    pub summary_pages: std::cell::Cell<u16>,
+    /// Where the next Return Summary page starts (an activity id, or `u64::MAX` for the new
+    /// evidence page); 0 when the page on screen is the last one.
+    pub summary_next: std::cell::Cell<u64>,
 }
 
 impl ScrollLimits {
@@ -155,7 +156,7 @@ impl Default for ScrollLimits {
             archive_rows: std::cell::Cell::new(5),
             overview_rows: std::cell::Cell::new(5),
             event_rows: std::cell::Cell::new(5),
-            summary_pages: std::cell::Cell::new(1),
+            summary_next: std::cell::Cell::new(0),
         }
     }
 }
@@ -219,8 +220,9 @@ pub struct App {
     /// The System Map became available while its introducing transmission was still queued.
     pub system_map_deferred: bool,
     pub show_return_summary: bool,
-    /// Return Summary page being shown when the away events need more than one page.
-    pub return_summary_page: usize,
+    /// First activity id on the Return Summary page being shown (0 = from the oldest event,
+    /// `u64::MAX` = the new evidence page). Anchoring to an id keeps resizes from skipping events.
+    pub return_summary_anchor: u64,
     pub active_transmission_id: Option<String>,
     pub replay_transmission_id: Option<String>,
     pub transmission_opened_at: Option<Instant>,
@@ -293,7 +295,7 @@ impl Default for App {
             scroll_limits: ScrollLimits::default(),
             system_map_deferred: false,
             show_return_summary: false,
-            return_summary_page: 0,
+            return_summary_anchor: 0,
             active_transmission_id: None,
             replay_transmission_id: None,
             transmission_opened_at: None,
@@ -565,7 +567,7 @@ impl App {
                 .is_some_and(|planet| !planet.unreviewed_activity.is_empty())
         {
             self.show_return_summary = true;
-            self.return_summary_page = 0;
+            self.return_summary_anchor = 0;
         }
         self.clamp_overview_selection();
         self.clamp_archive_selection();
@@ -1816,18 +1818,19 @@ impl App {
     /// Step to the next Return Summary page; false once the last page is showing, when Enter
     /// or Esc acknowledges every away event.
     pub fn advance_return_summary(&mut self) -> bool {
-        let pages = usize::from(self.scroll_limits.summary_pages.get().max(1));
-        if self.return_summary_page + 1 < pages {
-            self.return_summary_page += 1;
-            true
-        } else {
-            false
+        let next = self.scroll_limits.summary_next.get();
+        if next == 0 {
+            return false;
         }
+        self.return_summary_anchor = next;
+        self.scroll_limits.summary_next.set(0);
+        true
     }
 
     pub fn dismiss_return_summary(&mut self) -> Option<u64> {
         self.show_return_summary = false;
-        self.return_summary_page = 0;
+        self.return_summary_anchor = 0;
+        self.scroll_limits.summary_next.set(0);
         if self.active_transmission_id.is_some() {
             self.transmission_opened_at = Some(Instant::now());
             self.transmission_revealed = false;

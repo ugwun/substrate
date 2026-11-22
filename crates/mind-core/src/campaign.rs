@@ -353,17 +353,29 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
         } else if let Some(deposit_region) =
             first_surveyed_deposit(input.regions, input.refined_inventory)
         {
-            (
-                    format!(
-                        "Extract deposits (X at {}) to gather S {}/8 C {}/6 Si {}/6 for the first relay.",
-                        region_label(input.regions, &deposit_region),
-                        input.refined_inventory.structural,
-                        input.refined_inventory.conductive,
-                        input.refined_inventory.silicate
-                    ),
+            let stores = format!(
+                "S {}/8 C {}/6 Si {}/6",
+                input.refined_inventory.structural,
+                input.refined_inventory.conductive,
+                input.refined_inventory.silicate
+            );
+            let at = region_label(input.regions, &deposit_region);
+            if input.extractor_ready {
+                (
+                    format!("Extract deposits (X at {at}) to gather {stores} for the first relay."),
                     Some("X".into()),
                     Some(deposit_region),
                 )
+            } else {
+                // The extractor is out or rebuilding: keep the deposit as the lead, no key yet.
+                (
+                    format!(
+                        "Extractor busy. Extract at {at} (X) once it is ready to gather {stores} for the first relay."
+                    ),
+                    None,
+                    Some(deposit_region),
+                )
+            }
         } else {
             let target = first_unsurveyed_reachable(input.regions);
             (
@@ -915,26 +927,65 @@ fn observation_array_lead(
         if short.silicate > 0 {
             parts.push(format!("Si {}", short.silicate));
         }
-        if !input.extractor_ready {
-            return (
-                format!(
-                    "Need {} more for the next {noun}; extract (X) once the extractor is ready.",
-                    parts.join(" / ")
-                ),
-                "",
-                None,
-                None,
-            );
-        }
         let deposit = first_deposit_for(input.regions, short);
+        let deposit_kind = deposit
+            .as_deref()
+            .and_then(|id| input.regions.iter().find(|region| region.id == id))
+            .and_then(|region| region.deposit.as_ref())
+            .map(|deposit| deposit.resource);
         let source = deposit.as_deref().map_or_else(String::new, |id| {
             format!(" at {}", region_label(input.regions, id))
         });
-        return (
-            format!(
-                "Extract {}{source} (X) for the next {noun}, then press O at {label}.",
+        if !input.extractor_ready {
+            // Keep the deposit as the lead while the extractor is out, with no key to press yet.
+            return (
+                format!(
+                    "Need {} more for the next {noun}; extract{source} (X) once the extractor is ready.",
+                    parts.join(" / ")
+                ),
+                "",
+                deposit.or_else(|| Some(host.region_id.clone())),
+                None,
+            );
+        }
+        // A region holds one deposit: name only the amount it supplies, the rest separately.
+        let kind_part = |kind: ResourceKind| match kind {
+            ResourceKind::Structural => {
+                (short.structural > 0).then(|| format!("S {}", short.structural))
+            }
+            ResourceKind::Conductive => {
+                (short.conductive > 0).then(|| format!("C {}", short.conductive))
+            }
+            ResourceKind::Silicate => {
+                (short.silicate > 0).then(|| format!("Si {}", short.silicate))
+            }
+        };
+        let here = deposit_kind.and_then(kind_part);
+        let text = match here {
+            Some(here) => {
+                let rest: Vec<&String> = parts.iter().filter(|part| **part != here).collect();
+                if rest.is_empty() {
+                    format!(
+                        "Extract {here}{source} (X) for the next {noun}, then press O at {label}."
+                    )
+                } else {
+                    let rest = rest
+                        .iter()
+                        .map(|part| part.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ");
+                    format!(
+                        "Extract {here}{source} (X) for the next {noun} ({rest} still needed), then press O at {label}."
+                    )
+                }
+            }
+            None => format!(
+                "Extract {} (X) for the next {noun}, then press O at {label}.",
                 parts.join(" / ")
             ),
+        };
+        return (
+            text,
             "X",
             deposit.or_else(|| Some(host.region_id.clone())),
             None,
