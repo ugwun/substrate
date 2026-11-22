@@ -30,6 +30,8 @@ pub(crate) struct CampaignInput<'a> {
     pub scout_target_region_id: Option<&'a str>,
     pub queued_survey_region_id: Option<&'a str>,
     pub extractor_ready: bool,
+    /// Region of an active (unpaused) automated extraction route, if any.
+    pub extraction_route_region_id: Option<&'a str>,
     pub active_site_survey: bool,
     pub active_base_projects: usize,
     pub observed_subregions: usize,
@@ -365,6 +367,15 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
                     format!("Extract deposits (X at {at}) to gather {stores} for the first relay."),
                     Some("X".into()),
                     Some(deposit_region),
+                )
+            } else if let Some(route) = route_blocking(input, Some(deposit_region.as_str())) {
+                let route_label = region_label(input.regions, &route).to_owned();
+                (
+                    format!(
+                        "The {route_label} route holds the extractor. Press A at {route_label} to clear it, then extract at {at} (X) to gather {stores} for the first relay."
+                    ),
+                    Some("A".into()),
+                    Some(route),
                 )
             } else {
                 // The extractor is out or rebuilding: keep the deposit as the lead, no key yet.
@@ -936,6 +947,18 @@ fn observation_array_lead(
         let source = deposit.as_deref().map_or_else(String::new, |id| {
             format!(" at {}", region_label(input.regions, id))
         });
+        if let Some(route) = route_blocking(input, deposit.as_deref()) {
+            let route_label = region_label(input.regions, &route).to_owned();
+            return (
+                format!(
+                    "Need {} more for the next {noun}; the {route_label} route holds the extractor. Press A at {route_label} to clear it, then extract{source} (X).",
+                    parts.join(" / ")
+                ),
+                "A",
+                Some(route),
+                None,
+            );
+        }
         if !input.extractor_ready {
             // Keep the deposit as the lead while the extractor is out, with no key to press yet.
             return (
@@ -1002,6 +1025,13 @@ fn observation_array_lead(
         Some(host.region_id.clone()),
         Some(host.subregion_id.clone()),
     )
+}
+
+/// When an automated route holds the extractor for a region other than the one guidance needs,
+/// the player must clear that route (A on its region) before the extractor is ever free.
+fn route_blocking(input: &CampaignInput<'_>, wanted: Option<&str>) -> Option<String> {
+    let route = input.extraction_route_region_id?;
+    (!input.extractor_ready && wanted != Some(route)).then(|| route.to_owned())
 }
 
 fn region_label<'a>(regions: &'a [RegionSnapshot], region_id: &'a str) -> &'a str {

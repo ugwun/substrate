@@ -360,7 +360,7 @@ fn render_planet(
     theme: Theme,
     now: Instant,
 ) {
-    let header_height = if area.height >= 30 { 5 } else { 3 };
+    let header_height = workspace_header_height(app, area, Workspace::Planet);
     let rows = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(7),
@@ -477,6 +477,15 @@ fn render_planet(
             label: "help",
         },
     ];
+    // Module and rig/maintenance keys only appear once footholds exist.
+    let network_keys = app
+        .planet
+        .as_ref()
+        .is_some_and(|planet| planet.network.unlocked || !planet.network.bases.is_empty());
+    let local_controls: Vec<KeyHint<'_>> = local_controls
+        .into_iter()
+        .filter(|hint| network_keys || !matches!(hint.key, "P/C/D/W/L/O" | "G/M"))
+        .collect();
     let controls: &[KeyHint<'_>] = if app.local_view {
         &local_controls
     } else if area.width < 72 {
@@ -612,7 +621,7 @@ fn render_overview(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(workspace_header_height(app, area, Workspace::Overview)),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1057,7 +1066,17 @@ fn render_overview(
         theme,
     ));
     summary_lines.push(Line::from(""));
-    summary_lines.push(section_line("FLEET & NETWORK", theme));
+    let network_shown = planet.network.unlocked
+        || !planet.network.bases.is_empty()
+        || !planet.network.active_projects.is_empty();
+    summary_lines.push(section_line(
+        if network_shown {
+            "FLEET & NETWORK"
+        } else {
+            "FLEET"
+        },
+        theme,
+    ));
     summary_lines.extend(wrapped_field_lines(
         "SCOUT",
         &format!("{:?} // {scout_location}", planet.scout.state),
@@ -1093,10 +1112,7 @@ fn render_overview(
     ));
     // Network rows unfold with the network: before footholds exist they describe systems the
     // player has not reached yet.
-    if planet.network.unlocked
-        || !planet.network.bases.is_empty()
-        || !planet.network.active_projects.is_empty()
-    {
+    if network_shown {
         summary_lines.extend(wrapped_field_lines(
             "NODES",
             &if planet.campaign.chapter_number >= 4 {
@@ -1339,7 +1355,7 @@ fn render_research(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(workspace_header_height(app, area, Workspace::Research)),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1487,7 +1503,7 @@ fn render_research(
             let state = if profile.active {
                 "ACTIVE"
             } else if profile.unlocked && field_operation_active {
-                "IN FLIGHT"
+                "PROBES OUT"
             } else if profile.unlocked {
                 "AVAILABLE"
             } else {
@@ -1708,7 +1724,7 @@ fn render_system_map(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(workspace_header_height(app, area, Workspace::SystemMap)),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -1794,7 +1810,7 @@ fn render_archive(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(workspace_header_height(app, area, Workspace::Archive)),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -2510,6 +2526,76 @@ fn report_outcome_label(outcome: MissionReportOutcome) -> &'static str {
     }
 }
 
+/// Header rows for a workspace: tabs, the question (Planet's NEXT on short terminals), any
+/// Planet rows, and a rule, plus one row when that line would be cut on a terminal at least 24
+/// rows tall, so it wraps instead.
+fn workspace_header_height(app: &App, area: Rect, active: Workspace) -> u16 {
+    let tall_planet = active == Workspace::Planet && area.height >= 30;
+    let base = if tall_planet { 5 } else { 3 };
+    if area.height < 24 {
+        return base;
+    }
+    let Some(planet) = &app.planet else {
+        return base;
+    };
+    // Planet wraps its NEXT line (the actionable one); other workspaces wrap the question.
+    let needed = if active == Workspace::Planet {
+        let (key, text) = local_next_override(app, planet);
+        let action = if text.is_empty() {
+            planet.campaign.next_action.chars().count()
+        } else {
+            text.chars().count()
+        };
+        let chip = key
+            .or(planet.campaign.next_action_key.as_deref())
+            .map_or(0, |key| key.chars().count() + 3);
+        " NEXT // ".len() + chip + action
+    } else {
+        " QUESTION // ".len() + planet.campaign.question.chars().count()
+    };
+    if needed + 1 > usize::from(area.width) {
+        base + 1
+    } else {
+        base
+    }
+}
+
+/// Wrap a header line's text under its prefix across at most two rows, ending the second row
+/// with an ellipsis at a word boundary when the text is longer still.
+fn wrap_header_line(
+    prefix: Vec<Span<'static>>,
+    text: &str,
+    width: usize,
+    style: Style,
+    ascii: bool,
+) -> Vec<Line<'static>> {
+    let indent: usize = prefix.iter().map(|span| span.content.chars().count()).sum();
+    let mut rows = wrap_indented_lines(prefix, indent, text, indent, width, style);
+    if rows.len() > 2 {
+        let rest: String = rows[1..]
+            .iter()
+            .map(|row| {
+                row.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        rows.truncate(1);
+        rows.push(Line::from(vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(
+                truncate_chars(&rest, width.saturating_sub(indent + 1), ascii),
+                style,
+            ),
+        ]));
+    }
+    rows
+}
+
 fn render_workspace_header(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2518,6 +2604,13 @@ fn render_workspace_header(
     options: RenderOptions,
     theme: Theme,
 ) {
+    // A header one row taller than its base wraps the question (or compact Planet's NEXT).
+    let extended = if active == Workspace::Planet {
+        area.height == 4 || area.height == 6
+    } else {
+        area.height == 4
+    };
+    let area_height = area.height.saturating_sub(u16::from(extended));
     let visible = app.visible_workspaces();
     let compact = area.width < 106 || (visible.len() >= 7 && area.width < 126);
     let ultra_compact = area.width < 84;
@@ -2643,7 +2736,7 @@ fn render_workspace_header(
         left_spans.extend(right_spans);
     }
 
-    let second_line = if active == Workspace::Planet && area.height <= 3 {
+    let second_line = if active == Workspace::Planet && area_height <= 3 {
         if let Some(planet) = &app.planet {
             let surveyed = planet
                 .regions
@@ -2659,68 +2752,100 @@ fn render_workspace_header(
                 spans.push(Span::styled(format!(" {key} "), theme.key_style()));
                 spans.push(Span::raw(" "));
             }
-            let mut badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            // The action (and its target) matters more than the map count: drop the badge
-            // before truncating the instruction.
-            let full_action_len = if override_text.is_empty() {
-                planet.campaign.next_action.chars().count()
+            if extended {
+                let action = terminal_text(
+                    if override_text.is_empty() {
+                        &planet.campaign.next_action
+                    } else {
+                        &override_text
+                    },
+                    options.ascii,
+                );
+                wrap_header_line(
+                    spans,
+                    &action,
+                    total_width,
+                    Style::default().fg(theme.text_strong),
+                    options.ascii,
+                )
             } else {
-                override_text.chars().count()
-            };
-            if used + full_action_len + badge.len() + 1 > total_width {
-                badge.clear();
-            }
-            let max_action = total_width.saturating_sub(used + badge.len() + 1);
-            let action = terminal_text(
-                if override_text.is_empty() {
-                    &planet.campaign.next_action
+                let mut badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                // The action (and its target) matters more than the map count: drop the badge
+                // before truncating the instruction.
+                let full_action_len = if override_text.is_empty() {
+                    planet.campaign.next_action.chars().count()
                 } else {
-                    &override_text
-                },
-                options.ascii,
-            );
-            let clipped = truncate_chars(&action, max_action, options.ascii);
-            let pad = total_width.saturating_sub(used + clipped.chars().count() + badge.len());
-            spans.push(Span::styled(
-                clipped,
-                Style::default().fg(theme.text_strong),
-            ));
-            if pad > 0 {
-                spans.push(Span::raw(" ".repeat(pad)));
+                    override_text.chars().count()
+                };
+                if used + full_action_len + badge.len() + 1 > total_width {
+                    badge.clear();
+                }
+                let max_action = total_width.saturating_sub(used + badge.len() + 1);
+                let action = terminal_text(
+                    if override_text.is_empty() {
+                        &planet.campaign.next_action
+                    } else {
+                        &override_text
+                    },
+                    options.ascii,
+                );
+                let clipped = truncate_chars(&action, max_action, options.ascii);
+                let pad = total_width.saturating_sub(used + clipped.chars().count() + badge.len());
+                spans.push(Span::styled(
+                    clipped,
+                    Style::default().fg(theme.text_strong),
+                ));
+                if pad > 0 {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+                spans.push(Span::styled(badge, Style::default().fg(theme.cyan_bright)));
+                vec![Line::from(spans)]
             }
-            spans.push(Span::styled(badge, Style::default().fg(theme.cyan_bright)));
-            Line::from(spans)
         } else {
-            Line::styled(
+            vec![Line::styled(
                 " Awaiting planetary state",
                 Style::default().fg(theme.muted),
-            )
+            )]
         }
     } else if let Some(planet) = &app.planet {
         let q_prefix = " QUESTION // ";
         let q_text = terminal_text(&planet.campaign.question, options.ascii);
-        let q_clipped = truncate_chars(
-            &q_text,
-            total_width.saturating_sub(q_prefix.len() + 1),
-            options.ascii,
-        );
-        Line::from(vec![
-            Span::styled(q_prefix, Style::default().fg(theme.cyan).bold()),
-            Span::styled(q_clipped, Style::default().fg(theme.text_strong).bold()),
-        ])
+        if extended && active != Workspace::Planet {
+            wrap_header_line(
+                vec![Span::styled(
+                    q_prefix,
+                    Style::default().fg(theme.cyan).bold(),
+                )],
+                &q_text,
+                total_width,
+                Style::default().fg(theme.text_strong).bold(),
+                options.ascii,
+            )
+        } else {
+            let q_clipped = truncate_chars(
+                &q_text,
+                total_width.saturating_sub(q_prefix.len() + 1),
+                options.ascii,
+            );
+            vec![Line::from(vec![
+                Span::styled(q_prefix, Style::default().fg(theme.cyan).bold()),
+                Span::styled(q_clipped, Style::default().fg(theme.text_strong).bold()),
+            ])]
+        }
     } else {
-        Line::from(vec![
+        vec![Line::from(vec![
             Span::styled(" OBJECTIVE // ", Style::default().fg(theme.amber).bold()),
             Span::styled(
                 "Awaiting planetary state",
                 Style::default().fg(theme.text_strong).bold(),
             ),
-        ])
+        ])]
     };
 
-    let mut lines = vec![Line::from(left_spans), second_line];
-    if active == Workspace::Planet && area.height >= 5 {
+    let mut lines = vec![Line::from(left_spans)];
+    lines.extend(second_line);
+    if active == Workspace::Planet && area_height >= 5 {
         if let Some(planet) = &app.planet {
             let mut next_spans = vec![Span::styled(
                 " NEXT // ",
@@ -2739,14 +2864,24 @@ fn render_workspace_header(
             }
             let used: usize = next_spans.iter().map(|s| s.content.chars().count()).sum();
             let action = terminal_text(display_action, options.ascii);
-            next_spans.push(Span::styled(
-                truncate_chars(&action, total_width.saturating_sub(used + 1), options.ascii),
-                Style::default().fg(theme.text),
-            ));
-            lines.push(Line::from(next_spans));
+            if extended {
+                lines.extend(wrap_header_line(
+                    next_spans,
+                    &action,
+                    total_width,
+                    Style::default().fg(theme.text),
+                    options.ascii,
+                ));
+            } else {
+                next_spans.push(Span::styled(
+                    truncate_chars(&action, total_width.saturating_sub(used + 1), options.ascii),
+                    Style::default().fg(theme.text),
+                ));
+                lines.push(Line::from(next_spans));
+            }
         }
     }
-    if active == Workspace::Planet && area.height >= 4 {
+    if active == Workspace::Planet && area_height >= 4 {
         lines.push(planet_store_header_line(
             app.planet.as_ref(),
             area.width,
@@ -2836,7 +2971,7 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
     } else if !app.local_view
         && matches!(
             planet.campaign.next_action_key.as_deref(),
-            Some("X" | "V" | "S")
+            Some("X" | "V" | "S" | "A")
         )
         && planet
             .campaign
@@ -2844,7 +2979,7 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             .as_deref()
             .is_some_and(|lead| Some(lead) != app.selected_region_id.as_deref())
     {
-        // X, V and S act on the selected region: move to the named lead region (N) first.
+        // X, V, S and A act on the selected region: move to the named lead region (N) first.
         (Some("N"), planet.campaign.next_action.clone())
     } else if !app.local_view
         && matches!(
@@ -3168,7 +3303,7 @@ fn render_probes(
     now: Instant,
 ) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(workspace_header_height(app, area, Workspace::Probes)),
         Constraint::Min(8),
         Constraint::Length(2),
     ])
@@ -5920,8 +6055,25 @@ fn render_onboarding(
     ])
     .split(area);
 
-    // Docked HUD/card heights: borders plus content rows (notice adds one), leaving no empty rows.
-    let adjusting_hud_h = (6 + u16::from(app.notice.is_some())).min(chunks[1].height);
+    // Docked HUD/card heights: borders plus content rows, leaving no empty rows. A notice is
+    // wrapped by whole words to the HUD's inner width and adds its wrapped rows.
+    let hud_inner_w = usize::from(
+        chunks[1]
+            .width
+            .saturating_sub(4)
+            .clamp(42, 76)
+            .saturating_sub(2),
+    );
+    let notice_rows: Vec<Line<'static>> = app.notice.as_ref().map_or_else(Vec::new, |notice| {
+        crate::textwrap::hang_wrap(
+            vec![Line::styled(
+                notice.clone(),
+                Style::default().fg(theme.warning).bold(),
+            )],
+            hud_inner_w,
+        )
+    });
+    let adjusting_hud_h = (6 + u16::try_from(notice_rows.len()).unwrap_or(2)).min(chunks[1].height);
     // Five content rows plus borders; one extra when the status line may wrap on narrow panes.
     let confirm_card_h = if chunks[1].width < 60 { 8 } else { 7 }.min(chunks[1].height);
     let reserved_rows = if confirming {
@@ -6036,12 +6188,7 @@ fn render_onboarding(
                     theme,
                 )),
             ];
-            if let Some(notice) = &app.notice {
-                hud_lines.push(Line::styled(
-                    notice.as_str(),
-                    Style::default().fg(theme.warning).bold(),
-                ));
-            }
+            hud_lines.extend(notice_rows.iter().cloned());
             frame.render_widget(
                 Paragraph::new(hud_lines)
                     .alignment(Alignment::Center)
@@ -6116,6 +6263,7 @@ fn render_dashboard(
 ) {
     // Short terminals get a one-line telemetry summary so events keep usable space.
     let compact_telemetry = area.height < 22;
+    let header_h = workspace_header_height(app, area, Workspace::System);
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if compact_telemetry
     {
         // Disconnected status text can push the controls onto a second footer row.
@@ -6126,7 +6274,7 @@ fn render_dashboard(
             1
         };
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(header_h),
             Constraint::Length(3),
             Constraint::Min(3),
             Constraint::Length(footer_h),
@@ -6136,7 +6284,7 @@ fn render_dashboard(
     } else if area.width >= 72 {
         // Six telemetry rows plus borders.
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(header_h),
             Constraint::Length(8),
             Constraint::Min(6),
             Constraint::Length(2),
@@ -6147,7 +6295,7 @@ fn render_dashboard(
         (rows[0], columns[0], columns[1], rows[2], rows[3])
     } else {
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(header_h),
             Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(6),
@@ -6772,7 +6920,15 @@ fn render_pilot_strip(
     } else if let Some((_, record)) = app.active_transmission_record() {
         lines.push(Line::styled(
             truncate_chars(
-                &format!(" NEW RECORD // {}", record.title),
+                &format!(
+                    " {} // {}",
+                    if app.replay_transmission_id.is_some() {
+                        "REPLAY"
+                    } else {
+                        "NEW RECORD"
+                    },
+                    record.title
+                ),
                 width,
                 options.ascii,
             ),
@@ -10993,5 +11149,39 @@ mod tests {
             ));
         }
         assert!(reached, "the Overview status end was unreachable at 44x14");
+    }
+
+    #[test]
+    fn header_wraps_guidance_instead_of_cutting_it_on_standard_terminals() {
+        let mut app = local_field_test_app();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(80_u16, 24_u16), (80, 36), (60, 24)] {
+            app.workspace = Workspace::Planet;
+            let planet_text = screen(&app, width, height, options);
+            let flat = planet_text
+                .replace('"', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                flat.contains("first planetary survey."),
+                "{width}x{height} cut NEXT\n{planet_text}"
+            );
+            app.workspace = Workspace::Archive;
+            let archive_text = screen(&app, width, height, options);
+            let flat = archive_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                flat.contains("efficiency required?"),
+                "{width}x{height} cut the question\n{archive_text}"
+            );
+        }
     }
 }

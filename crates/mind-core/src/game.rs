@@ -788,6 +788,10 @@ impl GameState {
                 extractor_ready: self.extractor_available
                     && self.active_extraction.is_none()
                     && self.extractor_rebuild_remaining_ms == 0,
+                extraction_route_region_id: self
+                    .extraction_route_region_id
+                    .as_deref()
+                    .filter(|_| self.extraction_route_paused_reason.is_none()),
                 active_site_survey: self.active_site_survey.is_some(),
                 active_base_projects: self.base_projects.len(),
                 observed_subregions,

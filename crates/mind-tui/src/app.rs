@@ -139,7 +139,10 @@ impl ScrollLimits {
     /// One page: the visible rows minus one for context, at least one row.
     #[must_use]
     pub fn page(rows: &std::cell::Cell<u16>) -> i16 {
-        i16::try_from(rows.get().saturating_sub(1).max(1)).unwrap_or(i16::MAX)
+        // Tiny panes page by their full height; taller ones keep one row of context.
+        let rows = rows.get();
+        let step = if rows <= 3 { rows } else { rows - 1 };
+        i16::try_from(step.max(1)).unwrap_or(i16::MAX)
     }
 }
 
