@@ -333,6 +333,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions, now: Ins
             area,
             app.help_scroll,
             &app.scroll_limits.help,
+            &app.scroll_limits.help_rows,
             options,
             theme,
         );
@@ -406,7 +407,10 @@ fn render_planet(
     } else {
         // Stacked layout: the local field needs at least its four grid rows plus borders, so
         // on short panes it takes that minimum and the inspector keeps the rest.
-        let field_rows = if app.local_view {
+        let field_rows = if app.pending_action.is_some() {
+            // A confirmation needs room for its title, summary and keys in the inspector.
+            (rows[1].height * 56 / 100).min(rows[1].height.saturating_sub(5))
+        } else if app.local_view {
             let minimum = u16::from(planet.network.subregion_rows.max(1)) + 2;
             (rows[1].height * 56 / 100)
                 .max(minimum)
@@ -414,8 +418,8 @@ fn render_planet(
         } else {
             rows[1].height * 56 / 100
         };
-        let body = Layout::vertical([Constraint::Length(field_rows), Constraint::Min(3)])
-            .split(rows[1]);
+        let body =
+            Layout::vertical([Constraint::Length(field_rows), Constraint::Min(3)]).split(rows[1]);
         if app.local_view {
             render_local_sites(frame, body[0], app, planet, options, theme, now);
             render_local_inspector(frame, body[1], app, planet, options, theme);
@@ -1353,34 +1357,37 @@ fn render_research(
                 "LOCKED"
             };
             let entry_start = lines.len();
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{marker} {:<22}", option.title),
-                    Style::default().fg(theme.text_strong),
-                ),
-                Span::styled(
-                    format!(" {state:<9}"),
-                    Style::default()
-                        .fg(if is_active {
-                            theme.cyan_bright
-                        } else if option.completed {
-                            theme.success
-                        } else if option.available {
-                            theme.amber
-                        } else {
-                            theme.muted
-                        })
-                        .add_modifier(if is_active {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Span::styled(
-                    format!(" {} analysis", option.analysis_cost),
-                    Style::default().fg(theme.muted),
-                ),
-            ]));
+            lines.extend(crate::textwrap::hang_wrap(
+                vec![Line::from(vec![
+                    Span::styled(
+                        format!("{marker} {:<22}", option.title),
+                        Style::default().fg(theme.text_strong),
+                    ),
+                    Span::styled(
+                        format!(" {state:<9}"),
+                        Style::default()
+                            .fg(if is_active {
+                                theme.cyan_bright
+                            } else if option.completed {
+                                theme.success
+                            } else if option.available {
+                                theme.amber
+                            } else {
+                                theme.muted
+                            })
+                            .add_modifier(if is_active {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(
+                        format!(" {} analysis", option.analysis_cost),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])],
+                wrap_width,
+            ));
             lines.extend(wrap_indented_lines(
                 vec![Span::raw("    ")],
                 4,
@@ -1450,6 +1457,13 @@ fn render_research(
                 wrap_width,
                 Style::default().fg(theme.muted),
             ));
+        }
+    }
+    // The last entry owns any trailing explanation so scrolling to it reveals everything below.
+    if let Some((start, _)) = selected_rows {
+        let last_index = research.options.len() + research.profiles.len();
+        if app.research_selection + 1 >= last_index {
+            selected_rows = Some((start, lines.len()));
         }
     }
     let body_height = usize::from(if show_topology {
@@ -1884,9 +1898,13 @@ fn render_archive(
             panels[1],
             detail,
             app.archive_detail_scroll,
-            &app.scroll_limits.archive_detail,
+            (
+                &app.scroll_limits.archive_detail,
+                &app.scroll_limits.archive_rows,
+            ),
             "OBSERVATION",
             false,
+            None,
             options,
             theme,
         );
@@ -2139,7 +2157,15 @@ fn render_return_summary(
         key_span("Enter", theme),
         Span::styled(" / ", Style::default().fg(theme.faint)),
         key_span("Esc", theme),
-        Span::styled(" acknowledge and continue", Style::default().fg(theme.cyan)),
+        // Keep the hint on one row so it survives being pinned on narrow terminals.
+        Span::styled(
+            if inner_w < 40 {
+                " continue"
+            } else {
+                " acknowledge and continue"
+            },
+            Style::default().fg(theme.cyan),
+        ),
     ]));
     let tail = wrap(lines);
 
@@ -2581,8 +2607,14 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
         )
     {
         // Module and maintenance keys act only inside a local field; on the globe, lead with V.
-        // The daemon's text already names the node and key; lead with V to open the field.
-        (Some("V"), planet.campaign.next_action.clone())
+        // The daemon's text already names the node and key. On the lead region V opens its
+        // field; anywhere else N moves to the lead first, so V never opens the wrong field.
+        let on_lead =
+            planet.campaign.lead_region_id.as_deref() == app.selected_region_id.as_deref();
+        (
+            Some(if on_lead { "V" } else { "N" }),
+            planet.campaign.next_action.clone(),
+        )
     } else {
         (None, String::new())
     }
@@ -2985,7 +3017,10 @@ fn render_compact_local_grid(
             } else {
                 coordinate(site)
             };
-            let label: String = format!("{label:^cell_w$}").chars().take(cell_w).collect();
+            let label: String = format!(" {label:<w$}", w = cell_w.saturating_sub(1))
+                .chars()
+                .take(cell_w)
+                .collect();
             let style = if selected_id == Some(site.id.as_str()) {
                 theme.selection_style().fg(theme.cyan_bright).bold()
             } else if site.knowledge == SubregionKnowledge::Unknown {
@@ -3001,7 +3036,11 @@ fn render_compact_local_grid(
     if spare > 0 {
         lines.push(Line::styled(
             truncate_chars(
-                "Compact field // enlarge for sector tiles",
+                if options.ascii {
+                    "... larger terminal shows sector tiles"
+                } else {
+                    "… larger terminal shows sector tiles"
+                },
                 usize::from(inner.width),
                 options.ascii,
             ),
@@ -3506,13 +3545,17 @@ fn render_local_inspector(
         area,
         text,
         app.region_panel_scroll,
-        &app.scroll_limits.region_panel,
+        (
+            &app.scroll_limits.region_panel,
+            &app.scroll_limits.region_rows,
+        ),
         if confirming {
             "SITE CONFIRMATION"
         } else {
             "LOCAL INSPECTOR"
         },
         confirming,
+        pilot_confirmation(app, planet),
         options,
         theme,
     );
@@ -3526,27 +3569,71 @@ fn render_inspector_text(
     area: Rect,
     text: Text<'static>,
     scroll: u16,
-    limit: &std::cell::Cell<u16>,
+    (limit, visible_rows): (&std::cell::Cell<u16>, &std::cell::Cell<u16>),
     title: &str,
     confirming: bool,
+    confirm_summary: Option<String>,
     options: RenderOptions,
     theme: Theme,
 ) {
     let inner_width = usize::from(area.width.saturating_sub(2));
     let inner_height = usize::from(area.height.saturating_sub(2));
+    visible_rows.set(u16::try_from(inner_height).unwrap_or(u16::MAX));
     let mut rows = crate::textwrap::hang_wrap(text.lines, inner_width);
-    // A confirmation must always show what is being confirmed and how to answer: drop spacer
-    // rows first, then keep the opening rows plus the ENTER/ESC rows pinned at the bottom.
+    // A confirmation must always show what is being confirmed, its target and risk or cost, and
+    // how to answer. When the full card does not fit, collapse it to a compact card built from
+    // the one-line summary instead of dropping middle rows.
     if confirming && rows.len() > inner_height {
         rows.retain(|line| {
             line.spans
                 .iter()
                 .any(|span| !span.content.trim().is_empty())
         });
-        if rows.len() > inner_height && inner_height >= 3 {
-            let tail = rows.split_off(rows.len() - 2);
-            rows.truncate(inner_height - 2);
-            rows.extend(tail);
+        if rows.len() > inner_height {
+            let summary = confirm_summary
+                .as_deref()
+                .map(|text| terminal_text(text, options.ascii))
+                .unwrap_or_else(|| "selected operation".to_owned());
+            let keys = Line::from(vec![
+                key_span("ENTER", theme),
+                Span::styled(" confirm  ", Style::default().fg(theme.muted)),
+                key_span("ESC", theme),
+                Span::styled(" cancel", Style::default().fg(theme.muted)),
+            ]);
+            let heading = rows.first().cloned().unwrap_or_else(|| Line::raw(""));
+            let mut compact = vec![heading];
+            compact.extend(crate::textwrap::hang_wrap(
+                vec![Line::styled(
+                    summary.clone(),
+                    Style::default().fg(theme.text_strong),
+                )],
+                inner_width,
+            ));
+            compact.push(keys.clone());
+            if compact.len() > inner_height {
+                // Drop the heading; keep the summary (shortened if needed) and the keys.
+                compact = vec![
+                    Line::from(vec![
+                        Span::styled("CONFIRM ", Style::default().fg(theme.warning).bold()),
+                        Span::styled(
+                            truncate_chars(&summary, inner_width.saturating_sub(8), options.ascii),
+                            Style::default().fg(theme.text_strong),
+                        ),
+                    ]),
+                    keys,
+                ];
+            }
+            if compact.len() > inner_height {
+                compact = vec![Line::from(vec![
+                    Span::styled("CONFIRM ", Style::default().fg(theme.warning).bold()),
+                    Span::styled(
+                        truncate_chars(&summary, inner_width.saturating_sub(20), options.ascii),
+                        Style::default().fg(theme.text_strong),
+                    ),
+                    Span::styled(" ENTER/ESC", Style::default().fg(theme.muted)),
+                ])];
+            }
+            rows = compact;
         }
     }
     let is_heading = |line: &Line<'_>| {
@@ -4185,13 +4272,17 @@ fn render_region_inspector(
         area,
         text,
         app.region_panel_scroll,
-        &app.scroll_limits.region_panel,
+        (
+            &app.scroll_limits.region_panel,
+            &app.scroll_limits.region_rows,
+        ),
         if confirming {
             "REGION CONFIRMATION"
         } else {
             "REGION INSPECTOR"
         },
         confirming,
+        pilot_confirmation(app, planet),
         options,
         theme,
     );
@@ -5583,8 +5674,20 @@ fn render_dashboard(
     theme: Theme,
     now: Instant,
 ) {
-    let (header_area, system_area, diagnostic_area, events_area, footer_area) = if area.width >= 72
+    // Short terminals get a one-line telemetry summary so events keep usable space.
+    let compact_telemetry = area.height < 22;
+    let (header_area, system_area, diagnostic_area, events_area, footer_area) = if compact_telemetry
     {
+        let footer_h = if area.width < 100 { 2 } else { 1 };
+        let rows = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(footer_h),
+        ])
+        .split(area);
+        (rows[0], rows[1], Rect::default(), rows[2], rows[3])
+    } else if area.width >= 72 {
         // Six telemetry rows plus borders.
         let rows = Layout::vertical([
             Constraint::Length(3),
@@ -5674,12 +5777,47 @@ fn render_dashboard(
             )),
         )
     };
-    frame.render_widget(
-        Paragraph::new(system)
+    if compact_telemetry {
+        let summary = app.snapshot.as_ref().map_or_else(
+            || "Awaiting authoritative status...".to_owned(),
+            |snapshot| {
+                format!(
+                    "{:?} · tick {} @ {} Hz · CPU {} · {} · {}",
+                    snapshot.health,
+                    snapshot.tick,
+                    snapshot.tick_rate_hz,
+                    snapshot
+                        .cpu_usage_percent
+                        .map_or_else(|| "n/a".into(), |cpu| format!("{cpu:.0}%")),
+                    crate::textwrap::plural_count(snapshot.connected_clients as usize, "client"),
+                    snapshot.last_diagnostic.as_ref().map_or_else(
+                        || "D pulse".into(),
+                        |pulse| format!("pulse #{}", pulse.pulse_id)
+                    ),
+                )
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate_chars(
+                    &terminal_text(&summary, options.ascii),
+                    usize::from(system_area.width.saturating_sub(2)),
+                    options.ascii,
+                ),
+                Style::default().fg(theme.text_strong),
+            ))
             .style(theme.panel_style())
             .block(panel(" DAEMON ", options, theme, PanelTone::Standard)),
-        system_area,
-    );
+            system_area,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(system)
+                .style(theme.panel_style())
+                .block(panel(" DAEMON ", options, theme, PanelTone::Standard)),
+            system_area,
+        );
+    }
     frame.render_widget(
         Paragraph::new(diagnostic)
             .wrap(Wrap { trim: true })
@@ -5783,6 +5921,11 @@ fn render_dashboard(
             ])
         })
         .collect::<Vec<_>>();
+    // Wrap by display rows (hanging under the message) and keep the newest rows visible.
+    let mut lines =
+        crate::textwrap::hang_wrap(lines, usize::from(events_area.width.saturating_sub(2)));
+    let overflow = lines.len().saturating_sub(visible_height);
+    lines.drain(..overflow);
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.panel_style())
@@ -6033,7 +6176,36 @@ fn render_pilot_strip(
     let mut lines = vec![line1, status_line];
     let width = usize::from(area.width);
     let rows_left = usize::from(area.height).saturating_sub(2);
-    if let Some(confirm) = pilot_confirmation(app, planet) {
+    if app.show_help || app.show_chapter_card {
+        // Overlays that capture input must be visible here too, in strip form.
+        let text = if app.show_help {
+            "HELP // N lead · S scout · X extract · V field · A waypoint · Q menu · ? or Esc close"
+                .to_owned()
+        } else {
+            format!(
+                "CH {} {} // {} // Esc close",
+                transmission::roman_chapter(planet.campaign.chapter_number),
+                planet.campaign.title,
+                planet.campaign.question
+            )
+        };
+        let mut overlay = wrap_indented_lines(
+            vec![Span::raw(" ")],
+            1,
+            &terminal_text(&text, options.ascii),
+            1,
+            width.max(20),
+            Style::default().fg(theme.cyan_bright),
+        );
+        if overlay.len() > rows_left && rows_left > 0 {
+            overlay.truncate(rows_left - 1);
+            overlay.push(Line::styled(
+                truncate_chars(" ? or Esc close", width, options.ascii),
+                Style::default().fg(theme.muted),
+            ));
+        }
+        lines.extend(overlay);
+    } else if let Some(confirm) = pilot_confirmation(app, planet) {
         // Never accept Enter blind: show what is being confirmed, its target and risk.
         let text = terminal_text(&confirm, options.ascii);
         let mut confirm_lines = wrap_indented_lines(
@@ -6129,6 +6301,15 @@ fn render_pilot_strip(
     frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), area);
 }
 
+fn site_designation<'a>(planet: &'a PlanetSnapshot, site_id: &'a str) -> &'a str {
+    planet
+        .network
+        .subregions
+        .iter()
+        .find(|site| site.id == site_id)
+        .map_or(site_id, |site| site.designation.as_str())
+}
+
 /// One-line description of a pending confirmation for the Pilot Strip (action, target, risk).
 fn pilot_confirmation(app: &App, planet: &PlanetSnapshot) -> Option<String> {
     let action = app.pending_action.as_ref()?;
@@ -6166,13 +6347,27 @@ fn pilot_confirmation(app: &App, planet: &PlanetSnapshot) -> Option<String> {
                 region_designation(planet, region_id)
             )
         }
-        ContextAction::EstablishBase(_) => "foothold // S10 C6 Si4".to_owned(),
-        ContextAction::MaintainBase(_) => "maintenance // S4 C2".to_owned(),
-        ContextAction::ConstructBaseModule { module, .. } => {
+        ContextAction::EstablishBase(site_id) => {
+            format!(
+                "foothold at {} // S10 C6 Si4",
+                site_designation(planet, site_id)
+            )
+        }
+        ContextAction::MaintainBase(site_id) => {
+            format!(
+                "maintenance at {} // S4 C2",
+                site_designation(planet, site_id)
+            )
+        }
+        ContextAction::ConstructBaseModule {
+            module,
+            subregion_id,
+        } => {
             let cost = module.cost();
             format!(
-                "{} // S{} C{} Si{}",
+                "{} at {} // S{} C{} Si{}",
                 module_title(*module),
+                site_designation(planet, subregion_id),
                 cost.structural,
                 cost.conductive,
                 cost.silicate
@@ -6205,6 +6400,7 @@ fn render_help(
     area: Rect,
     scroll: u16,
     app_help_limit: &std::cell::Cell<u16>,
+    app_help_rows: &std::cell::Cell<u16>,
     options: RenderOptions,
     theme: Theme,
 ) {
@@ -6278,6 +6474,7 @@ fn render_help(
     };
     let max_scroll = (single_col_rows.len() as u16).saturating_sub(inner_preview.height);
     app_help_limit.set(max_scroll);
+    app_help_rows.set(inner_preview.height);
     let clamped = scroll.min(max_scroll);
     let cue = match (clamped > 0, clamped < max_scroll, options.ascii) {
         (_, _, _) if two_col => "",
@@ -6872,6 +7069,79 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn small_confirmations_keep_target_risk_and_keys() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        let site_id = planet.network.subregions[0].id.clone();
+        planet.network.subregions[0].deposit = Some(DepositSnapshot {
+            resource: ResourceKind::Conductive,
+            remaining: 12,
+            risk: RiskLevel::Moderate,
+        });
+        let region_id = planet.network.subregions[0].region_id.clone();
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Planet;
+        app.local_view = true;
+        app.selected_subregion_slot = 0;
+        app.pending_action = Some(ContextAction::ExtractSubregion {
+            region_id,
+            subregion_id: site_id,
+        });
+        for (width, height) in [(80_u16, 24_u16), (60, 16), (60, 18), (48, 14), (44, 14)] {
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            assert!(text.contains("S-1"), "{width}x{height} lost target\n{text}");
+            assert!(
+                text.contains("MODERATE"),
+                "{width}x{height} lost risk\n{text}"
+            );
+            assert!(text.contains("ENTER"), "{width}x{height} lost keys\n{text}");
+        }
+    }
+
+    #[test]
+    fn narrow_return_summary_keeps_both_acknowledge_keys() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        for id in 1..=4 {
+            planet
+                .unreviewed_activity
+                .push(mind_core::protocol::ActivityRecord {
+                    activity_id: id,
+                    kind: mind_core::protocol::ActivityKind::Survey,
+                    region_id: None,
+                    archive_record_id: None,
+                    summary: "Regional survey completed with one analysis unit recorded.".into(),
+                });
+        }
+        app.apply_planet(planet, Instant::now());
+        app.clear_active_transmission_locally();
+        app.show_return_summary = true;
+        for (width, height) in [(80_u16, 24_u16), (48, 14), (44, 14)] {
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            assert!(text.contains("Enter"), "{width}x{height}\n{text}");
+            assert!(text.contains("Esc"), "{width}x{height}\n{text}");
         }
     }
 

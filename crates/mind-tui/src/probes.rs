@@ -308,8 +308,8 @@ fn scout_status_banner(app: &App, planet: &PlanetSnapshot, now: Instant, width: 
         if mission.phase == ScoutState::Holding {
             first_fit(
                 vec![
-                    format!("MISSION #{id:03} // {phase} // {target} // HOLDING ON STATION"),
-                    format!("#{id:03} {phase} // {target} // ON STATION"),
+                    format!("MISSION #{id:03} // {phase} // {target}"),
+                    format!("#{id:03} {phase} // {target}"),
                     format!("#{id:03} {phase} {target}"),
                     format!("{phase} {target}"),
                 ],
@@ -620,6 +620,9 @@ fn render_telemetry_panel(
     }
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(inner_h);
+    app.scroll_limits
+        .probe_rows
+        .set(u16::try_from(inner_h).unwrap_or(u16::MAX));
     app.scroll_limits
         .probe_panel
         .set(u16::try_from(max_scroll).unwrap_or(u16::MAX));

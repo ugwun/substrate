@@ -6,8 +6,8 @@ use mind_core::config::{load_or_create, ConfigOverrides};
 use mind_core::protocol::BaseModuleKind;
 use mind_tui::{
     app::{
-        App, ConnectionState, ContextAction, OnboardingView, SessionMenuAction, SessionMenuState,
-        Workspace,
+        App, ConnectionState, ContextAction, OnboardingView, ScrollLimits, SessionMenuAction,
+        SessionMenuState, Workspace,
     },
     boot::BootMode,
     connection::{self, ConnectionCommand, ConnectionUpdate},
@@ -417,8 +417,12 @@ async fn handle_key(
             }
             KeyCode::Up => app.scroll_help(-1),
             KeyCode::Down => app.scroll_help(1),
-            KeyCode::PageUp => app.scroll_help(-6),
-            KeyCode::PageDown => app.scroll_help(6),
+            KeyCode::PageUp => app.scroll_help(-isize::from(ScrollLimits::page(
+                &app.scroll_limits.help_rows,
+            ))),
+            KeyCode::PageDown => app.scroll_help(isize::from(ScrollLimits::page(
+                &app.scroll_limits.help_rows,
+            ))),
             _ => {}
         }
         return Ok(false);
@@ -579,8 +583,12 @@ async fn handle_key(
             _ => app.cancel_confirmation_action(),
         },
         // While confirming, the inspector can still be paged so its full detail is reachable.
-        KeyCode::PageUp if app.pending_action.is_some() => app.scroll_region_panel(-4),
-        KeyCode::PageDown if app.pending_action.is_some() => app.scroll_region_panel(4),
+        KeyCode::PageUp if app.pending_action.is_some() => {
+            app.scroll_region_panel(-ScrollLimits::page(&app.scroll_limits.region_rows));
+        }
+        KeyCode::PageDown if app.pending_action.is_some() => {
+            app.scroll_region_panel(ScrollLimits::page(&app.scroll_limits.region_rows));
+        }
         _ if app.pending_action.is_some() => {}
         KeyCode::Esc if app.workspace == Workspace::Planet && app.local_view => {
             app.leave_local_view();
@@ -657,10 +665,10 @@ async fn handle_key(
             );
         }
         KeyCode::PageUp if app.workspace == Workspace::Planet => {
-            app.scroll_region_panel(-6);
+            app.scroll_region_panel(-ScrollLimits::page(&app.scroll_limits.region_rows));
         }
         KeyCode::PageDown if app.workspace == Workspace::Planet => {
-            app.scroll_region_panel(6);
+            app.scroll_region_panel(ScrollLimits::page(&app.scroll_limits.region_rows));
         }
         KeyCode::Enter if app.workspace == Workspace::Planet => match app.primary_region_action() {
             Some(ContextAction::Deploy(region_id)) => {
@@ -817,7 +825,10 @@ async fn handle_key(
                 Some(ContextAction::ClearExtractionRoute) => {
                     commands.send(ConnectionCommand::ClearExtractionRoute).await
                 }
-                _ => Ok(()),
+                _ => {
+                    app.notice = Some("ROUTINE UNAVAILABLE HERE // SEE REGION OPERATIONS".into());
+                    Ok(())
+                }
             }
             .context("connection worker stopped")?;
         }
@@ -831,10 +842,10 @@ async fn handle_key(
             app.open_selected_overview_region();
         }
         KeyCode::PageUp if app.workspace == Workspace::Overview => {
-            app.scroll_overview_status(-6);
+            app.scroll_overview_status(-ScrollLimits::page(&app.scroll_limits.overview_rows));
         }
         KeyCode::PageDown if app.workspace == Workspace::Overview => {
-            app.scroll_overview_status(6);
+            app.scroll_overview_status(ScrollLimits::page(&app.scroll_limits.overview_rows));
         }
         KeyCode::Left | KeyCode::Up | KeyCode::Char('k') if app.workspace == Workspace::Probes => {
             app.move_probe_selection(-1);
@@ -857,10 +868,10 @@ async fn handle_key(
             }
         }
         KeyCode::PageUp if app.workspace == Workspace::Probes => {
-            app.scroll_probe_panel(-4);
+            app.scroll_probe_panel(-ScrollLimits::page(&app.scroll_limits.probe_rows));
         }
         KeyCode::PageDown if app.workspace == Workspace::Probes => {
-            app.scroll_probe_panel(4);
+            app.scroll_probe_panel(ScrollLimits::page(&app.scroll_limits.probe_rows));
         }
         KeyCode::Enter if app.workspace == Workspace::Probes => {
             if app.focus_selected_probe_region() {
@@ -896,10 +907,10 @@ async fn handle_key(
             app.move_archive_selection(1);
         }
         KeyCode::PageUp if app.workspace == Workspace::Archive => {
-            app.scroll_archive_detail(-4);
+            app.scroll_archive_detail(-ScrollLimits::page(&app.scroll_limits.archive_rows));
         }
         KeyCode::PageDown if app.workspace == Workspace::Archive => {
-            app.scroll_archive_detail(4);
+            app.scroll_archive_detail(ScrollLimits::page(&app.scroll_limits.archive_rows));
         }
         KeyCode::Char('v') if app.workspace == Workspace::Archive => {
             app.open_archive_replay(now);

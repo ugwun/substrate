@@ -876,9 +876,7 @@ fn observation_array_lead(
         && short.silicate <= raw.silicate;
     if short.structural + short.conductive + short.silicate > 0 && refining_covers {
         return (
-            format!(
-                "Material for the next {noun} is refining; press O on the {label} node once it is ready."
-            ),
+            format!("Press O at the {label} node once refining finishes the next {noun}."),
             "O",
             Some(host.region_id.clone()),
             Some(host.subregion_id.clone()),
@@ -900,10 +898,21 @@ fn observation_array_lead(
         if short.silicate > 0 {
             parts.push(format!("Si {}", short.silicate));
         }
+        if !input.extractor_ready {
+            return (
+                format!(
+                    "Need {} more for the next {noun}; extract (X) once the extractor is ready.",
+                    parts.join(" / ")
+                ),
+                "TAB",
+                None,
+                None,
+            );
+        }
         let deposit = first_deposit_for(input.regions, short);
         return (
             format!(
-                "Extract {} more refined material (X) for the next {noun}, then press O at {label}.",
+                "Extract {} (X) for the next {noun}, then press O at {label}.",
                 parts.join(" / ")
             ),
             "X",
@@ -917,7 +926,7 @@ fn observation_array_lead(
         " more"
     };
     (
-        format!("Build {still_needed}{more} powered {noun}: press O on the {label} node."),
+        format!("Press O at the {label} node: {still_needed}{more} powered {noun} needed."),
         "O",
         Some(host.region_id.clone()),
         Some(host.subregion_id.clone()),
@@ -971,22 +980,37 @@ fn first_surveyed_reachable(regions: &[RegionSnapshot]) -> Option<String> {
 /// First reachable surveyed deposit of a resource in `short`, so extraction guidance always
 /// points at material the next build actually needs.
 fn first_deposit_for(regions: &[RegionSnapshot], short: ResourceStock) -> Option<String> {
-    let needed = |kind: ResourceKind| match kind {
-        ResourceKind::Structural => short.structural > 0,
-        ResourceKind::Conductive => short.conductive > 0,
-        ResourceKind::Silicate => short.silicate > 0,
+    let shortfall = |kind: ResourceKind| match kind {
+        ResourceKind::Structural => short.structural,
+        ResourceKind::Conductive => short.conductive,
+        ResourceKind::Silicate => short.silicate,
     };
+    let risk_rank = |risk: crate::protocol::RiskLevel| match risk {
+        crate::protocol::RiskLevel::Low => 0_u8,
+        crate::protocol::RiskLevel::Moderate => 1,
+        crate::protocol::RiskLevel::High => 2,
+    };
+    // Prefer the resource with the largest shortfall, then the lowest published risk, then the
+    // nearest region, so following the lead never trades a safe needed deposit for a risky one.
     regions
         .iter()
-        .find(|region| {
-            region.within_scout_range
+        .filter_map(|region| {
+            let deposit = region.deposit.as_ref()?;
+            let need = shortfall(deposit.resource);
+            (region.within_scout_range
                 && region.knowledge >= RegionKnowledge::Surveyed
-                && region
-                    .deposit
-                    .as_ref()
-                    .is_some_and(|deposit| deposit.remaining > 0 && needed(deposit.resource))
+                && deposit.remaining > 0
+                && need > 0)
+                .then_some((region, need, risk_rank(deposit.risk)))
         })
-        .map(|region| region.id.clone())
+        .min_by_key(|(region, need, risk)| {
+            (
+                std::cmp::Reverse(*need),
+                *risk,
+                region.hop_distance_from_core,
+            )
+        })
+        .map(|(region, _, _)| region.id.clone())
 }
 
 fn first_surveyed_deposit(regions: &[RegionSnapshot], refined: ResourceStock) -> Option<String> {

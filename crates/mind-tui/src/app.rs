@@ -117,6 +117,20 @@ pub struct ScrollLimits {
     pub probe_panel: std::cell::Cell<u16>,
     pub archive_detail: std::cell::Cell<u16>,
     pub overview_status: std::cell::Cell<u16>,
+    /// Visible rows per panel, recorded by the renderer so a page step never skips content.
+    pub help_rows: std::cell::Cell<u16>,
+    pub region_rows: std::cell::Cell<u16>,
+    pub probe_rows: std::cell::Cell<u16>,
+    pub archive_rows: std::cell::Cell<u16>,
+    pub overview_rows: std::cell::Cell<u16>,
+}
+
+impl ScrollLimits {
+    /// One page: the visible rows minus one for context, at least one row.
+    #[must_use]
+    pub fn page(rows: &std::cell::Cell<u16>) -> i16 {
+        i16::try_from(rows.get().saturating_sub(1).max(1)).unwrap_or(i16::MAX)
+    }
 }
 
 impl Default for ScrollLimits {
@@ -128,6 +142,11 @@ impl Default for ScrollLimits {
             probe_panel: open(),
             archive_detail: open(),
             overview_status: open(),
+            help_rows: std::cell::Cell::new(5),
+            region_rows: std::cell::Cell::new(5),
+            probe_rows: std::cell::Cell::new(5),
+            archive_rows: std::cell::Cell::new(5),
+            overview_rows: std::cell::Cell::new(5),
         }
     }
 }

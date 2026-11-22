@@ -22,6 +22,16 @@ pub fn line_width(line: &Line<'_>) -> usize {
         .sum()
 }
 
+/// "1 client", "3 clients".
+#[must_use]
+pub fn plural_count(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
 /// Wrap every line to `width` cells, preserving span styles and alignment.
 #[must_use]
 pub fn hang_wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
