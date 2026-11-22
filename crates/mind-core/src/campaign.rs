@@ -369,7 +369,15 @@ fn chapter_two(input: &CampaignInput<'_>) -> CampaignSnapshot {
                     Some("X".into()),
                     Some(deposit_region),
                 )
-            } else if let Some(route) = route_blocking(input, Some(deposit_region.as_str())) {
+            } else if let Some(route) = route_blocking(
+                input,
+                Some(deposit_region.as_str()),
+                ResourceStock {
+                    structural: 8_u32.saturating_sub(input.refined_inventory.structural),
+                    conductive: 6_u32.saturating_sub(input.refined_inventory.conductive),
+                    silicate: 6_u32.saturating_sub(input.refined_inventory.silicate),
+                },
+            ) {
                 let route_label = region_label(input.regions, &route).to_owned();
                 (
                     format!(
@@ -948,7 +956,23 @@ fn observation_array_lead(
         let source = deposit.as_deref().map_or_else(String::new, |id| {
             format!(" at {}", region_label(input.regions, id))
         });
-        if let Some(route) = route_blocking(input, deposit.as_deref()) {
+        if let Some(route) = input
+            .extraction_route_region_id
+            .filter(|_| !input.extractor_ready && route_blocking(input, None, short).is_none())
+        {
+            // The active route is already hauling a material that is still short.
+            let route_label = region_label(input.regions, route);
+            return (
+                format!(
+                    "Need {} more for the next {noun}; the {route_label} route is delivering it. Press O at {label} once it is refined.",
+                    parts.join(" / ")
+                ),
+                "",
+                Some(host.region_id.clone()),
+                Some(host.subregion_id.clone()),
+            );
+        }
+        if let Some(route) = route_blocking(input, deposit.as_deref(), short) {
             let route_label = region_label(input.regions, &route).to_owned();
             return (
                 format!(
@@ -998,8 +1022,20 @@ fn observation_array_lead(
                         .map(|part| part.as_str())
                         .collect::<Vec<_>>()
                         .join(" / ");
+                    // Name where the remaining material can come from too.
+                    let mut remaining = short;
+                    match deposit_kind {
+                        Some(ResourceKind::Structural) => remaining.structural = 0,
+                        Some(ResourceKind::Conductive) => remaining.conductive = 0,
+                        Some(ResourceKind::Silicate) => remaining.silicate = 0,
+                        None => {}
+                    }
+                    let rest_source = first_deposit_for(input.regions, remaining)
+                        .map_or_else(String::new, |id| {
+                            format!(" at {}", region_label(input.regions, &id))
+                        });
                     format!(
-                        "Extract {here}{source} (X) for the next {noun} ({rest} still needed), then press O at {label}."
+                        "Extract {here}{source} (X) for the next {noun} ({rest} still needed{rest_source}), then press O at {label}."
                     )
                 }
             }
@@ -1030,9 +1066,28 @@ fn observation_array_lead(
 
 /// When an automated route holds the extractor for a region other than the one guidance needs,
 /// the player must clear that route (A on its region) before the extractor is ever free.
-fn route_blocking(input: &CampaignInput<'_>, wanted: Option<&str>) -> Option<String> {
+fn route_blocking(
+    input: &CampaignInput<'_>,
+    wanted: Option<&str>,
+    short: ResourceStock,
+) -> Option<String> {
     let route = input.extraction_route_region_id?;
-    (!input.extractor_ready && wanted != Some(route)).then(|| route.to_owned())
+    // A route already hauling a material that is still short is helping, not blocking.
+    let route_supplies_shortfall = input
+        .regions
+        .iter()
+        .find(|region| region.id == route)
+        .and_then(|region| region.deposit.as_ref())
+        .is_some_and(|deposit| {
+            deposit.remaining > 0
+                && match deposit.resource {
+                    ResourceKind::Structural => short.structural > 0,
+                    ResourceKind::Conductive => short.conductive > 0,
+                    ResourceKind::Silicate => short.silicate > 0,
+                }
+        });
+    (!input.extractor_ready && wanted != Some(route) && !route_supplies_shortfall)
+        .then(|| route.to_owned())
 }
 
 fn region_label<'a>(regions: &'a [RegionSnapshot], region_id: &'a str) -> &'a str {

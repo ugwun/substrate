@@ -415,6 +415,16 @@ impl App {
         }
         self.previous_tick_sample = Some((snapshot.tick, received_at));
 
+        // A restarted daemon numbers its events from the start again: drop the old cache so
+        // new events are not mistaken for ones already seen.
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|previous| previous.started_at != snapshot.started_at)
+        {
+            self.events.clear();
+            self.event_scroll = 0;
+        }
         let mut inserted = 0;
         for event in &snapshot.recent_events {
             if self
@@ -1942,15 +1952,25 @@ impl App {
             self.transmission_opened_at = Some(Instant::now());
             self.transmission_revealed = false;
         }
-        // Acknowledge only through the newest event actually shown; one that arrived after the
-        // last page was drawn stays unreviewed for the next summary.
+        // Acknowledge only through the newest event actually shown. An event that arrived after
+        // the last page was drawn keeps the summary open on a page of its own, so it is never
+        // auto-acknowledged unseen once the summary closes.
         let shown = self.scroll_limits.summary_shown_through.replace(0);
-        let last = self
-            .planet
-            .as_ref()?
-            .unreviewed_activity
-            .last()
-            .map(|record| record.activity_id)?;
+        let (last, first_unseen) = {
+            let records = &self.planet.as_ref()?.unreviewed_activity;
+            let last = records.last().map(|record| record.activity_id)?;
+            let first_unseen = (shown > 0)
+                .then(|| records.iter().find(|record| record.activity_id > shown))
+                .flatten()
+                .map(|record| record.activity_id);
+            (last, first_unseen)
+        };
+        if let Some(next) = first_unseen {
+            self.show_return_summary = true;
+            self.return_summary_anchor = next;
+            self.scroll_limits.summary_shown_through.set(shown);
+            return Some(shown);
+        }
         Some(if shown > 0 { shown.min(last) } else { last })
     }
 
@@ -2053,6 +2073,9 @@ impl App {
                 self.notice = Some(format!("FOCUSED LOCAL LEAD // {label}"));
                 return true;
             }
+            // The lead is this region with no specific sector: stay in the field.
+            self.notice = Some("CAMPAIGN LEAD IS THIS REGION // SEE NEXT".into());
+            return true;
         }
         let Some((lead_id, designation)) = self.planet.as_ref().and_then(|planet| {
             let lead_id = planet.campaign.lead_region_id.as_ref()?;
@@ -2845,5 +2868,9 @@ mod tests {
         app.apply_planet(planet, now);
         app.show_return_summary = true;
         assert_eq!(app.dismiss_return_summary(), Some(40));
+        // The late event keeps the summary open on its own page instead of being auto-acked.
+        assert!(app.show_return_summary);
+        assert_eq!(app.return_summary_anchor, 41);
+        assert_eq!(app.pending_live_activity_ack(now), None);
     }
 }

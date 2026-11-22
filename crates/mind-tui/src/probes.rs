@@ -118,7 +118,8 @@ fn render_blueprint_panel(
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.width < 12 || inner.height < 6 {
+    // The schematic needs a tab row, at least four drawing rows and both banner rows.
+    if inner.width < 12 || inner.height < 7 {
         // Too short for the schematic: name the probe, its state and assignment instead.
         let (name, state, place) = if selected_extractor {
             let state = if planet.extractor.state == ExtractorState::Rebuilding

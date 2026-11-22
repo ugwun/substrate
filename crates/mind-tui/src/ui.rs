@@ -1540,7 +1540,7 @@ fn render_research(
                     Style::default().fg(theme.text),
                 ),
                 Span::styled(
-                    format!(" {state:<9} "),
+                    format!(" {state:<10} "),
                     Style::default().fg(if profile.active {
                         theme.success
                     } else if profile.unlocked {
@@ -1564,9 +1564,9 @@ fn render_research(
             } else {
                 lines.extend(wrap_indented_lines(
                     profile_prefix,
-                    29,
+                    30,
                     &profile.summary,
-                    29,
+                    30,
                     wrap_width,
                     Style::default().fg(theme.muted),
                 ));
@@ -2577,7 +2577,8 @@ fn header_field_rows(app: &App, area: Rect, active: Workspace) -> (u16, u16) {
     let Some(planet) = app.planet.as_ref().filter(|_| area.height >= 24) else {
         return single;
     };
-    let width = usize::from(area.width);
+    // Drawing keeps one spare cell at the right edge; measure with the same budget.
+    let width = usize::from(area.width).saturating_sub(1);
     let rows_for = |prefix: &str, text: &str, cap: usize| -> u16 {
         let prefix_width = prefix.chars().count();
         let rows = wrap_indented_lines(
@@ -2592,7 +2593,12 @@ fn header_field_rows(app: &App, area: Rect, active: Workspace) -> (u16, u16) {
         u16::try_from(rows.clamp(1, cap)).unwrap_or(1)
     };
     let question_rows = if shows_question {
-        rows_for(" QUESTION // ", &planet.campaign.question, 2)
+        // Tall terminals have room for a third question row.
+        rows_for(
+            " QUESTION // ",
+            &planet.campaign.question,
+            if area.height >= 30 { 3 } else { 2 },
+        )
     } else {
         0
     };
@@ -2606,7 +2612,12 @@ fn header_field_rows(app: &App, area: Rect, active: Workspace) -> (u16, u16) {
         } else {
             text
         };
-        rows_for(&format!(" NEXT // {chip}"), &action, 3)
+        // Tall terminals have room for a fourth NEXT row so its target is never cut.
+        rows_for(
+            &format!(" NEXT // {chip}"),
+            &action,
+            if area.height >= 30 { 4 } else { 3 },
+        )
     } else {
         0
     };
@@ -2631,6 +2642,8 @@ fn wrap_header_line(
     ascii: bool,
     max_rows: usize,
 ) -> Vec<Line<'static>> {
+    // Same budget as `header_field_rows`: one spare cell at the right edge.
+    let width = width.saturating_sub(1);
     let indent: usize = prefix.iter().map(|span| span.content.chars().count()).sum();
     let mut rows = wrap_indented_lines(prefix, indent, text, indent, width, style);
     let max_rows = max_rows.max(1);
@@ -3697,9 +3710,9 @@ fn render_local_sites(
     }
     let row_count = u16::from(planet.network.subregion_rows.max(1));
     let column_count = u16::from(planet.network.subregion_columns.max(1));
-    // Bordered tiles need at least three rows (border, one text row, border) and room for a
-    // short label; below that, draw a compact text grid so every sector stays identifiable.
-    if inner.height / row_count < 3 || inner.width / column_count < 6 {
+    // Bordered tiles need four rows (border, label, state, border) so every sector's state
+    // stays visible, and room for a short label; below that, draw a compact text grid.
+    if inner.height / row_count < 4 || inner.width / column_count < 6 {
         render_compact_local_grid(
             frame,
             inner,
@@ -6461,19 +6474,20 @@ fn render_dashboard(
         let summary = app.snapshot.as_ref().map_or_else(
             || "Awaiting authoritative status...".to_owned(),
             |snapshot| {
+                // The pulse result comes second so narrow panes drop telemetry before it.
                 format!(
-                    "{:?} · tick {} @ {} Hz · CPU {} · {} · {}",
+                    "{:?} · {} · tick {} @ {} Hz · CPU {} · {}",
                     snapshot.health,
+                    snapshot.last_diagnostic.as_ref().map_or_else(
+                        || "D pulse".into(),
+                        |pulse| format!("pulse #{} {:?}", pulse.pulse_id, pulse.health)
+                    ),
                     snapshot.tick,
                     snapshot.tick_rate_hz,
                     snapshot
                         .cpu_usage_percent
                         .map_or_else(|| "n/a".into(), |cpu| format!("{cpu:.0}%")),
                     crate::textwrap::plural_count(snapshot.connected_clients as usize, "client"),
-                    snapshot.last_diagnostic.as_ref().map_or_else(
-                        || "D pulse".into(),
-                        |pulse| format!("pulse #{}", pulse.pulse_id)
-                    ),
                 )
             },
         );
@@ -6674,7 +6688,7 @@ fn render_dashboard(
             ),
         ]);
     }
-    let hints: &[KeyHint<'_>] = if footer_area.width < 100 {
+    let base_hints: &[KeyHint<'_>] = if footer_area.width < 100 {
         &[
             KeyHint {
                 key: "D",
@@ -6729,6 +6743,22 @@ fn render_dashboard(
             },
         ]
     };
+    // Offline, the diagnostic key cannot act; offer reconnect in its place.
+    let offline = !matches!(app.connection, ConnectionState::Connected);
+    let hints_owned: Vec<KeyHint<'_>> = base_hints
+        .iter()
+        .map(|hint| {
+            if offline && hint.key == "D" {
+                KeyHint {
+                    key: "R",
+                    label: "reconnect",
+                }
+            } else {
+                *hint
+            }
+        })
+        .collect();
+    let hints: &[KeyHint<'_>] = &hints_owned;
     let content = if footer_area.width < 100 {
         Text::from(vec![
             Line::from(footer),
