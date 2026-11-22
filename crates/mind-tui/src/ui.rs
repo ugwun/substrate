@@ -1091,73 +1091,82 @@ fn render_overview(
         right_inner_w,
         theme,
     ));
-    summary_lines.extend(wrapped_field_lines(
-        "NODES",
-        &if planet.campaign.chapter_number >= 4 {
-            format!(
-                "{} total // {} connected // {} beyond relay envelope",
-                planet.network.bases.len(),
-                horizon.connected_bases,
-                horizon.remote_bases
-            )
-        } else {
-            format!(
-                "{} total // {} connected",
-                planet.network.bases.len(),
-                horizon.connected_bases
-            )
-        },
-        right_inner_w,
-        theme,
-    ));
-    summary_lines.extend(wrapped_field_lines(
-        "NET POWER",
-        &format!(
-            "{} generation / {} demand",
-            planet
-                .network
-                .bases
-                .iter()
-                .map(|base| base.generation)
-                .sum::<u32>(),
-            planet
-                .network
-                .bases
-                .iter()
-                .map(|base| base.demand)
-                .sum::<u32>()
-        ),
-        right_inner_w,
-        theme,
-    ));
-    summary_lines.extend(wrapped_field_lines(
-        "CREWS",
-        &format!(
-            "{} / {} committed",
-            planet.network.active_projects.len(),
-            planet.network.project_capacity
-        ),
-        right_inner_w,
-        theme,
-    ));
-    summary_lines.extend(wrapped_field_lines(
-        "LOGISTICS",
-        &format!("{active_depots} active connected {depot_noun} // each adds one crew, max two"),
-        right_inner_w,
-        theme,
-    ));
-    summary_lines.extend(wrapped_field_lines(
-        "OBSERVATION",
-        &format!(
-            "labs {}/{} // arrays {}/{} // {region_check}",
-            horizon.analysis_sites,
-            horizon.required_analysis_sites,
-            horizon.observation_sites,
-            horizon.required_observation_sites,
-        ),
-        right_inner_w,
-        theme,
-    ));
+    // Network rows unfold with the network: before footholds exist they describe systems the
+    // player has not reached yet.
+    if planet.network.unlocked
+        || !planet.network.bases.is_empty()
+        || !planet.network.active_projects.is_empty()
+    {
+        summary_lines.extend(wrapped_field_lines(
+            "NODES",
+            &if planet.campaign.chapter_number >= 4 {
+                format!(
+                    "{} total // {} connected // {} beyond relay envelope",
+                    planet.network.bases.len(),
+                    horizon.connected_bases,
+                    horizon.remote_bases
+                )
+            } else {
+                format!(
+                    "{} total // {} connected",
+                    planet.network.bases.len(),
+                    horizon.connected_bases
+                )
+            },
+            right_inner_w,
+            theme,
+        ));
+        summary_lines.extend(wrapped_field_lines(
+            "NET POWER",
+            &format!(
+                "{} generation / {} demand",
+                planet
+                    .network
+                    .bases
+                    .iter()
+                    .map(|base| base.generation)
+                    .sum::<u32>(),
+                planet
+                    .network
+                    .bases
+                    .iter()
+                    .map(|base| base.demand)
+                    .sum::<u32>()
+            ),
+            right_inner_w,
+            theme,
+        ));
+        summary_lines.extend(wrapped_field_lines(
+            "CREWS",
+            &format!(
+                "{} / {} committed",
+                planet.network.active_projects.len(),
+                planet.network.project_capacity
+            ),
+            right_inner_w,
+            theme,
+        ));
+        summary_lines.extend(wrapped_field_lines(
+            "LOGISTICS",
+            &format!(
+                "{active_depots} active connected {depot_noun} // each adds one crew, max two"
+            ),
+            right_inner_w,
+            theme,
+        ));
+        summary_lines.extend(wrapped_field_lines(
+            "OBSERVATION",
+            &format!(
+                "labs {}/{} // arrays {}/{} // {region_check}",
+                horizon.analysis_sites,
+                horizon.required_analysis_sites,
+                horizon.observation_sites,
+                horizon.required_observation_sites,
+            ),
+            right_inner_w,
+            theme,
+        ));
+    }
     summary_lines.push(Line::from(""));
     summary_lines.push(section_line("RESEARCH & AUTOMATION", theme));
     summary_lines.extend(wrapped_field_lines(
@@ -1223,14 +1232,30 @@ fn render_overview(
         "Select an operation or report and press Enter to inspect its region.",
         Style::default().fg(theme.muted),
     ));
+    // Pre-wrap so the scroll limit, page step and cues count real rendered rows.
+    let summary_lines = crate::textwrap::hang_wrap(
+        summary_lines,
+        usize::from(columns[1].width.saturating_sub(2)),
+    );
     let summary_total = summary_lines.len();
     let summary_visible = usize::from(columns[1].height.saturating_sub(2));
+    let status_limit = summary_total.saturating_sub(summary_visible);
     app.scroll_limits
         .overview_status
-        .set(u16::try_from(summary_total.saturating_sub(summary_visible)).unwrap_or(u16::MAX));
+        .set(u16::try_from(status_limit).unwrap_or(u16::MAX));
+    app.scroll_limits
+        .overview_rows
+        .set(u16::try_from(summary_visible).unwrap_or(u16::MAX));
+    let status_scroll = usize::from(app.overview_status_scroll).min(status_limit);
     let status_overflow = summary_total > summary_visible;
     let status_title = if status_overflow {
-        if app.overview_status_scroll > 0 {
+        if status_scroll > 0 && status_scroll >= status_limit {
+            if options.ascii {
+                " PLANET STATUS [PgUp] "
+            } else {
+                " PLANET STATUS [PgUp ▲] "
+            }
+        } else if status_scroll > 0 {
             if options.ascii {
                 " PLANET STATUS [PgUp/PgDn] "
             } else {
@@ -1247,8 +1272,7 @@ fn render_overview(
     let summary = Text::from(summary_lines);
     frame.render_widget(
         Paragraph::new(summary)
-            .wrap(Wrap { trim: false })
-            .scroll((app.overview_status_scroll, 0))
+            .scroll((u16::try_from(status_scroll).unwrap_or(u16::MAX), 0))
             .style(theme.panel_style())
             .block(panel(status_title, options, theme, PanelTone::Standard)),
         columns[1],
@@ -2889,6 +2913,54 @@ fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
     format!("{cut}{ellipsis}")
 }
 
+/// Join store segments with separators behind a "STORES" label, dropping whole segments by
+/// priority (highest first) until the row fits `width`; the label shortens last.
+fn fit_store_segments(
+    mut segments: Vec<(u8, Vec<Span<'static>>)>,
+    width: usize,
+    sep: &'static str,
+    theme: Theme,
+) -> Line<'static> {
+    let span_width = |spans: &[Span<'_>]| -> usize {
+        spans.iter().map(|span| span.content.chars().count()).sum()
+    };
+    let total = |label: &str, segments: &[(u8, Vec<Span<'static>>)]| -> usize {
+        label.chars().count()
+            + segments
+                .iter()
+                .map(|(_, spans)| span_width(spans))
+                .sum::<usize>()
+            + sep.chars().count() * segments.len().saturating_sub(1)
+    };
+    let mut label = " STORES  ";
+    loop {
+        if total(label, &segments) <= width {
+            break;
+        }
+        if let Some(index) = segments
+            .iter()
+            .enumerate()
+            .filter(|(_, (priority, _))| *priority > 0)
+            .max_by_key(|(_, (priority, _))| *priority)
+            .map(|(index, _)| index)
+        {
+            segments.remove(index);
+        } else if label != " " {
+            label = " ";
+        } else {
+            break;
+        }
+    }
+    let mut spans = vec![Span::styled(label, Style::default().fg(theme.amber).bold())];
+    for (index, (_, segment)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(sep, Style::default().fg(theme.faint)));
+        }
+        spans.extend(segment);
+    }
+    Line::from(spans)
+}
+
 fn planet_store_header_line(
     planet: Option<&PlanetSnapshot>,
     width: u16,
@@ -2933,56 +3005,83 @@ fn planet_store_header_line(
     let analysis_nonzero = planet.research.analysis_units > 0;
 
     if width < 140 {
-        return Line::from(vec![
-            Span::styled(" STORES  ", Style::default().fg(theme.amber).bold()),
-            Span::styled("MAP ", Style::default().fg(theme.cyan)),
-            Span::styled(
-                format!("{surveyed}/{}", planet.regions.len()),
-                Style::default().fg(theme.text_strong).bold(),
+        // Whole segments with a drop priority (higher drops first), so the row never runs past
+        // the pane or cuts a number: FAB, then profile, then raw stores give way first.
+        let segments: Vec<(u8, Vec<Span<'static>>)> = vec![
+            (
+                0,
+                vec![
+                    Span::styled("MAP ", Style::default().fg(theme.cyan)),
+                    Span::styled(
+                        format!("{surveyed}/{}", planet.regions.len()),
+                        Style::default().fg(theme.text_strong).bold(),
+                    ),
+                ],
             ),
-            Span::styled(sep, Style::default().fg(theme.faint)),
-            Span::styled("RAW ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{}/{}/{}", raw.structural, raw.conductive, raw.silicate),
-                Style::default().fg(if raw_nonzero {
-                    theme.text_strong
-                } else {
-                    theme.muted
-                }),
+            (
+                3,
+                vec![
+                    Span::styled("RAW ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        format!("{}/{}/{}", raw.structural, raw.conductive, raw.silicate),
+                        Style::default().fg(if raw_nonzero {
+                            theme.text_strong
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                ],
             ),
-            Span::styled(sep, Style::default().fg(theme.faint)),
-            Span::styled("REF ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!(
-                    "{}/{}/{}",
-                    refined.structural, refined.conductive, refined.silicate
-                ),
-                Style::default().fg(if ref_nonzero { theme.gold } else { theme.muted }),
+            (
+                1,
+                vec![
+                    Span::styled("REF ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        format!(
+                            "{}/{}/{}",
+                            refined.structural, refined.conductive, refined.silicate
+                        ),
+                        Style::default().fg(if ref_nonzero { theme.gold } else { theme.muted }),
+                    ),
+                ],
             ),
-            Span::styled(sep, Style::default().fg(theme.faint)),
-            Span::styled("FAB ", Style::default().fg(theme.muted)),
-            Span::styled(
-                fabrication,
-                Style::default().fg(if fab_active {
-                    theme.cyan_bright
-                } else {
-                    theme.muted
-                }),
+            (
+                5,
+                vec![
+                    Span::styled("FAB ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        fabrication,
+                        Style::default().fg(if fab_active {
+                            theme.cyan_bright
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                ],
             ),
-            Span::styled(sep, Style::default().fg(theme.faint)),
-            Span::styled("P ", Style::default().fg(theme.muted)),
-            Span::styled(profile.to_owned(), Style::default().fg(theme.text)),
-            Span::styled(sep, Style::default().fg(theme.faint)),
-            Span::styled("A ", Style::default().fg(theme.muted)),
-            Span::styled(
-                planet.research.analysis_units.to_string(),
-                Style::default().fg(if analysis_nonzero {
-                    theme.cyan_bright
-                } else {
-                    theme.muted
-                }),
+            (
+                4,
+                vec![
+                    Span::styled("P ", Style::default().fg(theme.muted)),
+                    Span::styled(profile.to_owned(), Style::default().fg(theme.text)),
+                ],
             ),
-        ]);
+            (
+                2,
+                vec![
+                    Span::styled("A ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        planet.research.analysis_units.to_string(),
+                        Style::default().fg(if analysis_nonzero {
+                            theme.cyan_bright
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                ],
+            ),
+        ];
+        return fit_store_segments(segments, usize::from(width), sep, theme);
     }
     Line::from(vec![
         Span::styled(" STORES  MAP ", Style::default().fg(theme.amber).bold()),
@@ -6116,17 +6215,19 @@ fn render_dashboard(
                 )
             },
         );
+        // Drop whole " · " segments from the end rather than cutting one mid-way.
+        let room = usize::from(system_area.width.saturating_sub(2));
+        let summary = terminal_text(&summary, options.ascii);
+        let sep = if options.ascii { " | " } else { " · " };
+        let mut parts: Vec<&str> = summary.split(sep).collect();
+        while parts.len() > 1 && parts.join(sep).chars().count() > room {
+            parts.pop();
+        }
+        let fitted = truncate_chars(&parts.join(sep), room, options.ascii);
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                truncate_chars(
-                    &terminal_text(&summary, options.ascii),
-                    usize::from(system_area.width.saturating_sub(2)),
-                    options.ascii,
-                ),
-                Style::default().fg(theme.text_strong),
-            ))
-            .style(theme.panel_style())
-            .block(panel(" DAEMON ", options, theme, PanelTone::Standard)),
+            Paragraph::new(Line::styled(fitted, Style::default().fg(theme.text_strong)))
+                .style(theme.panel_style())
+                .block(panel(" DAEMON ", options, theme, PanelTone::Standard)),
             system_area,
         );
     } else {
@@ -6267,6 +6368,17 @@ fn render_dashboard(
     app.scroll_limits
         .event_rows
         .set(u16::try_from(kept.len()).unwrap_or(u16::MAX));
+    let shown_scroll = app.event_scroll.min(limit);
+    let events_cue = match (shown_scroll < limit, shown_scroll > 0, options.ascii) {
+        (false, false, _) => "",
+        (true, true, true) => " [^v]",
+        (true, true, false) => " [▲▼]",
+        (true, false, true) => " [^]",
+        (true, false, false) => " [▲]",
+        (false, true, true) => " [v]",
+        (false, true, false) => " [▼]",
+    };
+    let events_title = format!(" ENGINE EVENTS{events_cue} ");
     let lines: Vec<Line<'static>> = kept
         .into_iter()
         .rev()
@@ -6276,7 +6388,7 @@ fn render_dashboard(
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.panel_style())
-            .block(panel(" ENGINE EVENTS ", options, theme, PanelTone::Focused)),
+            .block(panel(&events_title, options, theme, PanelTone::Focused)),
         events_area,
     );
 
@@ -6897,6 +7009,14 @@ fn pilot_confirmation_rows(
         width.max(20),
         Style::default().fg(theme.text_strong),
     )
+}
+
+/// Whether only the resize screen is drawn at this size (no full interface and no Pilot Strip),
+/// using the same thresholds as `render`. Input ignores gameplay keys while it shows.
+#[must_use]
+pub fn resize_screen_shown(app: &App, width: u16, height: u16) -> bool {
+    (width < 44 || height < 14)
+        && !(width >= 24 && height >= 3 && app.planet.is_some() && !app.onboarding_pending())
 }
 
 /// Whether the Return Summary (every away event plus its continue hint) is visible at this
@@ -10759,5 +10879,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn store_header_drops_whole_segments_instead_of_cutting_numbers() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        planet.research.analysis_units = 39;
+        planet.refined_inventory = mind_core::protocol::ResourceStock {
+            structural: 22,
+            conductive: 15,
+            silicate: 20,
+        };
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Planet;
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(80_u16, 30_u16), (80, 36), (79, 36), (64, 36), (48, 36)] {
+            let text = screen(&app, width, height, options);
+            let row = text
+                .lines()
+                .find(|line| line.contains("REF "))
+                .unwrap_or_else(|| panic!("{width}x{height} has no stores row\n{text}"));
+            let row = row.trim_matches('"').trim_end();
+            assert!(
+                !row.ends_with('|') && !row.ends_with('·'),
+                "{width}x{height}: {row}"
+            );
+            if row.contains("A ") {
+                assert!(row.contains("A 39"), "{width}x{height} cut analysis: {row}");
+            }
+            assert!(
+                row.contains("REF 22/15/20"),
+                "{width}x{height} lost refined stores: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn overview_status_pages_reach_the_last_wrapped_row() {
+        let mut app = local_field_test_app();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Overview;
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        let mut reached = false;
+        for _ in 0..40 {
+            let text = screen(&app, 44, 14, options);
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat.contains("inspect its region") {
+                reached = true;
+                assert!(
+                    !flat.contains("PgDn more"),
+                    "cue still offers more at the end\n{text}"
+                );
+                break;
+            }
+            app.scroll_overview_status(crate::app::ScrollLimits::page(
+                &app.scroll_limits.overview_rows,
+            ));
+        }
+        assert!(reached, "the Overview status end was unreachable at 44x14");
     }
 }

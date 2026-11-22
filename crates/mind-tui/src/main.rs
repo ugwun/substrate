@@ -206,7 +206,11 @@ async fn run_dashboard(
                 let _ = commands.try_send(ConnectionCommand::AcknowledgeActivity(ack_id));
             }
             // Events missed while the interface was unreadable: draw the summary right away.
-            dirty = opened_summary;
+            if opened_summary {
+                dirty = true;
+                continue;
+            }
+            dirty = false;
         }
 
         let now = std::time::Instant::now();
@@ -373,6 +377,12 @@ async fn handle_key(
     }
     if key.code == KeyCode::Char('q') {
         app.open_session_menu();
+        return Ok(false);
+    }
+    // While only the resize screen shows, keys must not act on a view the player cannot see.
+    if crossterm::terminal::size()
+        .is_ok_and(|(width, height)| ui::resize_screen_shown(app, width, height))
+    {
         return Ok(false);
     }
     if app.show_return_summary {

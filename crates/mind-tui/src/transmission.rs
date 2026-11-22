@@ -21,7 +21,7 @@ use ratatui::{
 use std::time::Duration;
 
 const TRANSMISSION_REVEAL_MS: u128 = 2_400;
-const CARRIER_LOCK_MS: u128 = 350;
+const SIGNAL_LOCK_MS: u128 = 350;
 
 const ASCII_DOUBLE_BORDER: border::Set<'static> = border::Set {
     top_left: "+",
@@ -403,9 +403,9 @@ pub fn render_discovery_transmission(
         record_index + 1,
         total_records.max(record_index + 1)
     );
-    let acquiring_carrier = !force_complete && elapsed.as_millis() < CARRIER_LOCK_MS;
-    let mut right_tag = if acquiring_carrier {
-        let frac = (elapsed.as_millis() as f64 / CARRIER_LOCK_MS as f64).clamp(0.0, 1.0);
+    let acquiring_signal = !force_complete && elapsed.as_millis() < SIGNAL_LOCK_MS;
+    let mut right_tag = if acquiring_signal {
+        let frac = (elapsed.as_millis() as f64 / SIGNAL_LOCK_MS as f64).clamp(0.0, 1.0);
         let filled = (frac * 10.0).round() as usize;
         let bar: String = (0..10)
             .map(|i| {
@@ -422,7 +422,7 @@ pub fn render_discovery_transmission(
                 }
             })
             .collect();
-        format!("CARRIER [{bar}] ACQUIRING ")
+        format!("SIGNAL [{bar}] ACQUIRING ")
     } else if is_replay {
         format!("SOURCE {source_label}  //  ARCHIVE REPLAY ")
     } else {
@@ -434,8 +434,8 @@ pub fn render_discovery_transmission(
             record_index + 1,
             total_records.max(record_index + 1)
         );
-        right_tag = if acquiring_carrier {
-            "CARRIER LOCK ".into()
+        right_tag = if acquiring_signal {
+            "SIGNAL LOCK ".into()
         } else if is_replay {
             format!("{source_label} // REPLAY ")
         } else {
@@ -450,7 +450,7 @@ pub fn render_discovery_transmission(
             Span::raw(" ".repeat(pad)),
             Span::styled(
                 right_tag,
-                Style::default().fg(if acquiring_carrier {
+                Style::default().fg(if acquiring_signal {
                     theme.amber
                 } else {
                     theme.cyan_bright

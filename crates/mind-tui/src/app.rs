@@ -565,6 +565,16 @@ impl App {
         } else if chapter_advanced && self.active_transmission_id.is_none() {
             self.show_chapter_card = true;
         }
+        if initial_planet {
+            // Baseline for unseen activity: whatever arrives after this first snapshot while the
+            // interface is unreadable is presented later, even if no readable frame came first.
+            let latest = self
+                .planet
+                .as_ref()
+                .and_then(|planet| planet.unreviewed_activity.last())
+                .map_or(0, |record| record.activity_id);
+            self.watched_through.get_or_insert(latest);
+        }
         if initial_planet
             && !suppress_return_summary
             && self
@@ -2673,6 +2683,41 @@ mod tests {
         assert_eq!(app.pending_live_activity_ack(now), None);
         // Enlarged again: the missed event is presented, never silently acknowledged.
         assert!(app.note_frame(true));
+        assert!(app.show_return_summary);
+        assert_eq!(app.pending_live_activity_ack(now), None);
+    }
+
+    #[test]
+    fn activity_after_a_strip_only_attach_is_presented_not_acknowledged() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        let mut planet = engine.planet().unwrap();
+        planet.unreviewed_activity.clear();
+        app.apply_planet(planet.clone(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        // Attached in the Pilot Strip: the interface has never been readable.
+        assert!(!app.note_frame(false));
+        planet
+            .unreviewed_activity
+            .push(mind_core::protocol::ActivityRecord {
+                activity_id: 9_001,
+                kind: mind_core::protocol::ActivityKind::Survey,
+                region_id: None,
+                archive_record_id: None,
+                summary: "Regional survey completed.".into(),
+            });
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        assert_eq!(app.pending_live_activity_ack(now), None);
+        assert!(
+            app.note_frame(true),
+            "the missed event must open the summary"
+        );
         assert!(app.show_return_summary);
         assert_eq!(app.pending_live_activity_ack(now), None);
     }
