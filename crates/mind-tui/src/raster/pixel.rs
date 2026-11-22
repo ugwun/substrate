@@ -224,7 +224,7 @@ impl PixelBuffer {
             }
             intersections.sort_by(|a, b| a.total_cmp(b));
             let row = (py as usize) * self.width;
-            for pair in intersections.chunks_exact(2) {
+            for pair in intersections.as_chunks::<2>().0 {
                 let x_start = (pair[0].ceil() as i32).max(0);
                 let x_end = (pair[1].floor() as i32).min(self.width as i32 - 1);
                 if x_start <= x_end {
