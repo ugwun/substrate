@@ -2261,79 +2261,104 @@ fn render_return_summary(
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        key_span("Enter", theme),
-        Span::styled(" / ", Style::default().fg(theme.faint)),
-        key_span("Esc", theme),
-        // Keep the hint on one row so it survives being pinned on narrow terminals.
-        Span::styled(
-            if inner_w < 40 {
-                " continue"
-            } else {
-                " acknowledge and continue"
-            },
-            Style::default().fg(theme.cyan),
-        ),
-    ]));
-    let tail = wrap(lines);
+    let info = wrap(lines);
+    // Enter/Esc acknowledge on the last page; earlier pages step forward so no away event is
+    // ever acknowledged unseen. Kept on one row so it survives being pinned.
+    let hint_line = |page: Option<(usize, usize)>| -> Line<'static> {
+        let label = match page {
+            Some((current, total)) => format!(" next page {}/{total}", current + 1),
+            None if inner_w < 40 => " continue".to_owned(),
+            None => " acknowledge and continue".to_owned(),
+        };
+        Line::from(vec![
+            key_span("Enter", theme),
+            Span::styled(" / ", Style::default().fg(theme.faint)),
+            key_span("Esc", theme),
+            Span::styled(label, Style::default().fg(theme.cyan)),
+        ])
+    };
 
-    // Fit to the viewport: header, evidence title and tail (stores, CURRENT, NEXT, acknowledge hint)
-    // always show. The newest event is kept, then as much of the quote as fits, then older events.
+    // Fit to the viewport. Every away event is shown: first try everything on one page (then as
+    // much of the evidence quote as fits, since the full record is queued as a transmission);
+    // otherwise drop the stores/NEXT rows; otherwise page through the events oldest first.
     // On short terminals the away events matter more than the chapter question: drop the
     // question rows (everything between the chapter line and the WHILE YOU WERE AWAY row)
-    // before any event is shortened.
-    let first_event_rows = activity.last().map_or(0, Vec::len);
-    if header.len() + evidence_head.len() + tail.len() + first_event_rows > max_inner_h
-        && header.len() > 2
+    // before any event is paged.
+    let event_rows: usize = activity.iter().map(Vec::len).sum();
+    let full_tail = info.len() + 1;
+    if header.len() + evidence_head.len() + full_tail + event_rows > max_inner_h && header.len() > 2
     {
         let away = header.pop();
         header.truncate(1);
         header.extend(away);
     }
-    let budget = max_inner_h.saturating_sub(header.len() + evidence_head.len() + tail.len());
-    let activity_rows = |count: usize| -> usize {
-        let shown: usize = activity.iter().rev().take(count).map(Vec::len).sum();
-        shown + usize::from(count < activity.len())
-    };
-    let quote_rows = evidence_quote
-        .len()
-        .min(budget.saturating_sub(activity_rows(1)));
-    let mut shown_events = 1.min(activity.len());
-    while shown_events < activity.len() && activity_rows(shown_events + 1) + quote_rows <= budget {
-        shown_events += 1;
-    }
+    let fixed_rows = header.len() + evidence_head.len() + event_rows;
+    let fits_all = |tail_rows: usize| fixed_rows + tail_rows <= max_inner_h;
+
     let mut body = header;
-    let hidden_events = activity.len() - shown_events;
-    if hidden_events > 0 {
-        body.push(Line::styled(
-            format!("  +{hidden_events} earlier"),
-            Style::default().fg(theme.faint),
-        ));
-    }
-    for entry in &activity[hidden_events..] {
-        body.extend(entry.iter().cloned());
-    }
-    body.extend(evidence_head);
-    if quote_rows < evidence_quote.len() {
-        body.extend(
-            evidence_quote
-                .into_iter()
-                .take(quote_rows.saturating_sub(1)),
-        );
-        if quote_rows > 0 || !archived_evidence.is_empty() {
-            body.push(Line::styled(
-                if options.ascii {
-                    "  ... full record in the queued transmission"
-                } else {
-                    "  … full record in the queued transmission"
-                },
-                Style::default().fg(theme.muted),
-            ));
+    let mut pages = 1usize;
+    if fits_all(full_tail) || fits_all(1) {
+        let keep_info = fits_all(full_tail);
+        let tail_rows = if keep_info { full_tail } else { 1 };
+        let leftover =
+            max_inner_h.saturating_sub(body.len() + event_rows + evidence_head.len() + tail_rows);
+        for entry in &activity {
+            body.extend(entry.iter().cloned());
         }
+        body.extend(evidence_head);
+        if leftover < evidence_quote.len() {
+            body.extend(evidence_quote.into_iter().take(leftover.saturating_sub(1)));
+            if leftover > 0 {
+                let ellipsis = if options.ascii { "..." } else { "…" };
+                let cue = [
+                    format!("  {ellipsis} full record in the queued transmission"),
+                    format!("  {ellipsis} full record queued next"),
+                    format!("  {ellipsis} full record follows"),
+                ]
+                .into_iter()
+                .find(|cue| cue.chars().count() <= inner_w)
+                .unwrap_or_default();
+                body.push(Line::styled(cue, Style::default().fg(theme.muted)));
+            }
+        } else {
+            body.extend(evidence_quote);
+        }
+        if keep_info {
+            body.extend(info);
+        }
+        body.push(hint_line(None));
     } else {
-        body.extend(evidence_quote);
+        // Page the events oldest first; the evidence title joins the last page when it fits.
+        let budget = max_inner_h.saturating_sub(body.len() + 1).max(1);
+        let mut page_starts = vec![0usize];
+        let mut used = 0usize;
+        for (index, entry) in activity.iter().enumerate() {
+            let rows = entry.len().min(budget);
+            if used + rows > budget && used > 0 {
+                page_starts.push(index);
+                used = 0;
+            }
+            used += rows;
+        }
+        pages = page_starts.len();
+        let page = app.return_summary_page.min(pages - 1);
+        let from = page_starts[page];
+        let to = page_starts.get(page + 1).copied().unwrap_or(activity.len());
+        let mut shown: Vec<Line<'static>> = Vec::new();
+        for entry in &activity[from..to] {
+            shown.extend(entry.iter().take(budget).cloned());
+        }
+        shown.truncate(budget);
+        let room = budget.saturating_sub(shown.len());
+        body.extend(shown);
+        if page + 1 == pages && room >= evidence_head.len() {
+            body.extend(evidence_head);
+        }
+        body.push(hint_line((page + 1 < pages).then_some((page, pages))));
     }
-    body.extend(tail);
+    app.scroll_limits
+        .summary_pages
+        .set(u16::try_from(pages).unwrap_or(u16::MAX));
     // Last resort on very small terminals: compact, then keep the acknowledge hint pinned.
     if body.len() > max_inner_h {
         body.retain(|line| {
@@ -2718,26 +2743,26 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             }
             // Already inside the lead field: V would be inert, so point at N (lead sector) instead.
             Some("V") if in_lead => (Some("N"), planet.campaign.next_action.clone()),
-            // Campaign extraction leads are regional deposits: X acts from the globe.
-            Some("X") => (
-                Some("ESC"),
-                format!("Return to globe (Esc) — {}", planet.campaign.next_action),
-            ),
-            Some("B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => (
-                Some("ESC"),
-                format!("Return to globe (Esc) — {}", planet.campaign.next_action),
-            ),
+            // Campaign extraction leads are regional deposits: X acts from the globe. The ESC
+            // chip says how to get there, so the daemon's text (target and next node) stays whole.
+            Some("X") => (Some("ESC"), planet.campaign.next_action.clone()),
+            Some("B" | "R" | "A" | "S") if !in_lead || !planet.network.unlocked => {
+                (Some("ESC"), planet.campaign.next_action.clone())
+            }
             _ => (None, String::new()),
         }
     } else if !app.local_view
-        && planet.campaign.next_action_key.as_deref() == Some("X")
+        && matches!(
+            planet.campaign.next_action_key.as_deref(),
+            Some("X" | "V" | "S")
+        )
         && planet
             .campaign
             .lead_region_id
             .as_deref()
             .is_some_and(|lead| Some(lead) != app.selected_region_id.as_deref())
     {
-        // Extraction acts on the selected region: move to the named deposit (N) before X.
+        // X, V and S act on the selected region: move to the named lead region (N) first.
         (Some("N"), planet.campaign.next_action.clone())
     } else if !app.local_view
         && matches!(
@@ -5838,25 +5863,9 @@ fn render_onboarding(
                     options.ascii,
                     theme,
                 ),
-                Line::from(hint_spans(
-                    &[
-                        KeyHint {
-                            key: if options.ascii { "UP/DN" } else { "↑↓" },
-                            label: "band",
-                        },
-                        KeyHint {
-                            key: if options.ascii {
-                                "LEFT/RIGHT"
-                            } else {
-                                "←→"
-                            },
-                            label: "adjust",
-                        },
-                        KeyHint {
-                            key: "ENTER",
-                            label: "observe",
-                        },
-                    ],
+                Line::from(coherence_controls(
+                    usize::from(inner.width),
+                    options.ascii,
                     theme,
                 )),
             ];
@@ -5924,7 +5933,7 @@ fn render_onboarding(
         }
     }
 
-    let footer = Paragraph::new(connection_line(app, theme, area.width < 72))
+    let footer = Paragraph::new(connection_line(app, theme, usize::from(area.width)))
         .alignment(Alignment::Center)
         .style(theme.panel_style());
     frame.render_widget(footer, chunks[2]);
@@ -6322,41 +6331,73 @@ fn render_dashboard(
     );
 }
 
-fn connection_line(app: &App, theme: Theme, compact: bool) -> Line<'static> {
+/// Coherence key row: the longest complete key/action set that fits `width`, so the first
+/// action a new player needs (ENTER observe) is never cut.
+fn coherence_controls(width: usize, ascii: bool, theme: Theme) -> Vec<Span<'static>> {
+    let (band, adjust_keys): (&[&str], &[&str]) = if ascii {
+        (&["UP/DN", "UP/DN", "^v"], &["LEFT/RIGHT", "LT/RT", "<>"])
+    } else {
+        (&["↑↓", "↑↓", "↑↓"], &["←→", "←→", "←→"])
+    };
+    let variants = band.iter().zip(adjust_keys).map(|(band, adjust)| {
+        [
+            KeyHint {
+                key: band,
+                label: "band",
+            },
+            KeyHint {
+                key: adjust,
+                label: "adjust",
+            },
+            KeyHint {
+                key: "ENTER",
+                label: "observe",
+            },
+        ]
+    });
+    for hints in variants {
+        let total = hints
+            .iter()
+            .map(hint_width)
+            .sum::<usize>()
+            .saturating_sub(2);
+        if total <= width {
+            return hint_spans(&hints, theme);
+        }
+    }
+    // Narrower than every set: keep the action that advances Coherence.
+    hint_spans(
+        &[KeyHint {
+            key: "ENTER",
+            label: "observe",
+        }],
+        theme,
+    )
+}
+
+fn connection_line(app: &App, theme: Theme, width: usize) -> Line<'static> {
     let mut spans = connection_spans(&app.connection, theme);
     spans.push(separator(theme));
-    let hints: &[KeyHint<'_>] = if compact {
-        &[
-            KeyHint {
-                key: "R",
-                label: "retry",
-            },
-            KeyHint {
-                key: "?",
-                label: "help",
-            },
-            KeyHint {
-                key: "Q",
-                label: "menu",
-            },
-        ]
-    } else {
-        &[
-            KeyHint {
-                key: "R",
-                label: "reconnect",
-            },
-            KeyHint {
-                key: "?",
-                label: "help",
-            },
-            KeyHint {
-                key: "Q",
-                label: "menu",
-            },
-        ]
+    let connected = matches!(app.connection, ConnectionState::Connected);
+    let reconnect = KeyHint {
+        key: "R",
+        label: if width < 72 { "retry" } else { "reconnect" },
     };
-    spans.extend(hint_spans(hints, theme));
+    let mut hints: Vec<KeyHint<'_>> = Vec::new();
+    // Reconnect only matters while the link is down.
+    if !connected {
+        hints.push(reconnect);
+    }
+    hints.push(KeyHint {
+        key: "?",
+        label: "help",
+    });
+    hints.push(KeyHint {
+        key: "Q",
+        label: "menu",
+    });
+    let used: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    spans.extend(fit_hint_spans(&hints, width.saturating_sub(used), theme));
     Line::from(spans)
 }
 
@@ -6560,10 +6601,8 @@ fn render_pilot_strip(
         } else {
             " C or Esc close"
         };
-        // Help always shows its close key; other overlays show it when shortened.
-        if (overlay.len() > rows_left || (app.show_help && overlay.len() == rows_left))
-            && rows_left > 0
-        {
+        // The close key always shows, shortening the overlay text when needed.
+        if overlay.len() >= rows_left && rows_left > 0 {
             overlay.truncate(rows_left - 1);
             // Mark the shortened text so truncation is never silent.
             if let Some(last) = overlay.last_mut() {
@@ -6628,8 +6667,12 @@ fn render_pilot_strip(
         } else {
             lines.clear();
             confirm_lines.truncate(height.saturating_sub(1));
+            let prompt = [" ENLARGE TO READ THIS CONFIRMATION", " ENLARGE TO CONFIRM"]
+                .into_iter()
+                .find(|prompt| prompt.chars().count() <= width)
+                .unwrap_or(" ENLARGE");
             lines.push(Line::styled(
-                truncate_chars(" ENLARGE TO READ THIS CONFIRMATION", width, options.ascii),
+                prompt,
                 Style::default().fg(theme.warning).bold(),
             ));
             if height >= 2 {
@@ -6844,7 +6887,7 @@ fn pilot_return_rows(
         )],
         width,
     );
-    for event in planet.unreviewed_activity.iter().rev() {
+    for event in &planet.unreviewed_activity {
         rows.extend(crate::textwrap::hang_wrap(
             vec![Line::styled(
                 format!("  {}", terminal_text(&event.summary, ascii)),
@@ -7194,7 +7237,7 @@ fn compact_session_menu_rows(
             "REPLACE ALL PROGRESS WITH A NEW WORLD?".to_owned(),
             vec![
                 format!(" ENTER replace{sep}ESC back"),
-                format!(" ENTER{sep}ESC back"),
+                format!(" ENTER replace{sep}ESC"),
                 " ENTER / ESC".to_owned(),
             ],
         ),
@@ -10439,5 +10482,115 @@ mod tests {
         app.scroll_home();
         let text = screen(&app, 44, 14, options);
         assert!(text.contains("diagnostic pulse 1 "), "{text}");
+    }
+
+    #[test]
+    fn coherence_boot_and_footer_keep_whole_prompts_at_the_minimum_size() {
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        let mut app = App::default();
+        app.apply_snapshot(status(false), Instant::now());
+        app.connected();
+        for (width, height) in [(44_u16, 14_u16), (48, 14), (80, 24)] {
+            let text = screen(&app, width, height, options);
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains("ENTER observe"), "{width}x{height}\n{text}");
+            assert!(flat.contains("Q menu"), "{width}x{height}\n{text}");
+            assert!(!flat.contains("reconnect"), "{width}x{height}\n{text}");
+        }
+        let mut booting = App::default();
+        booting.enable_boot_intro();
+        booting.apply_snapshot(status(false), Instant::now());
+        booting.connected();
+        let later = Instant::now() + std::time::Duration::from_millis(1_800);
+        for (width, height) in [(44_u16, 14_u16), (48, 14), (100, 32)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &booting, options, later))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: Vec<String> = (0..height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            let text = text.join("\n");
+            assert!(text.contains("INIT ["), "{width}x{height}\n{text}");
+            assert!(text.contains("ANY KEY"), "{width}x{height}\n{text}");
+        }
+    }
+
+    #[test]
+    fn return_summary_pages_every_away_event_before_acknowledging() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        planet.unreviewed_activity.clear();
+        for id in 1..=7 {
+            planet
+                .unreviewed_activity
+                .push(mind_core::protocol::ActivityRecord {
+                    activity_id: 500 + id,
+                    kind: mind_core::protocol::ActivityKind::Survey,
+                    region_id: None,
+                    archive_record_id: None,
+                    summary: format!("Regional survey {id} completed with one analysis unit."),
+                });
+        }
+        app.apply_planet(planet, Instant::now());
+        app.clear_active_transmission_locally();
+        app.show_return_summary = true;
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(44_u16, 14_u16), (60, 16), (80, 24)] {
+            app.return_summary_page = 0;
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..10 {
+                let text = screen(&app, width, height, options);
+                for id in 501..=507 {
+                    if text.contains(&format!("#{id}")) {
+                        seen.insert(id);
+                    }
+                }
+                assert!(!text.contains("earlier"), "{width}x{height}\n{text}");
+                if !app.advance_return_summary() {
+                    assert!(text.contains("continue"), "{width}x{height}\n{text}");
+                    break;
+                }
+                assert!(text.contains("next page"), "{width}x{height}\n{text}");
+            }
+            assert_eq!(seen.len(), 7, "{width}x{height} hid an event: {seen:?}");
+        }
+        assert!(app.dismiss_return_summary().is_some());
+        assert_eq!(app.return_summary_page, 0);
+    }
+
+    #[test]
+    fn return_summary_evidence_cue_never_cuts_a_word() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), Instant::now());
+        app.apply_planet(engine.planet().unwrap(), Instant::now());
+        app.connected();
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(44_u16, 16_u16), (44, 18), (44, 24), (48, 18), (60, 20)] {
+            let text = screen(&app, width, height, options);
+            for line in text.lines() {
+                if line.contains("full record") {
+                    assert!(
+                        line.contains("transmission")
+                            || line.contains("queued next")
+                            || line.contains("follows"),
+                        "{width}x{height}\n{text}"
+                    );
+                }
+            }
+        }
     }
 }

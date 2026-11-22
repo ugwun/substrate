@@ -205,7 +205,16 @@ async fn run_dashboard(
         }
 
         let now = std::time::Instant::now();
-        let next_deadline = app.next_frame_deadline(now);
+        // Action notices expire so they never hide the footer countdown for long.
+        let (notice_deadline, notice_cleared) = app.expire_notice(now);
+        if notice_cleared {
+            dirty = true;
+            continue;
+        }
+        let next_deadline = match (app.next_frame_deadline(now), notice_deadline) {
+            (Some(frame), Some(notice)) => Some(frame.min(notice)),
+            (frame, notice) => frame.or(notice),
+        };
         let animation_sleep = async {
             if let Some(deadline) = next_deadline {
                 time::sleep_until(time::Instant::from_std(deadline)).await;
@@ -367,6 +376,9 @@ async fn handle_key(
                 .is_ok_and(|(width, height)| !ui::return_summary_visible(app, width, height))
         {
             app.notice = Some("ENLARGE THE TERMINAL TO READ THE SUMMARY".into());
+            return Ok(false);
+        }
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) && app.advance_return_summary() {
             return Ok(false);
         }
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {

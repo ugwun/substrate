@@ -205,13 +205,24 @@ fn render_boot_overlay(
     }
 
     let pct = (progress * 100.0).round().clamp(0.0, 100.0) as usize;
-    let bar_cells = 22_usize;
-    let filled = (bar_cells * pct) / 100;
     let (fill_ch, empty_ch) = if options.ascii {
         ('#', '.')
     } else {
         ('█', '░')
     };
+    // Fit a complete skip prompt first, then size the bar from the cells left (pills add 4).
+    let row_room = usize::from(area.width).saturating_sub(4);
+    let fixed = "INIT [".len() + "] 100%   ".len();
+    let prompt = [
+        "PRESS ANY KEY TO ENTER COHERENCE",
+        "PRESS ANY KEY",
+        "ANY KEY",
+    ]
+    .into_iter()
+    .find(|prompt| fixed + prompt.len() + 8 <= row_room)
+    .unwrap_or("ANY KEY");
+    let bar_cells = row_room.saturating_sub(fixed + prompt.len()).clamp(4, 22);
+    let filled = (bar_cells * pct) / 100;
     status_lines.push(Line::raw(""));
     status_lines.push(Line::from(vec![
         Span::styled(
@@ -225,10 +236,7 @@ fn render_boot_overlay(
             ),
             Style::default().fg(theme.gold).bold(),
         ),
-        Span::styled(
-            "PRESS ANY KEY TO ENTER COHERENCE",
-            Style::default().fg(theme.text),
-        ),
+        Span::styled(prompt, Style::default().fg(theme.text)),
     ]));
 
     let bottom_h =

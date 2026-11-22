@@ -127,6 +127,8 @@ pub struct ScrollLimits {
     pub overview_rows: std::cell::Cell<u16>,
     /// Whole System events visible on the current page.
     pub event_rows: std::cell::Cell<u16>,
+    /// Pages the Return Summary needs to show every away event at the current size.
+    pub summary_pages: std::cell::Cell<u16>,
 }
 
 impl ScrollLimits {
@@ -153,6 +155,7 @@ impl Default for ScrollLimits {
             archive_rows: std::cell::Cell::new(5),
             overview_rows: std::cell::Cell::new(5),
             event_rows: std::cell::Cell::new(5),
+            summary_pages: std::cell::Cell::new(1),
         }
     }
 }
@@ -195,6 +198,8 @@ pub struct App {
     pub session_menu_selection: usize,
     pub session_menu_message: Option<String>,
     pub notice: Option<String>,
+    /// The notice currently on screen and when it first appeared, for expiry.
+    notice_shown: Option<(String, Instant)>,
     pub selected_band: usize,
     pub band_positions: [u8; 3],
     pub onboarding_view: OnboardingView,
@@ -214,6 +219,8 @@ pub struct App {
     /// The System Map became available while its introducing transmission was still queued.
     pub system_map_deferred: bool,
     pub show_return_summary: bool,
+    /// Return Summary page being shown when the away events need more than one page.
+    pub return_summary_page: usize,
     pub active_transmission_id: Option<String>,
     pub replay_transmission_id: Option<String>,
     pub transmission_opened_at: Option<Instant>,
@@ -267,6 +274,7 @@ impl Default for App {
             session_menu_selection: 0,
             session_menu_message: None,
             notice: None,
+            notice_shown: None,
             selected_band: 0,
             band_positions: [1, 5, 9],
             onboarding_view: OnboardingView::Adjusting,
@@ -285,6 +293,7 @@ impl Default for App {
             scroll_limits: ScrollLimits::default(),
             system_map_deferred: false,
             show_return_summary: false,
+            return_summary_page: 0,
             active_transmission_id: None,
             replay_transmission_id: None,
             transmission_opened_at: None,
@@ -314,6 +323,31 @@ impl Default for App {
 }
 
 impl App {
+    /// Clear an action notice a few seconds after it first appeared. Returns when the current
+    /// notice expires (for the frame scheduler) and whether a notice was just cleared.
+    pub fn expire_notice(&mut self, now: Instant) -> (Option<Instant>, bool) {
+        const NOTICE_TTL: Duration = Duration::from_secs(6);
+        let Some(text) = self.notice.as_ref() else {
+            self.notice_shown = None;
+            return (None, false);
+        };
+        match &self.notice_shown {
+            Some((shown, since)) if shown == text => {
+                if now.saturating_duration_since(*since) >= NOTICE_TTL {
+                    self.notice = None;
+                    self.notice_shown = None;
+                    (None, true)
+                } else {
+                    (Some(*since + NOTICE_TTL), false)
+                }
+            }
+            _ => {
+                self.notice_shown = Some((text.clone(), now));
+                (Some(now + NOTICE_TTL), false)
+            }
+        }
+    }
+
     pub fn connected(&mut self) {
         self.connection = ConnectionState::Connected;
         self.notice = None;
@@ -531,6 +565,7 @@ impl App {
                 .is_some_and(|planet| !planet.unreviewed_activity.is_empty())
         {
             self.show_return_summary = true;
+            self.return_summary_page = 0;
         }
         self.clamp_overview_selection();
         self.clamp_archive_selection();
@@ -1778,8 +1813,21 @@ impl App {
         };
     }
 
+    /// Step to the next Return Summary page; false once the last page is showing, when Enter
+    /// or Esc acknowledges every away event.
+    pub fn advance_return_summary(&mut self) -> bool {
+        let pages = usize::from(self.scroll_limits.summary_pages.get().max(1));
+        if self.return_summary_page + 1 < pages {
+            self.return_summary_page += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn dismiss_return_summary(&mut self) -> Option<u64> {
         self.show_return_summary = false;
+        self.return_summary_page = 0;
         if self.active_transmission_id.is_some() {
             self.transmission_opened_at = Some(Instant::now());
             self.transmission_revealed = false;
