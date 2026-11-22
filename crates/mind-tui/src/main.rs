@@ -390,6 +390,36 @@ async fn handle_key(
     if crossterm::terminal::size().is_ok_and(|(width, height)| width >= 44 && height >= 14) {
         app.note_readable_input();
     }
+    // In the Pilot Strip only what the strip shows may act: navigation and Enter would reach
+    // workspace content (selections, research entries) the player cannot see.
+    if crossterm::terminal::size().is_ok_and(|(width, height)| {
+        (width < 44 || height < 14) && !ui::resize_screen_shown(app, width, height)
+    }) && !app.show_return_summary
+        && app.pending_action.is_none()
+        && app.active_transmission_record().is_none()
+        && (matches!(
+            key.code,
+            KeyCode::Enter
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Tab
+                | KeyCode::BackTab
+        ) || matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit()))
+    {
+        app.notice = Some("ENLARGE THE TERMINAL TO USE THIS".into());
+        return Ok(false);
+    }
+    // A summary always outranks Help: close Help first so Enter never acts unseen.
+    if app.show_return_summary && app.show_help {
+        app.show_help = false;
+        return Ok(false);
+    }
     if app.show_return_summary {
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc)
             && crossterm::terminal::size()

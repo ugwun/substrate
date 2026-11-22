@@ -1847,6 +1847,8 @@ impl App {
         });
         if missed {
             self.show_return_summary = true;
+            self.show_help = false;
+            self.show_chapter_card = false;
             self.return_summary_anchor = 0;
         } else if !self.watching && self.watched_through.is_some() {
             // Readable again: an event from the unreadable interval may still be in flight.
@@ -1891,6 +1893,8 @@ impl App {
             && !self.show_return_summary
         {
             self.show_return_summary = true;
+            self.show_help = false;
+            self.show_chapter_card = false;
             self.return_summary_anchor = 0;
         }
         self.watched_through = Some(seen.max(latest));
@@ -1971,7 +1975,13 @@ impl App {
             self.scroll_limits.summary_shown_through.set(shown);
             return Some(shown);
         }
-        Some(if shown > 0 { shown.min(last) } else { last })
+        let through = if shown > 0 { shown.min(last) } else { last };
+        // An event may already be on its way from the daemon: check the next snapshot for
+        // anything newer than what was shown before auto-acknowledging again.
+        self.watched_through = Some(through);
+        self.last_auto_acked_activity_id = self.last_auto_acked_activity_id.max(through);
+        self.reconcile_since = Some(Instant::now());
+        Some(through)
     }
 
     pub fn active_transmission_record(&self) -> Option<(usize, &ArchiveRecordSnapshot)> {

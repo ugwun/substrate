@@ -30,6 +30,8 @@ pub(crate) struct CampaignInput<'a> {
     pub scout_target_region_id: Option<&'a str>,
     pub queued_survey_region_id: Option<&'a str>,
     pub extractor_ready: bool,
+    /// Target region of the extraction mission in flight, if any.
+    pub active_extraction_region_id: Option<&'a str>,
     /// Region of an active (unpaused) automated extraction route, if any.
     pub extraction_route_region_id: Option<&'a str>,
     pub active_site_survey: bool,
@@ -956,47 +958,8 @@ fn observation_array_lead(
         let source = deposit.as_deref().map_or_else(String::new, |id| {
             format!(" at {}", region_label(input.regions, id))
         });
-        if let Some(route) = input
-            .extraction_route_region_id
-            .filter(|_| !input.extractor_ready && route_blocking(input, None, short).is_none())
-        {
-            // The active route is already hauling a material that is still short.
-            let route_label = region_label(input.regions, route);
-            return (
-                format!(
-                    "Need {} more for the next {noun}; the {route_label} route is delivering it. Press O at {label} once it is refined.",
-                    parts.join(" / ")
-                ),
-                "",
-                Some(host.region_id.clone()),
-                Some(host.subregion_id.clone()),
-            );
-        }
-        if let Some(route) = route_blocking(input, deposit.as_deref(), short) {
-            let route_label = region_label(input.regions, &route).to_owned();
-            return (
-                format!(
-                    "Need {} more for the next {noun}; the {route_label} route holds the extractor. Press A at {route_label} to clear it, then extract{source} (X).",
-                    parts.join(" / ")
-                ),
-                "A",
-                Some(route),
-                None,
-            );
-        }
-        if !input.extractor_ready {
-            // Keep the deposit as the lead while the extractor is out, with no key to press yet.
-            return (
-                format!(
-                    "Need {} more for the next {noun}; extract{source} (X) once the extractor is ready.",
-                    parts.join(" / ")
-                ),
-                "",
-                deposit.or_else(|| Some(host.region_id.clone())),
-                None,
-            );
-        }
-        // A region holds one deposit: name only the amount it supplies, the rest separately.
+        // A region holds one deposit: name only the amount it supplies, and give every other
+        // missing material its own source.
         let kind_part = |kind: ResourceKind| match kind {
             ResourceKind::Structural => {
                 (short.structural > 0).then(|| format!("S {}", short.structural))
@@ -1009,37 +972,94 @@ fn observation_array_lead(
             }
         };
         let here = deposit_kind.and_then(kind_part);
-        let text = match here {
-            Some(here) => {
-                let rest: Vec<&String> = parts.iter().filter(|part| **part != here).collect();
-                if rest.is_empty() {
-                    format!(
-                        "Extract {here}{source} (X) for the next {noun}, then press O at {label}."
-                    )
-                } else {
-                    let rest = rest
-                        .iter()
-                        .map(|part| part.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" / ");
-                    // Name where the remaining material can come from too.
-                    let mut remaining = short;
-                    match deposit_kind {
-                        Some(ResourceKind::Structural) => remaining.structural = 0,
-                        Some(ResourceKind::Conductive) => remaining.conductive = 0,
-                        Some(ResourceKind::Silicate) => remaining.silicate = 0,
-                        None => {}
-                    }
-                    let rest_source = first_deposit_for(input.regions, remaining)
-                        .map_or_else(String::new, |id| {
-                            format!(" at {}", region_label(input.regions, &id))
-                        });
-                    format!(
-                        "Extract {here}{source} (X) for the next {noun} ({rest} still needed{rest_source}), then press O at {label}."
-                    )
-                }
+        let rest: Vec<&String> = parts
+            .iter()
+            .filter(|part| Some(*part) != here.as_ref())
+            .collect();
+        let rest_text = (!rest.is_empty()).then(|| {
+            let mut remaining = short;
+            match deposit_kind {
+                Some(ResourceKind::Structural) => remaining.structural = 0,
+                Some(ResourceKind::Conductive) => remaining.conductive = 0,
+                Some(ResourceKind::Silicate) => remaining.silicate = 0,
+                None => {}
             }
-            None => format!(
+            let rest_source = first_deposit_for(input.regions, remaining)
+                .map_or_else(String::new, |id| {
+                    format!(" at {}", region_label(input.regions, &id))
+                });
+            let list = rest
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!("{list}{rest_source}")
+        });
+        // "C 9 at R-118 and Si 4 at R-122" (or the plain list when no deposit is known).
+        let need_text = match (&here, &rest_text) {
+            (Some(here), Some(rest)) => format!("{here}{source} and {rest}"),
+            (Some(here), None) => format!("{here}{source}"),
+            (None, _) => parts.join(" / "),
+        };
+        // A route counts only while its own mission is actually in flight.
+        let route_in_flight = input
+            .extraction_route_region_id
+            .filter(|route| input.active_extraction_region_id == Some(*route));
+        if let Some(route) =
+            route_in_flight.filter(|_| route_blocking(input, None, short).is_none())
+        {
+            // The active route is already hauling a material that is still short.
+            let route_label = region_label(input.regions, route);
+            return (
+                format!(
+                    "Need {need_text} for the next {noun}; the {route_label} route is delivering part of it. Press O at {label} once the materials are refined."
+                ),
+                "",
+                Some(host.region_id.clone()),
+                Some(host.subregion_id.clone()),
+            );
+        }
+        if let Some(route) =
+            route_in_flight.and_then(|_| route_blocking(input, deposit.as_deref(), short))
+        {
+            let route_label = region_label(input.regions, &route).to_owned();
+            return (
+                format!(
+                    "Need {need_text} for the next {noun}; the {route_label} route holds the extractor. Press A at {route_label} to clear it, then extract (X)."
+                ),
+                "A",
+                Some(route),
+                None,
+            );
+        }
+        if !input.extractor_ready {
+            // Keep the deposit as the lead while the extractor is out, with no key to press yet.
+            let text = if input.active_extraction_region_id.is_some()
+                && input.active_extraction_region_id == deposit.as_deref()
+            {
+                format!(
+                    "Need {need_text} for the next {noun}; the extractor is already working{source}. Press O at {label} once it returns and the cargo is refined."
+                )
+            } else {
+                format!(
+                    "Need {need_text} for the next {noun}; extract (X) once the extractor is ready."
+                )
+            };
+            return (
+                text,
+                "",
+                deposit.or_else(|| Some(host.region_id.clone())),
+                None,
+            );
+        }
+        let text = match (&here, &rest_text) {
+            (Some(here), Some(rest)) => format!(
+                "Extract {here}{source} (X) for the next {noun} ({rest} still needed), then press O at {label}."
+            ),
+            (Some(here), None) => format!(
+                "Extract {here}{source} (X) for the next {noun}, then press O at {label}."
+            ),
+            (None, _) => format!(
                 "Extract {} (X) for the next {noun}, then press O at {label}.",
                 parts.join(" / ")
             ),
@@ -1086,7 +1106,11 @@ fn route_blocking(
                     ResourceKind::Silicate => short.silicate > 0,
                 }
         });
-    (!input.extractor_ready && wanted != Some(route) && !route_supplies_shortfall)
+    // The route holds the extractor only while its own mission is in flight.
+    (!input.extractor_ready
+        && input.active_extraction_region_id == Some(route)
+        && wanted != Some(route)
+        && !route_supplies_shortfall)
         .then(|| route.to_owned())
 }
 

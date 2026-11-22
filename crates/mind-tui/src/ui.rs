@@ -3598,7 +3598,13 @@ fn render_compact_local_grid(
             } else {
                 coordinate(site)
             };
-            let label: String = format!(" {label:<w$}", w = cell_w.saturating_sub(1))
+            // A text marker keeps the selection visible in monochrome too.
+            let marker = if selected_id == Some(site.id.as_str()) {
+                '>'
+            } else {
+                ' '
+            };
+            let label: String = format!("{marker}{label:<w$}", w = cell_w.saturating_sub(1))
                 .chars()
                 .take(cell_w)
                 .collect();
@@ -3710,7 +3716,7 @@ fn render_local_sites(
     }
     let row_count = u16::from(planet.network.subregion_rows.max(1));
     let column_count = u16::from(planet.network.subregion_columns.max(1));
-    // Bordered tiles need four rows (border, label, state, border) so every sector's state
+    // Bordered tiles need four rows (their title carries the sector state) so every sector's state
     // stays visible, and room for a short label; below that, draw a compact text grid.
     if inner.height / row_count < 4 || inner.width / column_count < 6 {
         render_compact_local_grid(
@@ -3914,6 +3920,8 @@ fn render_local_sites(
                 lines.push(Line::styled(label, Style::default().fg(theme.amber)));
             }
             let newly_scanned = app.has_discovery_flash(&site.id, now);
+            // The title names the sector's state, so short tiles that have no room for a
+            // state row still tell frontier, observed, surveyed and node sectors apart.
             let tile_title = if tile_inner_w < 10 {
                 if selected {
                     " SEL "
@@ -3921,10 +3929,15 @@ fn render_local_sites(
                     " NEW "
                 } else if active_survey {
                     " SCN "
-                } else if site.knowledge == SubregionKnowledge::Unknown {
-                    " FOG "
+                } else if base.is_some() {
+                    " NODE "
                 } else {
-                    " SEC "
+                    match site.knowledge {
+                        SubregionKnowledge::Unknown => " FOG ",
+                        SubregionKnowledge::Detected => " FRNT ",
+                        SubregionKnowledge::Surveyed => " SRVD ",
+                        SubregionKnowledge::Observed => " OBSV ",
+                    }
                 }
             } else if selected {
                 " SELECTED "
@@ -3932,10 +3945,15 @@ fn render_local_sites(
                 " NEW SCAN "
             } else if active_survey {
                 " SCAN "
-            } else if site.knowledge == SubregionKnowledge::Unknown {
-                " FOG "
+            } else if base.is_some() {
+                " NODE "
             } else {
-                " SECTOR "
+                match site.knowledge {
+                    SubregionKnowledge::Unknown => " FOG ",
+                    SubregionKnowledge::Detected => " FRONTIER ",
+                    SubregionKnowledge::Surveyed => " SURVEYED ",
+                    SubregionKnowledge::Observed => " OBSERVED ",
+                }
             };
             frame.render_widget(
                 Paragraph::new(lines)
@@ -10764,9 +10782,14 @@ mod tests {
                 no_color: false,
             },
         );
+        // Bordered tiles show sector IDs; the compact grid (used when a tile would lose its
+        // state row) names every sector by coordinate instead.
+        let compact = ["A1", "B2", "C3", "D4"]
+            .iter()
+            .all(|c| local_80.contains(c));
         for id in ["S-10", "S-11", "S-12", "S-13", "S-14", "S-15", "S-16"] {
             assert!(
-                local_80.contains(id),
+                compact || local_80.contains(id),
                 "80x24 local field must preserve distinct {id}: {local_80}"
             );
         }

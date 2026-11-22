@@ -157,15 +157,21 @@ fn render_blueprint_panel(
         };
         let width = usize::from(inner.width);
         let fit = |text: String| -> String { text.chars().take(width).collect() };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(fit(name), Style::default().fg(theme.cyan_bright).bold()),
-                Line::styled(fit(state), Style::default().fg(theme.amber)),
-                Line::styled(fit(place), Style::default().fg(theme.text)),
-            ])
-            .style(theme.panel_style()),
-            inner,
-        );
+        // With a spare row, keep the mission banner (ID, destination, countdown) in the card.
+        let banner = if selected_extractor {
+            extractor_status_banner(app, planet, now, width)
+        } else {
+            scout_status_banner(app, planet, now, width)
+        };
+        let mut lines = vec![
+            Line::styled(fit(name), Style::default().fg(theme.cyan_bright).bold()),
+            Line::styled(fit(state), Style::default().fg(theme.amber)),
+            Line::styled(fit(place), Style::default().fg(theme.text)),
+        ];
+        if inner.height >= 4 && !banner.is_empty() {
+            lines.push(Line::styled(banner, Style::default().fg(theme.gold).bold()));
+        }
+        frame.render_widget(Paragraph::new(lines).style(theme.panel_style()), inner);
         return;
     }
 

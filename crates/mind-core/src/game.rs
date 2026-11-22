@@ -792,6 +792,10 @@ impl GameState {
                 extractor_ready: self.extractor_available
                     && self.active_extraction.is_none()
                     && self.extractor_rebuild_remaining_ms == 0,
+                active_extraction_region_id: self
+                    .active_extraction
+                    .as_ref()
+                    .map(|mission| mission.target_region_id.as_str()),
                 extraction_route_region_id: self
                     .extraction_route_region_id
                     .as_deref()
