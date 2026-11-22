@@ -183,10 +183,25 @@ fn render_boot_overlay(
             Style::default().fg(theme.amber).bold(),
         ),
     ];
-    frame.render_widget(
-        Paragraph::new(title_lines).alignment(Alignment::Center),
-        title_rect,
-    );
+    // Each title row sits on a cleared pill one cell wider on both sides, so the rising
+    // planetary backdrop never touches the lettering.
+    for (idx, line) in title_lines
+        .into_iter()
+        .take(usize::from(title_h))
+        .enumerate()
+    {
+        let text_w = u16::try_from(line.width()).unwrap_or(u16::MAX);
+        let pill_w = (text_w + 2).min(title_rect.width);
+        let pill_x = title_rect.x + title_rect.width.saturating_sub(pill_w) / 2;
+        let pill_rect = Rect::new(pill_x, title_rect.y + idx as u16, pill_w, 1);
+        frame.render_widget(Clear, pill_rect);
+        frame.render_widget(
+            Paragraph::new(line)
+                .alignment(Alignment::Center)
+                .style(theme.canvas_style()),
+            pill_rect,
+        );
+    }
 
     // Compact floating operational check strip along the lower planetary silhouette.
     let mut status_lines: Vec<Line<'static>> = Vec::new();

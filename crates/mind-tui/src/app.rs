@@ -1847,6 +1847,21 @@ impl App {
         missed
     }
 
+    /// A key press on the readable interface: the player is watching, so their own commands
+    /// (and anything already on screen) count as seen rather than as away-time activity.
+    pub fn note_readable_input(&mut self) {
+        self.reconcile_since = None;
+        let latest = self
+            .planet
+            .as_ref()
+            .and_then(|planet| planet.unreviewed_activity.last())
+            .map_or(0, |record| record.activity_id);
+        if self.watching {
+            self.watched_through =
+                Some(self.watched_through.map_or(latest, |seen| seen.max(latest)));
+        }
+    }
+
     /// After the interface became readable again, check the first planet snapshot for events
     /// that happened while it was not (delivered just after the resize) and present them.
     fn reconcile_unseen_activity(&mut self, received_at: Instant) {

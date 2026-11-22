@@ -494,6 +494,10 @@ impl GameState {
         if version.schema_version <= 7 {
             state.migrate_extraction_mission();
         }
+        // Recover saves written while a cleared route still carried a pause reason.
+        if state.extraction_route_region_id.is_none() {
+            state.extraction_route_paused_reason = None;
+        }
         if migrated {
             state.migrate_archive_progress(version.schema_version);
             if version.schema_version <= 10 {
@@ -2225,7 +2229,10 @@ impl GameState {
                         Some(mission.target_region_id.clone()),
                         format!("Extractor and cargo were lost near {designation}."),
                     );
-                    if mission.automated {
+                    if mission.automated
+                        && self.extraction_route_region_id.as_deref()
+                            == Some(mission.target_region_id.as_str())
+                    {
                         self.extraction_route_paused_reason = Some("probe_loss".into());
                         events.push(GameAdvanceEvent::AutomationPaused);
                     }
@@ -3886,12 +3893,11 @@ impl GameState {
             .active_mission
             .as_ref()
             .is_some_and(|mission| mission.auto_return && !self.automation_unlocked())
-            || self.active_extraction.as_ref().is_some_and(|mission| {
-                mission.automated
-                    && (self.extraction_route_region_id.as_deref()
-                        != Some(mission.target_region_id.as_str())
-                        || !self.automation_unlocked())
-            })
+            // An accepted automated mission stays valid after its route is cleared or changed.
+            || self
+                .active_extraction
+                .as_ref()
+                .is_some_and(|mission| mission.automated && !self.automation_unlocked())
         {
             return Err(GameError::Invariant("automated mission is inconsistent"));
         }
@@ -5792,6 +5798,80 @@ mod tests {
         let events = state.advance(TRAVEL_MS_PER_HOP + EXTRACTION_MS + TRAVEL_MS_PER_HOP);
         assert!(events.contains(&GameAdvanceEvent::ExtractionCompleted));
         assert!(events.contains(&GameAdvanceEvent::FoundationCompleted));
+    }
+
+    #[test]
+    fn clearing_a_route_mid_flight_keeps_the_save_loadable() {
+        for lose_probe in [false, true] {
+            let mut state = GameState::with_seed(37);
+            awaken(&mut state);
+            state.reach_milestone_complete = true;
+            state
+                .completed_research
+                .push(ResearchProject::FieldHardening);
+            assert!(state.activate_profile(OperationalProfile::Resilience).ok);
+            let target = state
+                .planet_snapshot()
+                .unwrap()
+                .regions
+                .into_iter()
+                .find(|region| region.hop_distance_from_core == 1)
+                .unwrap();
+            // The reach milestone implies a relay; keep the shortcut state consistent.
+            state.relay_region_id = Some(target.id.clone());
+            assert!(state.deploy_scout(&target.id).ok);
+            state.advance(TRAVEL_MS_PER_HOP + SURVEY_MS);
+            assert!(state.recall_scout().ok);
+            state.advance(TRAVEL_MS_PER_HOP);
+            assert!(state.deploy_extractor(&target.id).ok);
+            state.active_extraction.as_mut().unwrap().will_fail = false;
+            state.advance(TRAVEL_MS_PER_HOP + EXTRACTION_MS + TRAVEL_MS_PER_HOP);
+            assert!(state.set_extraction_route(&target.id).ok);
+            state.advance(0);
+            let mission = state.active_extraction.as_mut().unwrap();
+            assert!(mission.automated);
+            mission.will_fail = lose_probe;
+            // The player clears the route while the automated probe is outbound.
+            assert!(state.clear_extraction_route().ok);
+            state.advance(TRAVEL_MS_PER_HOP / 2);
+            let mid = state.validate();
+            assert!(mid.is_ok(), "mid-flight clear must stay valid: {mid:?}");
+            state.advance(TRAVEL_MS_PER_HOP + EXTRACTION_MS + TRAVEL_MS_PER_HOP);
+            assert!(
+                state.validate().is_ok(),
+                "loss={lose_probe} must stay valid"
+            );
+            assert!(state.extraction_route_paused_reason.is_none());
+
+            let dir = std::env::temp_dir().join(format!(
+                "substrate-route-clear-{}-{lose_probe}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("game_state.json");
+            state.save(&path).unwrap();
+            assert!(
+                GameState::load(&path).is_ok(),
+                "loss={lose_probe} must reload"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn saves_with_a_stale_route_pause_reason_recover_on_load() {
+        let mut state = GameState::with_seed(37);
+        awaken(&mut state);
+        state.extraction_route_region_id = None;
+        state.extraction_route_paused_reason = Some("probe_loss".into());
+        let dir =
+            std::env::temp_dir().join(format!("substrate-stale-pause-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game_state.json");
+        state.save(&path).unwrap();
+        let loaded = GameState::load(&path).expect("stale pause reason must recover");
+        assert!(loaded.state.extraction_route_paused_reason.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

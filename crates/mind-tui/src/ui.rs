@@ -367,7 +367,15 @@ fn render_planet(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::Planet, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::Planet,
+        options,
+        theme,
+        area.height,
+    );
     let Some(planet) = &app.planet else {
         frame.render_widget(
             Paragraph::new("Awaiting authoritative planetary state...")
@@ -626,7 +634,15 @@ fn render_overview(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::Overview, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::Overview,
+        options,
+        theme,
+        area.height,
+    );
     let Some(planet) = &app.planet else {
         frame.render_widget(
             Paragraph::new("Awaiting authoritative planetary overview...")
@@ -1360,7 +1376,15 @@ fn render_research(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::Research, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::Research,
+        options,
+        theme,
+        area.height,
+    );
     let Some(planet) = &app.planet else {
         frame.render_widget(
             Paragraph::new("Awaiting authoritative research state...")
@@ -1729,7 +1753,15 @@ fn render_system_map(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::SystemMap, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::SystemMap,
+        options,
+        theme,
+        area.height,
+    );
 
     let available = app
         .planet
@@ -1815,7 +1847,15 @@ fn render_archive(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::Archive, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::Archive,
+        options,
+        theme,
+        area.height,
+    );
     let Some(planet) = &app.planet else {
         frame.render_widget(
             Paragraph::new("Awaiting authoritative archive state...")
@@ -2526,53 +2566,77 @@ fn report_outcome_label(outcome: MissionReportOutcome) -> &'static str {
     }
 }
 
-/// Header rows for a workspace: tabs, the question (Planet's NEXT on short terminals), any
-/// Planet rows, and a rule, plus one row when that line would be cut on a terminal at least 24
-/// rows tall, so it wraps instead.
-fn workspace_header_height(app: &App, area: Rect, active: Workspace) -> u16 {
+/// Rows the header gives the question and Planet's NEXT line. On terminals at least 24 rows
+/// tall each wraps independently (question up to two rows, NEXT up to three) instead of being
+/// cut; shorter terminals keep one row each.
+fn header_field_rows(app: &App, area: Rect, active: Workspace) -> (u16, u16) {
     let tall_planet = active == Workspace::Planet && area.height >= 30;
-    let base = if tall_planet { 5 } else { 3 };
-    if area.height < 24 {
-        return base;
-    }
-    let Some(planet) = &app.planet else {
-        return base;
+    let shows_question = active != Workspace::Planet || tall_planet;
+    let shows_next = active == Workspace::Planet;
+    let single = (u16::from(shows_question), u16::from(shows_next));
+    let Some(planet) = app.planet.as_ref().filter(|_| area.height >= 24) else {
+        return single;
     };
-    // Planet wraps its NEXT line (the actionable one); other workspaces wrap the question.
-    let needed = if active == Workspace::Planet {
+    let width = usize::from(area.width);
+    let rows_for = |prefix: &str, text: &str, cap: usize| -> u16 {
+        let prefix_width = prefix.chars().count();
+        let rows = wrap_indented_lines(
+            vec![Span::raw(prefix.to_owned())],
+            prefix_width,
+            text,
+            prefix_width,
+            width,
+            Style::default(),
+        )
+        .len();
+        u16::try_from(rows.clamp(1, cap)).unwrap_or(1)
+    };
+    let question_rows = if shows_question {
+        rows_for(" QUESTION // ", &planet.campaign.question, 2)
+    } else {
+        0
+    };
+    let next_rows = if shows_next {
         let (key, text) = local_next_override(app, planet);
-        let action = if text.is_empty() {
-            planet.campaign.next_action.chars().count()
-        } else {
-            text.chars().count()
-        };
         let chip = key
             .or(planet.campaign.next_action_key.as_deref())
-            .map_or(0, |key| key.chars().count() + 3);
-        " NEXT // ".len() + chip + action
+            .map_or(String::new(), |key| format!(" {key}  "));
+        let action = if text.is_empty() {
+            planet.campaign.next_action.clone()
+        } else {
+            text
+        };
+        rows_for(&format!(" NEXT // {chip}"), &action, 3)
     } else {
-        " QUESTION // ".len() + planet.campaign.question.chars().count()
+        0
     };
-    if needed + 1 > usize::from(area.width) {
-        base + 1
-    } else {
-        base
-    }
+    (question_rows, next_rows)
 }
 
-/// Wrap a header line's text under its prefix across at most two rows, ending the second row
-/// with an ellipsis at a word boundary when the text is longer still.
+/// Header rows for a workspace: tabs, the question and/or NEXT rows, the Planet STORES row on
+/// tall terminals, and a rule.
+fn workspace_header_height(app: &App, area: Rect, active: Workspace) -> u16 {
+    let (question_rows, next_rows) = header_field_rows(app, area, active);
+    let stores = u16::from(active == Workspace::Planet && area.height >= 30);
+    1 + question_rows + next_rows + stores + 1
+}
+
+/// Wrap a header line's text under its prefix across at most `max_rows` rows, ending the last
+/// row with an ellipsis at a word boundary when the text is longer still.
 fn wrap_header_line(
     prefix: Vec<Span<'static>>,
     text: &str,
     width: usize,
     style: Style,
     ascii: bool,
+    max_rows: usize,
 ) -> Vec<Line<'static>> {
     let indent: usize = prefix.iter().map(|span| span.content.chars().count()).sum();
     let mut rows = wrap_indented_lines(prefix, indent, text, indent, width, style);
-    if rows.len() > 2 {
-        let rest: String = rows[1..]
+    let max_rows = max_rows.max(1);
+    if rows.len() > max_rows {
+        let keep = max_rows - 1;
+        let rest: String = rows[keep..]
             .iter()
             .map(|row| {
                 row.spans
@@ -2584,7 +2648,7 @@ fn wrap_header_line(
             })
             .collect::<Vec<_>>()
             .join(" ");
-        rows.truncate(1);
+        rows.truncate(keep);
         rows.push(Line::from(vec![
             Span::raw(" ".repeat(indent)),
             Span::styled(
@@ -2603,14 +2667,16 @@ fn render_workspace_header(
     active: Workspace,
     options: RenderOptions,
     theme: Theme,
+    full_height: u16,
 ) {
-    // A header one row taller than its base wraps the question (or compact Planet's NEXT).
-    let extended = if active == Workspace::Planet {
-        area.height == 4 || area.height == 6
+    // The same row plan that sized this header: question and NEXT wrap independently.
+    let full_area = Rect::new(area.x, area.y, area.width, full_height);
+    let (question_rows, next_rows) = header_field_rows(app, full_area, active);
+    let area_height: u16 = if active == Workspace::Planet && full_height >= 30 {
+        5
     } else {
-        area.height == 4
+        3
     };
-    let area_height = area.height.saturating_sub(u16::from(extended));
     let visible = app.visible_workspaces();
     let compact = area.width < 106 || (visible.len() >= 7 && area.width < 126);
     let ultra_compact = area.width < 84;
@@ -2752,7 +2818,7 @@ fn render_workspace_header(
                 spans.push(Span::styled(format!(" {key} "), theme.key_style()));
                 spans.push(Span::raw(" "));
             }
-            if extended {
+            if next_rows > 1 {
                 let action = terminal_text(
                     if override_text.is_empty() {
                         &planet.campaign.next_action
@@ -2767,6 +2833,7 @@ fn render_workspace_header(
                     total_width,
                     Style::default().fg(theme.text_strong),
                     options.ascii,
+                    usize::from(next_rows),
                 )
             } else {
                 let mut badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
@@ -2811,7 +2878,7 @@ fn render_workspace_header(
     } else if let Some(planet) = &app.planet {
         let q_prefix = " QUESTION // ";
         let q_text = terminal_text(&planet.campaign.question, options.ascii);
-        if extended && active != Workspace::Planet {
+        if question_rows > 1 {
             wrap_header_line(
                 vec![Span::styled(
                     q_prefix,
@@ -2821,6 +2888,7 @@ fn render_workspace_header(
                 total_width,
                 Style::default().fg(theme.text_strong).bold(),
                 options.ascii,
+                usize::from(question_rows),
             )
         } else {
             let q_clipped = truncate_chars(
@@ -2864,13 +2932,14 @@ fn render_workspace_header(
             }
             let used: usize = next_spans.iter().map(|s| s.content.chars().count()).sum();
             let action = terminal_text(display_action, options.ascii);
-            if extended {
+            if next_rows > 1 {
                 lines.extend(wrap_header_line(
                     next_spans,
                     &action,
                     total_width,
                     Style::default().fg(theme.text),
                     options.ascii,
+                    usize::from(next_rows),
                 ));
             } else {
                 next_spans.push(Span::styled(
@@ -3308,7 +3377,15 @@ fn render_probes(
         Constraint::Length(2),
     ])
     .split(area);
-    render_workspace_header(frame, rows[0], app, Workspace::Probes, options, theme);
+    render_workspace_header(
+        frame,
+        rows[0],
+        app,
+        Workspace::Probes,
+        options,
+        theme,
+        area.height,
+    );
     if let Some(planet) = &app.planet {
         probes::render_probe_bay_body(frame, rows[1], app, planet, options, theme, now);
     } else {
@@ -6262,7 +6339,8 @@ fn render_dashboard(
     now: Instant,
 ) {
     // Short terminals get a one-line telemetry summary so events keep usable space.
-    let compact_telemetry = area.height < 22;
+    // Narrow terminals stack the panels and need about 28 rows for the full layout.
+    let compact_telemetry = area.height < 22 || (area.width < 72 && area.height < 28);
     let header_h = workspace_header_height(app, area, Workspace::System);
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if compact_telemetry
     {
@@ -6304,7 +6382,15 @@ fn render_dashboard(
         .split(area);
         (rows[0], rows[1], rows[2], rows[3], rows[4])
     };
-    render_workspace_header(frame, header_area, app, Workspace::System, options, theme);
+    render_workspace_header(
+        frame,
+        header_area,
+        app,
+        Workspace::System,
+        options,
+        theme,
+        area.height,
+    );
 
     let (system, diagnostic) = if let Some(snapshot) = &app.snapshot {
         (
@@ -11182,6 +11268,77 @@ mod tests {
                 flat.contains("efficiency required?"),
                 "{width}x{height} cut the question\n{archive_text}"
             );
+        }
+    }
+
+    #[test]
+    fn header_wraps_long_guidance_and_questions_independently() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        planet.campaign.next_action = "Need C 9 more for the next Observation Array; the R-098 route holds the extractor. Press A at R-098 to clear it, then extract at R-122 (X).".into();
+        planet.campaign.next_action_key = Some("A".into());
+        planet.campaign.question =
+            "Does a deliberately long header question wrap fully across two rows at eighty columns?"
+                .into();
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(80_u16, 24_u16), (80, 30), (80, 36)] {
+            app.workspace = Workspace::Planet;
+            let text = screen(&app, width, height, options).replace('"', " ");
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.contains("R-122 (X)."),
+                "{width}x{height} cut NEXT\n{text}"
+            );
+            if height >= 30 {
+                assert!(
+                    flat.contains("at eighty columns?"),
+                    "{width}x{height} cut the Planet question\n{text}"
+                );
+            }
+            app.workspace = Workspace::Archive;
+            let text = screen(&app, width, height, options).replace('"', " ");
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.contains("at eighty columns?"),
+                "{width}x{height} cut the question\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_title_rows_never_touch_the_backdrop_at_narrow_widths() {
+        let mut booting = App::default();
+        booting.enable_boot_intro();
+        booting.apply_snapshot(status(false), Instant::now());
+        booting.connected();
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for millis in [1_800_u64, 2_100, 2_400] {
+            let at = Instant::now() + std::time::Duration::from_millis(millis);
+            let backend = TestBackend::new(48, 14);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &booting, options, at))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for y in 0..14 {
+                let row: String = (0..48).map(|x| buffer[(x, y)].symbol()).collect();
+                if let Some(start) = row.find("SYSTEM INITIALIZATION") {
+                    let before = row[..start].chars().last();
+                    assert!(
+                        before.is_none_or(|c| c == ' '),
+                        "{millis}ms: backdrop touches the title: {row}"
+                    );
+                }
+            }
         }
     }
 }

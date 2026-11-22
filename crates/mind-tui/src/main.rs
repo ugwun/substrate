@@ -385,6 +385,11 @@ async fn handle_key(
     {
         return Ok(false);
     }
+    // A key on the full interface means the player is watching: their own commands are not
+    // away-time activity.
+    if crossterm::terminal::size().is_ok_and(|(width, height)| width >= 44 && height >= 14) {
+        app.note_readable_input();
+    }
     if app.show_return_summary {
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc)
             && crossterm::terminal::size()

@@ -193,7 +193,8 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
                     region_label(input.regions, queued_id),
                     region_label(input.regions, queued_id),
                 ),
-                Some("A".into()),
+                // Nothing to press: A would clear the waypoint the player just queued.
+                None,
                 Some(queued_id.to_owned()),
             )
         } else {
