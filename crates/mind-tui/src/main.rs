@@ -191,6 +191,10 @@ async fn run_dashboard(
                 .draw(|frame| ui::render(frame, &app, options, now))
                 .context("failed to draw dashboard")?;
             app.record_frame_metrics(draw_start.elapsed());
+            let readable = terminal
+                .size()
+                .is_ok_and(|size| size.width >= 44 && size.height >= 14);
+            let opened_summary = app.note_frame(readable);
             if enable_title {
                 let next_title = app.companion_window_title(now);
                 if next_title != last_window_title {
@@ -201,7 +205,8 @@ async fn run_dashboard(
             if let Some(ack_id) = app.pending_live_activity_ack(now) {
                 let _ = commands.try_send(ConnectionCommand::AcknowledgeActivity(ack_id));
             }
-            dirty = false;
+            // Events missed while the interface was unreadable: draw the summary right away.
+            dirty = opened_summary;
         }
 
         let now = std::time::Instant::now();

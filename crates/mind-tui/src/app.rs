@@ -243,6 +243,10 @@ pub struct App {
     suppress_initial_return_summary: bool,
     pending_archive_ack_id: Option<String>,
     last_auto_acked_activity_id: u64,
+    /// Whether the last drawn frame showed the full, readable interface.
+    watching: bool,
+    /// Latest activity id at the last readable frame (None before the first one).
+    watched_through: Option<u64>,
     boot_intro_enabled: bool,
     boot_intro_armed: bool,
     pub animations_enabled: bool,
@@ -316,6 +320,8 @@ impl Default for App {
             suppress_initial_return_summary: false,
             pending_archive_ack_id: None,
             last_auto_acked_activity_id: 0,
+            watching: false,
+            watched_through: None,
             boot_intro_enabled: false,
             boot_intro_armed: false,
             animations_enabled: true,
@@ -1781,8 +1787,39 @@ impl App {
 
     /// Returns the latest unreviewed activity ID to acknowledge while the player is actively
     /// watching a live non-modal workspace, so Return Summary only reports away-time events.
+    /// Record whether the frame just drawn showed the full, readable interface. Activity is
+    /// auto-acknowledged only while it does; events that arrive while only the resize screen or
+    /// the Pilot Strip is showing open the Return Summary once the interface is readable again,
+    /// so nothing is acknowledged unseen. Returns true when it opened the summary.
+    pub fn note_frame(&mut self, readable: bool) -> bool {
+        if !readable {
+            self.watching = false;
+            return false;
+        }
+        let latest = self
+            .planet
+            .as_ref()
+            .and_then(|planet| planet.unreviewed_activity.last())
+            .map_or(0, |record| record.activity_id);
+        let missed = self.watched_through.is_some_and(|seen| {
+            !self.watching
+                && latest > seen
+                && latest > self.last_auto_acked_activity_id
+                && !self.onboarding_pending()
+                && !self.show_return_summary
+        });
+        if missed {
+            self.show_return_summary = true;
+            self.return_summary_anchor = 0;
+        }
+        self.watching = true;
+        self.watched_through = Some(latest);
+        missed
+    }
+
     pub fn pending_live_activity_ack(&mut self, now: Instant) -> Option<u64> {
-        if !matches!(self.connection, ConnectionState::Connected)
+        if !self.watching
+            || !matches!(self.connection, ConnectionState::Connected)
             || self.session_menu.is_some()
             || self.show_return_summary
             || self.boot_intro_active(now)
@@ -2017,6 +2054,13 @@ impl App {
                     return Some((idx, site.designation.clone()));
                 }
             }
+        }
+        // A frontier sector only answers a survey lead; other leads (for example a deposit
+        // while the extractor is out) never pick an unrelated sector.
+        let survey_lead = lead_kind == Some(mind_core::protocol::CampaignLeadKind::Frontier)
+            || matches!(planet.campaign.next_action_key.as_deref(), Some("S" | "V"));
+        if !survey_lead {
+            return None;
         }
         // Otherwise prefer a Detected frontier sector (sheltered shelf first for Ch I).
         if let Some((idx, site)) = sites
@@ -2592,5 +2636,44 @@ mod tests {
         app.move_selection(0, 1);
         let easing_deadline = app.next_frame_deadline(now).unwrap();
         assert!(easing_deadline.saturating_duration_since(now) <= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn activity_is_acknowledged_only_while_the_interface_is_readable() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        // Before any readable frame, nothing is acknowledged.
+        assert_eq!(app.pending_live_activity_ack(now), None);
+        assert!(!app.note_frame(true));
+        let mut planet = app.planet.clone().unwrap();
+        let next_id = planet
+            .unreviewed_activity
+            .last()
+            .map_or(1, |record| record.activity_id + 1);
+        // The terminal shrinks to the resize screen, then an event arrives.
+        assert!(!app.note_frame(false));
+        planet
+            .unreviewed_activity
+            .push(mind_core::protocol::ActivityRecord {
+                activity_id: next_id,
+                kind: mind_core::protocol::ActivityKind::Survey,
+                region_id: None,
+                archive_record_id: None,
+                summary: "Regional survey completed.".into(),
+            });
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        assert_eq!(app.pending_live_activity_ack(now), None);
+        // Enlarged again: the missed event is presented, never silently acknowledged.
+        assert!(app.note_frame(true));
+        assert!(app.show_return_summary);
+        assert_eq!(app.pending_live_activity_ack(now), None);
     }
 }

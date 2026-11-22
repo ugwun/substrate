@@ -121,9 +121,21 @@ fn render_blueprint_panel(
     if inner.width < 12 || inner.height < 6 {
         // Too short for the schematic: name the probe, its state and assignment instead.
         let (name, state, place) = if selected_extractor {
+            let state = if planet.extractor.state == ExtractorState::Rebuilding
+                && planet.extractor.rebuild_remaining_ms > 0
+            {
+                // Keep the progress visible in the short bay too.
+                let remaining =
+                    app.display_remaining_ms(planet.extractor.rebuild_remaining_ms, now);
+                let total = planet.extractor.loadout.rebuild_duration_ms().max(1);
+                let pct = 100_u64.saturating_sub(remaining.saturating_mul(100) / total);
+                format!("REBUILDING {pct}%")
+            } else {
+                format!("{:?}", planet.extractor.state).to_uppercase()
+            };
             (
                 planet.extractor.designation.clone(),
-                format!("{:?}", planet.extractor.state).to_uppercase(),
+                state,
                 planet.active_extraction.as_ref().map_or_else(
                     || region_name(planet, &planet.core_region_id),
                     |mission| region_name(planet, &mission.target_region_id),

@@ -3552,10 +3552,20 @@ fn render_local_sites(
                         .bold(),
                 ));
             } else if let Some(deposit) = &site.deposit {
-                lines.push(Line::styled(
+                // Keep the quantity: shorten the resource name before it can be cut.
+                let short = match deposit.resource {
+                    mind_core::protocol::ResourceKind::Structural => "S",
+                    mind_core::protocol::ResourceKind::Conductive => "C",
+                    mind_core::protocol::ResourceKind::Silicate => "Si",
+                };
+                let label = [
                     format!("{:?} {}", deposit.resource, deposit.remaining),
-                    Style::default().fg(theme.amber),
-                ));
+                    format!("{short} {}", deposit.remaining),
+                ]
+                .into_iter()
+                .find(|label| label.chars().count() <= usize::from(tile_inner_w))
+                .unwrap_or_else(|| deposit.remaining.to_string());
+                lines.push(Line::styled(label, Style::default().fg(theme.amber)));
             }
             let newly_scanned = app.has_discovery_flash(&site.id, now);
             let tile_title = if tile_inner_w < 10 {
@@ -6553,6 +6563,10 @@ fn render_pilot_strip(
             Style::default().fg(theme.muted),
         );
         let needed = summary.len() + 1;
+        if needed <= height {
+            // Every event is on screen here, so a page pointer left by the full modal is stale.
+            app.scroll_limits.summary_next.set(0);
+        }
         if needed <= rows_left {
             lines.extend(summary);
             lines.push(keys);
@@ -10705,6 +10719,44 @@ mod tests {
                         "{width}x{height}\n{text}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn local_tiles_keep_deposit_quantities_at_every_width() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        for site in &mut planet.network.subregions {
+            site.deposit = Some(DepositSnapshot {
+                resource: ResourceKind::Conductive,
+                remaining: 21,
+                risk: RiskLevel::Low,
+            });
+        }
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Planet;
+        app.local_view = true;
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(80_u16, 36_u16), (80, 24), (100, 36), (120, 36)] {
+            let text = screen(&app, width, height, options);
+            for line in text.lines() {
+                assert!(
+                    !line.contains("Conducti") || line.contains("Conductive"),
+                    "{width}x{height} cut a deposit name\n{text}"
+                );
+            }
+            // Tall enough tiles show the deposit row; it must keep its quantity.
+            if height >= 36 {
+                assert!(
+                    text.contains("Conductive 21") || text.contains("C 21"),
+                    "{width}x{height} lost the deposit quantity\n{text}"
+                );
             }
         }
     }
