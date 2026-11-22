@@ -411,6 +411,12 @@ fn format_status_line(status: &StatusSnapshot, planet: Option<&PlanetSnapshot>) 
             ),
         ));
     }
+    if planet.refining_remaining_ms > 0 {
+        active_ops.push((
+            planet.refining_remaining_ms,
+            format!("Refining {}s", planet.refining_remaining_ms.div_ceil(1_000)),
+        ));
+    }
     active_ops.sort_by_key(|(ms, _)| *ms);
 
     let activity = if !planet.archive.unpresented_record_ids.is_empty() {

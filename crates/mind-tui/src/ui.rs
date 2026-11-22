@@ -1200,10 +1200,13 @@ fn render_overview(
         Style::default().fg(theme.text_strong),
     ));
     if planet.network.active_projects.is_empty() {
-        summary_lines.push(Line::styled(
-            "base projects idle",
-            Style::default().fg(theme.muted),
-        ));
+        // Node projects exist only once footholds are unlocked.
+        if planet.network.unlocked || !planet.network.bases.is_empty() {
+            summary_lines.push(Line::styled(
+                "base projects idle",
+                Style::default().fg(theme.muted),
+            ));
+        }
     } else {
         for project in &planet.network.active_projects {
             summary_lines.push(Line::styled(
@@ -2329,6 +2332,10 @@ fn render_return_summary(
         for entry in &activity {
             body.extend(entry.iter().cloned());
         }
+        if let Some(last) = planet.unreviewed_activity.last() {
+            let shown = &app.scroll_limits.summary_shown_through;
+            shown.set(shown.get().max(last.activity_id));
+        }
         body.extend(evidence_head);
         if leftover < evidence_quote.len() {
             body.extend(evidence_quote.into_iter().take(leftover.saturating_sub(1)));
@@ -2372,7 +2379,18 @@ fn render_return_summary(
             } else {
                 body.extend(evidence_quote);
             }
-            body.push(hint_line(None));
+            // Events that arrived after the last event page still need a page of their own.
+            let shown_through = app.scroll_limits.summary_shown_through.get();
+            let unseen: Vec<&mind_core::protocol::ActivityRecord> = records
+                .iter()
+                .filter(|record| record.activity_id > shown_through)
+                .collect();
+            if let Some(first) = unseen.first() {
+                next_page = first.activity_id;
+                body.push(hint_line(Some(format!(" next ({} more)", unseen.len()))));
+            } else {
+                body.push(hint_line(None));
+            }
         } else {
             let from = records
                 .iter()
@@ -2396,6 +2414,10 @@ fn render_return_summary(
             shown.truncate(budget);
             let room = budget.saturating_sub(shown.len());
             body.extend(shown);
+            if let Some(record) = to.checked_sub(1).and_then(|index| records.get(index)) {
+                let through = &app.scroll_limits.summary_shown_through;
+                through.set(through.get().max(record.activity_id));
+            }
             let label = if to < activity.len() {
                 next_page = records
                     .get(to)
@@ -6096,7 +6118,13 @@ fn render_dashboard(
     let compact_telemetry = area.height < 22;
     let (header_area, system_area, diagnostic_area, events_area, footer_area) = if compact_telemetry
     {
-        let footer_h = if area.width < 100 { 2 } else { 1 };
+        // Disconnected status text can push the controls onto a second footer row.
+        let footer_h = if area.width < 100 || !matches!(app.connection, ConnectionState::Connected)
+        {
+            2
+        } else {
+            1
+        };
         let rows = Layout::vertical([
             Constraint::Length(3),
             Constraint::Length(3),
@@ -6478,8 +6506,22 @@ fn render_dashboard(
         ])
     } else {
         footer.push(separator(theme));
-        footer.extend(hint_spans(hints, theme));
-        Text::from(Line::from(footer))
+        let used: usize = footer.iter().map(|span| span.content.chars().count()).sum();
+        if used + hints.iter().map(hint_width).sum::<usize>() <= usize::from(footer_area.width) {
+            footer.extend(hint_spans(hints, theme));
+            Text::from(Line::from(footer))
+        } else {
+            // A long connection or stale-age status: put the complete controls on a second row.
+            footer.pop();
+            Text::from(vec![
+                Line::from(footer),
+                Line::from(fit_hint_spans(
+                    hints,
+                    usize::from(footer_area.width).saturating_sub(2),
+                    theme,
+                )),
+            ])
+        }
     };
     frame.render_widget(
         Paragraph::new(content)
@@ -6678,6 +6720,10 @@ fn render_pilot_strip(
         if needed <= height {
             // Every event is on screen here, so a page pointer left by the full modal is stale.
             app.scroll_limits.summary_next.set(0);
+            if let Some(last) = planet.unreviewed_activity.last() {
+                let shown = &app.scroll_limits.summary_shown_through;
+                shown.set(shown.get().max(last.activity_id));
+            }
         }
         if needed <= rows_left {
             lines.extend(summary);

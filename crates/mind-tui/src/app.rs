@@ -130,6 +130,9 @@ pub struct ScrollLimits {
     /// Where the next Return Summary page starts (an activity id, or `u64::MAX` for the new
     /// evidence page); 0 when the page on screen is the last one.
     pub summary_next: std::cell::Cell<u64>,
+    /// Highest away-event id the Return Summary has displayed since it opened; acknowledgement
+    /// never goes past it.
+    pub summary_shown_through: std::cell::Cell<u64>,
 }
 
 impl ScrollLimits {
@@ -157,6 +160,7 @@ impl Default for ScrollLimits {
             overview_rows: std::cell::Cell::new(5),
             event_rows: std::cell::Cell::new(5),
             summary_next: std::cell::Cell::new(0),
+            summary_shown_through: std::cell::Cell::new(0),
         }
     }
 }
@@ -247,6 +251,9 @@ pub struct App {
     watching: bool,
     /// Latest activity id at the last readable frame (None before the first one).
     watched_through: Option<u64>,
+    /// Set when the interface became readable again; the next planet snapshot is checked for
+    /// events that happened while it was not, and auto-acknowledgement waits until then.
+    reconcile_since: Option<Instant>,
     boot_intro_enabled: bool,
     boot_intro_armed: bool,
     pub animations_enabled: bool,
@@ -322,6 +329,7 @@ impl Default for App {
             last_auto_acked_activity_id: 0,
             watching: false,
             watched_through: None,
+            reconcile_since: None,
             boot_intro_enabled: false,
             boot_intro_armed: false,
             animations_enabled: true,
@@ -544,6 +552,7 @@ impl App {
         });
         self.planet = Some(planet);
         self.planet_received_at = Some(received_at);
+        self.reconcile_unseen_activity(received_at);
         if operation_resolved {
             self.notice = None;
         }
@@ -1736,6 +1745,10 @@ impl App {
             let rem = self.display_remaining_ms(planet.extractor.rebuild_remaining_ms, now);
             timers.push((rem, format!("NEXT: REBUILD {}s", rem.div_ceil(1_000))));
         }
+        if planet.refining_remaining_ms > 0 {
+            let rem = self.display_remaining_ms(planet.refining_remaining_ms, now);
+            timers.push((rem, format!("NEXT: REFINING {}s", rem.div_ceil(1_000))));
+        }
         if let Some(exp) = &planet.archive.experiment {
             if exp.active && exp.running {
                 let rem = self.display_remaining_ms(exp.remaining_ms, now);
@@ -1804,6 +1817,7 @@ impl App {
     pub fn note_frame(&mut self, readable: bool) -> bool {
         if !readable {
             self.watching = false;
+            self.reconcile_since = None;
             return false;
         }
         let latest = self
@@ -1821,14 +1835,42 @@ impl App {
         if missed {
             self.show_return_summary = true;
             self.return_summary_anchor = 0;
+        } else if !self.watching && self.watched_through.is_some() {
+            // Readable again: an event from the unreadable interval may still be in flight.
+            self.reconcile_since = Some(Instant::now());
         }
         self.watching = true;
-        self.watched_through = Some(latest);
+        self.watched_through = Some(self.watched_through.map_or(latest, |seen| seen.max(latest)));
         missed
+    }
+
+    /// After the interface became readable again, check the first planet snapshot for events
+    /// that happened while it was not (delivered just after the resize) and present them.
+    fn reconcile_unseen_activity(&mut self, received_at: Instant) {
+        let Some(since) = self.reconcile_since.take() else {
+            return;
+        };
+        let latest = self
+            .planet
+            .as_ref()
+            .and_then(|planet| planet.unreviewed_activity.last())
+            .map_or(0, |record| record.activity_id);
+        let seen = self.watched_through.unwrap_or(0);
+        if received_at.saturating_duration_since(since) < Duration::from_secs(3)
+            && latest > seen
+            && latest > self.last_auto_acked_activity_id
+            && !self.onboarding_pending()
+            && !self.show_return_summary
+        {
+            self.show_return_summary = true;
+            self.return_summary_anchor = 0;
+        }
+        self.watched_through = Some(seen.max(latest));
     }
 
     pub fn pending_live_activity_ack(&mut self, now: Instant) -> Option<u64> {
         if !self.watching
+            || self.reconcile_since.is_some()
             || !matches!(self.connection, ConnectionState::Connected)
             || self.session_menu.is_some()
             || self.show_return_summary
@@ -1882,11 +1924,16 @@ impl App {
             self.transmission_opened_at = Some(Instant::now());
             self.transmission_revealed = false;
         }
-        self.planet
+        // Acknowledge only through the newest event actually shown; one that arrived after the
+        // last page was drawn stays unreviewed for the next summary.
+        let shown = self.scroll_limits.summary_shown_through.replace(0);
+        let last = self
+            .planet
             .as_ref()?
             .unreviewed_activity
             .last()
-            .map(|record| record.activity_id)
+            .map(|record| record.activity_id)?;
+        Some(if shown > 0 { shown.min(last) } else { last })
     }
 
     pub fn active_transmission_record(&self) -> Option<(usize, &ArchiveRecordSnapshot)> {
@@ -2720,5 +2767,65 @@ mod tests {
         );
         assert!(app.show_return_summary);
         assert_eq!(app.pending_live_activity_ack(now), None);
+    }
+
+    #[test]
+    fn an_event_delivered_just_after_enlarging_is_still_presented() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        let mut planet = engine.planet().unwrap();
+        planet.unreviewed_activity.clear();
+        app.apply_planet(planet.clone(), now);
+        app.connected();
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        assert!(!app.note_frame(false));
+        // Enlarged before the snapshot carrying the unseen event arrived.
+        assert!(!app.note_frame(true));
+        assert_eq!(app.pending_live_activity_ack(now), None);
+        planet
+            .unreviewed_activity
+            .push(mind_core::protocol::ActivityRecord {
+                activity_id: 77,
+                kind: mind_core::protocol::ActivityKind::Survey,
+                region_id: None,
+                archive_record_id: None,
+                summary: "Regional survey completed.".into(),
+            });
+        planet.revision += 1;
+        app.apply_planet(planet, Instant::now());
+        assert!(
+            app.show_return_summary,
+            "the in-flight event must be presented"
+        );
+        assert_eq!(app.pending_live_activity_ack(Instant::now()), None);
+    }
+
+    #[test]
+    fn dismissal_acknowledges_only_events_the_summary_showed() {
+        let engine = mind_core::engine::MindEngine::new(20);
+        engine.complete_onboarding([2, 2, 2]);
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply_snapshot(engine.status(), now);
+        app.apply_planet(engine.planet().unwrap(), now);
+        app.scroll_limits.summary_shown_through.set(40);
+        let mut planet = app.planet.clone().unwrap();
+        planet
+            .unreviewed_activity
+            .push(mind_core::protocol::ActivityRecord {
+                activity_id: 41,
+                kind: mind_core::protocol::ActivityKind::Survey,
+                region_id: None,
+                archive_record_id: None,
+                summary: "Arrived after the last page was drawn.".into(),
+            });
+        planet.revision += 1;
+        app.apply_planet(planet, now);
+        app.show_return_summary = true;
+        assert_eq!(app.dismiss_return_summary(), Some(40));
     }
 }
