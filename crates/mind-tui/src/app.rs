@@ -117,12 +117,16 @@ pub struct ScrollLimits {
     pub probe_panel: std::cell::Cell<u16>,
     pub archive_detail: std::cell::Cell<u16>,
     pub overview_status: std::cell::Cell<u16>,
+    /// Furthest System event scroll (in shown events) that still fills the pane.
+    pub events: std::cell::Cell<u16>,
     /// Visible rows per panel, recorded by the renderer so a page step never skips content.
     pub help_rows: std::cell::Cell<u16>,
     pub region_rows: std::cell::Cell<u16>,
     pub probe_rows: std::cell::Cell<u16>,
     pub archive_rows: std::cell::Cell<u16>,
     pub overview_rows: std::cell::Cell<u16>,
+    /// Whole System events visible on the current page.
+    pub event_rows: std::cell::Cell<u16>,
 }
 
 impl ScrollLimits {
@@ -142,13 +146,19 @@ impl Default for ScrollLimits {
             probe_panel: open(),
             archive_detail: open(),
             overview_status: open(),
+            events: open(),
             help_rows: std::cell::Cell::new(5),
             region_rows: std::cell::Cell::new(5),
             probe_rows: std::cell::Cell::new(5),
             archive_rows: std::cell::Cell::new(5),
             overview_rows: std::cell::Cell::new(5),
+            event_rows: std::cell::Cell::new(5),
         }
     }
+}
+
+fn is_shown_event(event: &EngineEvent) -> bool {
+    event.kind != mind_core::protocol::EngineEventKind::ActivityReviewed
 }
 
 fn clamped_scroll(current: u16, amount: i16, limit: u16) -> u16 {
@@ -360,7 +370,9 @@ impl App {
                 .all(|known| known.event_id != event.event_id)
             {
                 self.events.push_back(event.clone());
-                inserted += 1;
+                if is_shown_event(event) {
+                    inserted += 1;
+                }
             }
         }
         while self.events.len() > EVENT_CACHE_CAPACITY {
@@ -2159,8 +2171,21 @@ impl App {
         self.notice = None;
     }
 
+    /// Events the System pane lists; routine acknowledgements are bookkeeping, not events.
+    pub fn shown_events(&self) -> impl DoubleEndedIterator<Item = &EngineEvent> {
+        self.events.iter().filter(|event| is_shown_event(event))
+    }
+
+    /// Furthest scroll that still fills the event pane, as recorded by the renderer.
     fn max_scroll(&self) -> usize {
-        self.events.len().saturating_sub(1)
+        let shown = self.shown_events().count();
+        usize::from(self.scroll_limits.events.get()).min(shown.saturating_sub(1))
+    }
+
+    /// One page of System events: the whole events on screen minus one, at least one.
+    #[must_use]
+    pub fn event_page(&self) -> usize {
+        usize::from(self.scroll_limits.event_rows.get().saturating_sub(1).max(1))
     }
 
     fn clamp_scroll(&mut self) {

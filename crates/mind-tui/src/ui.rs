@@ -381,6 +381,7 @@ fn render_planet(
             rows[2],
             app,
             now,
+            options.ascii,
             &[
                 KeyHint {
                     key: "Q",
@@ -599,7 +600,7 @@ fn render_planet(
             },
         ]
     };
-    render_workspace_footer(frame, rows[2], app, now, controls, theme);
+    render_workspace_footer(frame, rows[2], app, now, options.ascii, controls, theme);
 }
 
 fn render_overview(
@@ -630,6 +631,7 @@ fn render_overview(
             rows[2],
             app,
             now,
+            options.ascii,
             &[
                 KeyHint {
                     key: "Q",
@@ -861,18 +863,39 @@ fn render_overview(
         }
     }
     let activity_height = columns[0].height.saturating_sub(2) as usize;
-    let activity_scroll = selected_line.saturating_sub(activity_height.saturating_sub(1)) as u16;
+    // Pre-wrap so the selection offset and the overflow cue count real rendered rows.
+    let activity_width = usize::from(columns[0].width.saturating_sub(2));
+    let mut activity_rows: Vec<Line<'static>> = Vec::new();
+    let mut selected_row = 0;
+    for (index, line) in activity.into_iter().enumerate() {
+        if index == selected_line {
+            selected_row = activity_rows.len();
+        }
+        activity_rows.extend(crate::textwrap::hang_wrap(vec![line], activity_width));
+    }
+    let max_activity_scroll = activity_rows.len().saturating_sub(activity_height);
+    let activity_scroll = selected_row
+        .saturating_sub(activity_height.saturating_sub(1))
+        .min(max_activity_scroll);
+    let activity_cue = match (
+        activity_scroll > 0,
+        activity_scroll < max_activity_scroll,
+        options.ascii,
+    ) {
+        (false, false, _) => "",
+        (true, true, true) => " [^v]",
+        (true, true, false) => " [▲▼]",
+        (false, true, true) => " [v]",
+        (false, true, false) => " [▼]",
+        (true, false, true) => " [^]",
+        (true, false, false) => " [▲]",
+    };
+    let activity_title = format!(" PLANETARY ACTIVITY{activity_cue} ");
     frame.render_widget(
-        Paragraph::new(Text::from(activity))
-            .wrap(Wrap { trim: false })
-            .scroll((activity_scroll, 0))
+        Paragraph::new(Text::from(activity_rows))
+            .scroll((u16::try_from(activity_scroll).unwrap_or(u16::MAX), 0))
             .style(theme.panel_style())
-            .block(panel(
-                " PLANETARY ACTIVITY ",
-                options,
-                theme,
-                PanelTone::Focused,
-            )),
+            .block(panel(&activity_title, options, theme, PanelTone::Focused)),
         columns[0],
     );
 
@@ -1277,7 +1300,7 @@ fn render_overview(
             },
         ]
     };
-    render_workspace_footer(frame, rows[2], app, now, controls, theme);
+    render_workspace_footer(frame, rows[2], app, now, options.ascii, controls, theme);
 }
 
 fn render_research(
@@ -1437,7 +1460,7 @@ fn render_research(
             let state = if profile.active {
                 "ACTIVE"
             } else if profile.unlocked && field_operation_active {
-                "WAIT"
+                "IN FLIGHT"
             } else if profile.unlocked {
                 "AVAILABLE"
             } else {
@@ -1626,6 +1649,7 @@ fn render_research(
         rows[2],
         app,
         now,
+        options.ascii,
         &[
             KeyHint {
                 key: "UP/DOWN",
@@ -1715,6 +1739,7 @@ fn render_system_map(
         rows[2],
         app,
         now,
+        options.ascii,
         &[
             KeyHint {
                 key: "TAB",
@@ -2033,7 +2058,7 @@ fn render_archive(
             },
         );
     }
-    render_workspace_footer(frame, rows[2], app, now, &hints, theme);
+    render_workspace_footer(frame, rows[2], app, now, options.ascii, &hints, theme);
 }
 
 /// Split authored text on line breaks so paragraph boundaries survive rendering (a single
@@ -2705,6 +2730,16 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
             _ => (None, String::new()),
         }
     } else if !app.local_view
+        && planet.campaign.next_action_key.as_deref() == Some("X")
+        && planet
+            .campaign
+            .lead_region_id
+            .as_deref()
+            .is_some_and(|lead| Some(lead) != app.selected_region_id.as_deref())
+    {
+        // Extraction acts on the selected region: move to the named deposit (N) before X.
+        (Some("N"), planet.campaign.next_action.clone())
+    } else if !app.local_view
         && matches!(
             planet.campaign.next_action_key.as_deref(),
             Some("O" | "M" | "P" | "C" | "D" | "W" | "L")
@@ -2727,6 +2762,41 @@ fn local_next_override(app: &App, planet: &PlanetSnapshot) -> (Option<&'static s
 /// Word-boundary truncation with an ellipsis, shared with overlay renderers.
 pub(crate) fn truncate_for_width(text: &str, max_chars: usize, ascii: bool) -> String {
     truncate_chars(text, max_chars, ascii)
+}
+
+/// Fit a status badge such as "NEXT: RESEARCH FIELD HARDENING 64s (+1)" to `room` cells by
+/// dropping whole title words, then the "NEXT:" prefix, while always keeping the countdown and
+/// the count of further timers. Returns None when not even one title word fits, so a badge is
+/// never cut mid-word. Badges without a countdown are kept whole or dropped.
+fn fit_badge(text: &str, room: usize) -> Option<String> {
+    if text.chars().count() <= room {
+        return Some(text.to_owned());
+    }
+    let words: Vec<&str> = text.split(' ').collect();
+    let mut tail_start = words.len();
+    if tail_start > 0 && words[tail_start - 1].starts_with("(+") {
+        tail_start -= 1;
+    }
+    let is_countdown = |word: &str| {
+        word.len() > 1
+            && word.ends_with('s')
+            && word[..word.len() - 1].chars().all(|c| c.is_ascii_digit())
+    };
+    if tail_start == 0 || !is_countdown(words[tail_start - 1]) {
+        return None;
+    }
+    tail_start -= 1;
+    let (head, tail) = words.split_at(tail_start);
+    let tail = tail.join(" ");
+    let skip = usize::from(head.first() == Some(&"NEXT:"));
+    let with_prefix = (skip + 1..=head.len()).rev().map(|n| head[..n].join(" "));
+    let without_prefix = (skip + 1..=head.len())
+        .rev()
+        .map(|n| head[skip..n].join(" "));
+    with_prefix
+        .chain(without_prefix)
+        .map(|title| format!("{title} {tail}"))
+        .find(|candidate| candidate.chars().count() <= room)
 }
 
 fn truncate_chars(text: &str, max_chars: usize, ascii: bool) -> String {
@@ -2984,7 +3054,7 @@ fn render_probes(
             },
         ][..]
     };
-    render_workspace_footer(frame, rows[2], app, now, controls, theme);
+    render_workspace_footer(frame, rows[2], app, now, options.ascii, controls, theme);
 }
 
 fn render_globe(
@@ -3878,18 +3948,18 @@ fn local_confirmation(
         ),
         ContextAction::EstablishBase(_) => (
             "CONFIRM FOOTHOLD",
-            "Consume S10 C6 Si4. Site energy and hazard shape every later module.".into(),
+            "Consume 10 structural, 6 conductive, and 4 silicate units. Site energy and hazard shape every later module.".into(),
         ),
         ContextAction::MaintainBase(_) => (
             "CONFIRM MAINTENANCE",
-            "Consume S4 C2. A 60-second cycle restores 35% node integrity.".into(),
+            "Consume 4 structural and 2 conductive units. A 60-second cycle restores 35% node integrity.".into(),
         ),
         ContextAction::ConstructBaseModule { module, .. } => {
             let cost = module.cost();
             (
                 "CONFIRM MODULE",
                 format!(
-                    "Build {} for S{} C{} Si{}.",
+                    "Build {} for {} structural, {} conductive, and {} silicate units.",
                     module_title(*module),
                     cost.structural,
                     cost.conductive,
@@ -5499,6 +5569,7 @@ fn render_workspace_footer(
     area: Rect,
     app: &App,
     now: Instant,
+    ascii: bool,
     controls: &[KeyHint<'_>],
     theme: Theme,
 ) {
@@ -5545,27 +5616,8 @@ fn render_workspace_footer(
         app.notice.is_none() || base_width + notice_width + badge_width <= status_budget;
     // Fit the badge to the room left, keeping its trailing countdown when the title shortens.
     let badge_room = status_budget.saturating_sub(base_width + sep_width);
-    let badge = badge.and_then(|(text, highlight)| {
-        if text.chars().count() <= badge_room {
-            return Some((text, highlight));
-        }
-        // Keep the countdown, plus any "(+N)" count of further timers that follows it.
-        let (mut head, mut tail) = text.rsplit_once(' ').unwrap_or((text.as_str(), ""));
-        let owned_tail;
-        if tail.starts_with("(+") {
-            if let Some((rest, countdown)) = head.rsplit_once(' ') {
-                owned_tail = format!("{countdown} {tail}");
-                head = rest;
-                tail = owned_tail.as_str();
-            }
-        }
-        let tail_width = tail.chars().count();
-        if badge_room < tail_width + 8 {
-            return None;
-        }
-        let head = truncate_chars(head, badge_room - tail_width - 1, true);
-        Some((format!("{head} {tail}"), highlight))
-    });
+    let badge =
+        badge.and_then(|(text, highlight)| fit_badge(&text, badge_room).map(|t| (t, highlight)));
     if let (true, Some((badge, highlight))) = (keep_badge, badge) {
         spans.extend([
             separator(theme),
@@ -5590,7 +5642,7 @@ fn render_workspace_footer(
         spans.extend([
             separator(theme),
             Span::styled(
-                truncate_chars(notice, room, true),
+                truncate_chars(notice, room, ascii),
                 Style::default().fg(theme.text),
             ),
         ]);
@@ -6040,17 +6092,9 @@ fn render_dashboard(
 
     let visible_height = events_area.height.saturating_sub(2) as usize;
     // Routine background acknowledgements are bookkeeping, not events worth reading here.
-    let shown: Vec<_> = app
-        .events
-        .iter()
-        .filter(|event| event.kind != EngineEventKind::ActivityReviewed)
-        .collect();
-    let end = shown.len().saturating_sub(app.event_scroll);
-    let start = end.saturating_sub(visible_height);
+    let shown: Vec<_> = app.shown_events().collect();
     let lines = shown
         .into_iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
         .map(|event| {
             let tag = match event.kind {
                 EngineEventKind::DaemonStarted => "START",
@@ -6140,15 +6184,34 @@ fn render_dashboard(
         .into_iter()
         .map(|line| crate::textwrap::hang_wrap(vec![line], event_width))
         .collect();
+    // The furthest scroll still fills the pane with the oldest events; record it and the
+    // number of whole events on this page so scrolling and paging never reach a blank pane.
+    let mut oldest_fit = 0usize;
+    let mut used = 0usize;
+    for event in &wrapped {
+        if used + event.len() > visible_height && oldest_fit > 0 {
+            break;
+        }
+        used += event.len();
+        oldest_fit += 1;
+    }
+    let limit = wrapped.len().saturating_sub(oldest_fit);
+    app.scroll_limits
+        .events
+        .set(u16::try_from(limit).unwrap_or(u16::MAX));
+    let end = wrapped.len().saturating_sub(app.event_scroll.min(limit));
     let mut kept: Vec<Vec<Line<'static>>> = Vec::new();
     let mut used = 0usize;
-    for event in wrapped.into_iter().rev() {
+    for event in wrapped.into_iter().take(end).rev() {
         if used + event.len() > visible_height && !kept.is_empty() {
             break;
         }
         used += event.len();
         kept.push(event);
     }
+    app.scroll_limits
+        .event_rows
+        .set(u16::try_from(kept.len()).unwrap_or(u16::MAX));
     let lines: Vec<Line<'static>> = kept
         .into_iter()
         .rev()
@@ -6373,11 +6436,9 @@ fn render_pilot_strip(
             (if options.ascii { " > " } else { " ▶ " }, theme.cyan_bright)
         };
         let concise = badge.strip_prefix("NEXT: ").unwrap_or(&badge);
-        let clipped = truncate_chars(
-            concise,
-            usize::from(area.width).saturating_sub(4),
-            options.ascii,
-        );
+        let room = usize::from(area.width).saturating_sub(4);
+        let clipped = fit_badge(concise, room)
+            .unwrap_or_else(|| truncate_chars(concise, room, options.ascii));
         Line::from(vec![
             Span::styled(glyph, Style::default().fg(glyph_color).bold()),
             Span::styled(
@@ -6405,46 +6466,72 @@ fn render_pilot_strip(
     let mut lines = vec![line1, status_line];
     let width = usize::from(area.width);
     let rows_left = usize::from(area.height).saturating_sub(2);
-    if app.show_return_summary || app.active_transmission_record().is_some() {
-        // Modals that capture input get their own strip view and prompt.
-        let (text, hint) = if app.show_return_summary {
-            (
-                format!(
-                    "RETURN // {} while away",
-                    crate::textwrap::plural_count(planet.unreviewed_activity.len(), "event")
-                ),
-                " Enter/Esc continue",
-            )
+    if app.show_return_summary {
+        // Every away event plus the continue key, or nothing: the summary stays pending (and
+        // Enter/Esc are refused, see `pilot_return_summary_fits`) until all of it can be read.
+        let height = usize::from(area.height);
+        let summary = pilot_return_rows(planet, width, options.ascii, theme);
+        let keys = Line::styled(
+            truncate_chars(" Enter/Esc continue", width, options.ascii),
+            Style::default().fg(theme.muted),
+        );
+        let needed = summary.len() + 1;
+        if needed <= rows_left {
+            lines.extend(summary);
+            lines.push(keys);
+        } else if needed < height {
+            lines.truncate(1);
+            lines.extend(summary);
+            lines.push(keys);
+        } else if needed == height {
+            lines.clear();
+            lines.extend(summary);
+            lines.push(keys);
         } else {
-            let title = app
-                .active_transmission_record()
-                .map_or("record", |(_, record)| record.title.as_str());
-            (
-                format!("NEW RECORD // {title}"),
-                " enlarge terminal to read",
-            )
-        };
-        lines.push(Line::styled(
-            truncate_chars(&format!(" {text}"), width, options.ascii),
-            Style::default().fg(theme.gold).bold(),
-        ));
-        let hint = if app.show_return_summary && rows_left < 3 {
-            // Too short to show the event: it stays pending until the strip is taller.
-            " enlarge to read"
-        } else {
-            hint
-        };
-        if rows_left >= 3 && app.show_return_summary {
-            if let Some(first) = planet.unreviewed_activity.last() {
+            // Pending: name what is waiting and ask for room, never a cut-off event.
+            let count = crate::textwrap::plural_count(planet.unreviewed_activity.len(), "event");
+            let fit = |candidates: Vec<String>| {
+                candidates
+                    .into_iter()
+                    .find(|candidate| candidate.chars().count() <= width)
+                    .unwrap_or_default()
+            };
+            if rows_left >= 2 {
                 lines.push(Line::styled(
-                    truncate_chars(&format!(" {}", first.summary), width, options.ascii),
-                    Style::default().fg(theme.text),
+                    fit(vec![
+                        format!(" RETURN // {count} while away"),
+                        format!(" RETURN // {count}"),
+                        " RETURN".to_owned(),
+                    ]),
+                    Style::default().fg(theme.gold).bold(),
+                ));
+                lines.push(Line::styled(
+                    fit(vec![" enlarge to read".to_owned()]),
+                    Style::default().fg(theme.muted),
+                ));
+            } else {
+                lines.push(Line::styled(
+                    fit(vec![
+                        format!(" RETURN // {count} // enlarge"),
+                        " RETURN // enlarge to read".to_owned(),
+                        " ENLARGE TO READ".to_owned(),
+                    ]),
+                    Style::default().fg(theme.gold).bold(),
                 ));
             }
         }
+    } else if let Some((_, record)) = app.active_transmission_record() {
+        lines.push(Line::styled(
+            truncate_chars(
+                &format!(" NEW RECORD // {}", record.title),
+                width,
+                options.ascii,
+            ),
+            Style::default().fg(theme.gold).bold(),
+        ));
         if rows_left >= 2 {
             lines.push(Line::styled(
-                truncate_chars(hint, width, options.ascii),
+                truncate_chars(" enlarge terminal to read", width, options.ascii),
                 Style::default().fg(theme.muted),
             ));
         }
@@ -6719,14 +6806,54 @@ fn pilot_confirmation_rows(
     )
 }
 
-/// Whether the Return Summary (latest event plus its continue hint) is visible at this size.
-/// Input keeps the summary pending when it is not, so nothing is dismissed unread.
+/// Whether the Return Summary (every away event plus its continue hint) is visible at this
+/// size. Input keeps the summary pending when it is not, so nothing is dismissed unread.
 #[must_use]
 pub fn return_summary_visible(app: &App, width: u16, height: u16) -> bool {
     if width >= 44 && height >= 14 {
         return true;
     }
-    width >= 24 && height >= 5 && app.planet.is_some() && !app.onboarding_pending()
+    if width < 24 || height < 3 || app.onboarding_pending() {
+        return false;
+    }
+    let Some(planet) = app.planet.as_ref() else {
+        return false;
+    };
+    let rows = pilot_return_rows(planet, usize::from(width), false, Theme::new(true));
+    rows.len() < usize::from(height)
+        && rows
+            .iter()
+            .all(|row| crate::textwrap::line_width(row) <= usize::from(width))
+}
+
+/// Wrapped Pilot Strip rows for the Return Summary: a title, then every away event in full.
+fn pilot_return_rows(
+    planet: &PlanetSnapshot,
+    width: usize,
+    ascii: bool,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let title = format!(
+        " RETURN // {} while away",
+        crate::textwrap::plural_count(planet.unreviewed_activity.len(), "event")
+    );
+    let mut rows = crate::textwrap::hang_wrap(
+        vec![Line::styled(
+            terminal_text(&title, ascii),
+            Style::default().fg(theme.gold).bold(),
+        )],
+        width,
+    );
+    for event in planet.unreviewed_activity.iter().rev() {
+        rows.extend(crate::textwrap::hang_wrap(
+            vec![Line::styled(
+                format!("  {}", terminal_text(&event.summary, ascii)),
+                Style::default().fg(theme.text),
+            )],
+            width,
+        ));
+    }
+    rows
 }
 
 /// Whether a pending confirmation is fully visible at this terminal size, using the same
@@ -7022,14 +7149,26 @@ fn render_session_menu_backdrop(
     }
 }
 
-fn render_compact_session_menu(
-    frame: &mut Frame<'_>,
-    area: Rect,
+/// Rows of the compact session menu (Pilot Strip sizes) and whether everything a destructive
+/// confirmation needs (consequence plus ENTER/ESC) is on screen. Headers and key hints pick the
+/// longest form that fits, and the status text wraps, so nothing is cut mid-word.
+fn compact_session_menu_rows(
     app: &App,
     state: SessionMenuState,
-    options: RenderOptions,
+    width: u16,
+    height: u16,
+    ascii: bool,
     theme: Theme,
-) {
+) -> (Vec<Line<'static>>, bool) {
+    let width = usize::from(width);
+    let height = usize::from(height);
+    let fit = |candidates: &[&str]| -> String {
+        candidates
+            .iter()
+            .find(|candidate| candidate.chars().count() <= width)
+            .map_or_else(String::new, |candidate| (*candidate).to_owned())
+    };
+    let sep = if ascii { " | " } else { " · " };
     let active_label = match app.selected_session_menu_action() {
         SessionMenuAction::Resume => {
             if app.onboarding_pending() {
@@ -7042,58 +7181,131 @@ fn render_compact_session_menu(
         SessionMenuAction::StopDaemon => "SAVE & STOP DAEMON",
         SessionMenuAction::NewPlaythrough => "NEW PLAYTHROUGH",
     };
-    let status_line = match state {
-        SessionMenuState::Selecting => format!("MENU > {active_label}"),
-        SessionMenuState::ConfirmingNewPlaythrough => {
-            "REPLACE ALL PROGRESS WITH A NEW WORLD? ENTER/ESC".to_owned()
-        }
-        SessionMenuState::StartingNewPlaythrough => "CREATING WORLD...".to_owned(),
-        SessionMenuState::StoppingDaemon => "STOPPING DAEMON...".to_owned(),
+    let (status, keys): (String, Vec<String>) = match state {
+        SessionMenuState::Selecting => (
+            format!("MENU > {active_label}"),
+            vec![
+                format!(" UP/DN select{sep}ENTER ok{sep}ESC back"),
+                format!(" UP/DN{sep}ENTER{sep}ESC"),
+                " UP/DN ENTER ESC".to_owned(),
+            ],
+        ),
+        SessionMenuState::ConfirmingNewPlaythrough => (
+            "REPLACE ALL PROGRESS WITH A NEW WORLD?".to_owned(),
+            vec![
+                format!(" ENTER replace{sep}ESC back"),
+                format!(" ENTER{sep}ESC back"),
+                " ENTER / ESC".to_owned(),
+            ],
+        ),
+        SessionMenuState::StartingNewPlaythrough => ("CREATING WORLD...".to_owned(), Vec::new()),
+        SessionMenuState::StoppingDaemon => ("STOPPING DAEMON...".to_owned(), Vec::new()),
     };
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                " SUBSTRATE // SESSION MENU",
-                Style::default().fg(theme.gold).bold(),
-            ),
-            Line::styled(
-                format!(
-                    " {}",
-                    truncate_chars(
-                        &status_line,
-                        usize::from(area.width).saturating_sub(2),
-                        options.ascii
-                    )
-                ),
-                Style::default().fg(theme.cyan_bright).bold(),
-            ),
-            Line::styled(
-                " UP/DN select · ENTER ok · ESC back",
-                Style::default().fg(theme.muted),
-            ),
-        ])
-        .style(theme.raised_style()),
-        area,
+    let header = Line::styled(
+        fit(&[" SUBSTRATE // SESSION MENU", " SESSION MENU", " MENU"]),
+        Style::default().fg(theme.gold).bold(),
     );
+    let status_rows = crate::textwrap::hang_wrap(
+        vec![Line::styled(
+            format!(" {status}"),
+            Style::default().fg(theme.cyan_bright).bold(),
+        )],
+        width,
+    );
+    let key_text: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let key_row =
+        (!keys.is_empty()).then(|| Line::styled(fit(&key_text), Style::default().fg(theme.muted)));
+    let status_fits = status_rows
+        .iter()
+        .all(|row| crate::textwrap::line_width(row) <= width);
+    let needed = status_rows.len() + usize::from(key_row.is_some());
+    if status_fits && needed <= height {
+        let mut rows = Vec::new();
+        if needed < height {
+            rows.push(header);
+        }
+        rows.extend(status_rows);
+        rows.extend(key_row);
+        return (rows, true);
+    }
+    if state == SessionMenuState::ConfirmingNewPlaythrough {
+        // Never confirm a destructive action unseen: ask for room and keep Esc available.
+        let mut rows = vec![Line::styled(
+            fit(&[" ENLARGE TO CONFIRM", " ENLARGE"]),
+            Style::default().fg(theme.warning).bold(),
+        )];
+        if height >= 2 {
+            rows.push(Line::styled(
+                fit(&[" ESC back", " ESC"]),
+                Style::default().fg(theme.muted),
+            ));
+        }
+        return (rows, false);
+    }
+    let mut rows: Vec<Line<'static>> = status_rows;
+    rows.truncate(height.saturating_sub(usize::from(key_row.is_some())).max(1));
+    rows.extend(key_row);
+    rows.truncate(height);
+    (rows, true)
 }
 
-fn render_session_menu(
+fn render_compact_session_menu(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
+    state: SessionMenuState,
     options: RenderOptions,
     theme: Theme,
 ) {
-    let Some(state) = app.session_menu else {
-        return;
-    };
-    let connected = matches!(app.connection, ConnectionState::Connected);
-    // Compact split-pane session menu (e.g. 38x5 Pilot Strip) so Q is always actionable.
-    if area.height < 10 {
-        render_compact_session_menu(frame, area, app, state, options, theme);
-        return;
+    let (rows, _) =
+        compact_session_menu_rows(app, state, area.width, area.height, options.ascii, theme);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(rows).style(theme.raised_style()), area);
+}
+
+/// Whether the new-playthrough confirmation (consequence plus ENTER/ESC) is fully visible at
+/// this terminal size, using the same layout decisions as `render_session_menu`. Input refuses
+/// Enter when it is not, so progress is never replaced unseen. Other states always return true.
+#[must_use]
+pub fn session_confirmation_visible(app: &App, width: u16, height: u16, ascii: bool) -> bool {
+    if app.session_menu != Some(SessionMenuState::ConfirmingNewPlaythrough) {
+        return true;
     }
+    let area = Rect::new(0, 0, width, height);
+    let theme = Theme::new(true);
+    if height >= 10
+        && session_menu_modal_rows(
+            app,
+            SessionMenuState::ConfirmingNewPlaythrough,
+            area,
+            ascii,
+            theme,
+        )
+        .is_some()
+    {
+        return true;
+    }
+    compact_session_menu_rows(
+        app,
+        SessionMenuState::ConfirmingNewPlaythrough,
+        width,
+        height,
+        ascii,
+        theme,
+    )
+    .1
+}
+
+/// The bordered session-menu modal: its wrapped rows, panel area, title and tone, or None when
+/// it cannot fit and the compact menu is used instead.
+fn session_menu_modal_rows(
+    app: &App,
+    state: SessionMenuState,
+    area: Rect,
+    ascii: bool,
+    theme: Theme,
+) -> Option<(Vec<Line<'static>>, Rect, &'static str, PanelTone)> {
+    let connected = matches!(app.connection, ConnectionState::Connected);
     let (width, height, title, tone) = match state {
         SessionMenuState::Selecting => (68, 13, " SESSION MENU ", PanelTone::Modal),
         SessionMenuState::ConfirmingNewPlaythrough => {
@@ -7109,7 +7321,8 @@ fn render_session_menu(
         height.min(area.height.saturating_sub(2)),
         area,
     );
-    let body = match state {
+    let inner_w = usize::from(menu_area.width.saturating_sub(2));
+    let body: Vec<Line<'static>> = match state {
         SessionMenuState::Selecting => {
             let mut lines = vec![
                 Line::styled(
@@ -7160,7 +7373,7 @@ fn render_session_menu(
             for (action, label, description, enabled) in entries {
                 let selected = app.selected_session_menu_action() == action;
                 let marker = if selected {
-                    if options.ascii {
+                    if ascii {
                         ">"
                     } else {
                         "▸"
@@ -7200,9 +7413,9 @@ fn render_session_menu(
                     Style::default().fg(theme.muted),
                 ));
             }
-            Text::from(lines)
+            lines
         }
-        SessionMenuState::ConfirmingNewPlaythrough => Text::from(vec![
+        SessionMenuState::ConfirmingNewPlaythrough => vec![
             Line::styled(
                 "CREATE A COMPLETELY NEW PLAYTHROUGH?",
                 Style::default().fg(theme.warning).bold(),
@@ -7219,11 +7432,15 @@ fn render_session_menu(
             ),
             Line::from(""),
             Line::styled(
-                "ENTER create new playthrough  //  ESC back",
+                if inner_w < 42 {
+                    "ENTER create  //  ESC back"
+                } else {
+                    "ENTER create new playthrough  //  ESC back"
+                },
                 Style::default().fg(theme.amber).bold(),
             ),
-        ]),
-        SessionMenuState::StartingNewPlaythrough => Text::from(vec![
+        ],
+        SessionMenuState::StartingNewPlaythrough => vec![
             Line::from(""),
             Line::styled(
                 "Generating a new world and committing its initial state...",
@@ -7233,8 +7450,8 @@ fn render_session_menu(
                 "The existing save remains active until the write succeeds.",
                 Style::default().fg(theme.muted),
             ),
-        ]),
-        SessionMenuState::StoppingDaemon => Text::from(vec![
+        ],
+        SessionMenuState::StoppingDaemon => vec![
             Line::from(""),
             Line::styled(
                 "Checkpointing authoritative state and stopping all services...",
@@ -7244,33 +7461,74 @@ fn render_session_menu(
                 "The terminal will close when shutdown is acknowledged.",
                 Style::default().fg(theme.muted),
             ),
-        ]),
+        ],
     };
-    // Size from wrapped rows. If descriptions do not fit, drop them; if even the labels do not
-    // fit, use the compact strip menu so every entry and the key hints stay reachable.
-    let inner_w = usize::from(menu_area.width.saturating_sub(2));
+    // Size from wrapped rows. If they do not fit, drop spacing and secondary text in order
+    // (descriptions for the menu; blank rows, then the atomic-write note for the
+    // confirmation); if the essentials still do not fit, the compact menu is used.
     // Keep the workspace header and two-row footer clear, like the other modals.
     let max_rows = usize::from(area.height.saturating_sub(4)).saturating_sub(2);
-    let mut rows = crate::textwrap::hang_wrap(body.lines, inner_w);
+    let plain = |line: &Line<'_>| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let mut rows = crate::textwrap::hang_wrap(body.clone(), inner_w);
     if rows.len() > max_rows && state == SessionMenuState::Selecting {
         rows.retain(|line| {
-            let plain: String = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            !plain.starts_with("     ") && !plain.is_empty()
+            let text = plain(line);
+            !text.starts_with("     ") && !text.is_empty()
         });
     }
-    if rows.len() > max_rows {
-        render_compact_session_menu(frame, area, app, state, options, theme);
-        return;
+    if rows.len() > max_rows && state == SessionMenuState::ConfirmingNewPlaythrough {
+        rows.retain(|line| !plain(line).is_empty());
+        if rows.len() > max_rows {
+            let note: Vec<Line<'static>> = body
+                .into_iter()
+                .filter(|line| {
+                    let text = plain(line);
+                    !text.is_empty() && !text.starts_with("The save is replaced")
+                })
+                .collect();
+            rows = crate::textwrap::hang_wrap(note, inner_w);
+        }
+    }
+    if rows.len() > max_rows
+        || rows
+            .iter()
+            .any(|row| crate::textwrap::line_width(row) > inner_w)
+    {
+        return None;
     }
     let menu_area = centered_rect(
         menu_area.width,
         u16::try_from(rows.len() + 2).unwrap_or(u16::MAX),
         area,
     );
+    Some((rows, menu_area, title, tone))
+}
+
+fn render_session_menu(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    options: RenderOptions,
+    theme: Theme,
+) {
+    let Some(state) = app.session_menu else {
+        return;
+    };
+    // Compact split-pane session menu (e.g. 38x5 Pilot Strip) so Q is always actionable.
+    let modal = if area.height < 10 {
+        None
+    } else {
+        session_menu_modal_rows(app, state, area, options.ascii, theme)
+    };
+    let Some((rows, menu_area, title, tone)) = modal else {
+        render_compact_session_menu(frame, area, app, state, options, theme);
+        return;
+    };
     frame.render_widget(Clear, menu_area);
     frame.render_widget(
         Paragraph::new(rows)
@@ -7543,7 +7801,11 @@ mod tests {
                 },
             );
             assert!(text.contains("S-1"), "{width}x{height} lost target\n{text}");
-            assert!(text.contains("Si12"), "{width}x{height} lost cost\n{text}");
+            assert!(
+                text.contains("Si12")
+                    || (text.contains("12 conductive") && text.contains("silicate")),
+                "{width}x{height} lost cost\n{text}"
+            );
             assert!(text.contains("ENTER"), "{width}x{height} lost keys\n{text}");
         }
     }
@@ -10023,5 +10285,159 @@ mod tests {
         );
         assert!(menu_38.contains("SESSION MENU"), "{menu_38}");
         assert!(menu_38.contains("CONTINUE"), "{menu_38}");
+    }
+
+    #[test]
+    fn status_badges_shorten_by_whole_words_and_keep_the_countdown() {
+        let badge = "NEXT: RESEARCH FIELD HARDENING 64s (+1)";
+        assert_eq!(fit_badge(badge, 80).as_deref(), Some(badge));
+        assert_eq!(
+            fit_badge(badge, 25).as_deref(),
+            Some("NEXT: RESEARCH 64s (+1)")
+        );
+        assert_eq!(fit_badge(badge, 18).as_deref(), Some("RESEARCH 64s (+1)"));
+        assert_eq!(fit_badge(badge, 10), None);
+        assert_eq!(fit_badge("1 DISCOVERY READY", 10), None);
+        for room in 0..48 {
+            if let Some(fitted) = fit_badge(badge, room) {
+                assert!(fitted.chars().count() <= room, "{room}: {fitted}");
+                assert!(fitted.ends_with("64s (+1)"), "{room}: {fitted}");
+                assert!(
+                    fitted
+                        .split(' ')
+                        .all(|word| badge.split(' ').any(|whole| whole == word)),
+                    "{room}: {fitted}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn new_playthrough_confirmation_is_complete_or_refused_at_every_size() {
+        let mut app = App::default();
+        app.apply_snapshot(status(true), Instant::now());
+        app.connected();
+        app.open_session_menu();
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(38_u16, 5_u16), (32, 4), (24, 3), (23, 12), (20, 8)] {
+            let text = screen(&app, width, height, options);
+            assert!(
+                !text.contains("SESSION ME") || text.contains("SESSION MENU"),
+                "{width}x{height}\n{text}"
+            );
+            assert!(text.contains("ESC"), "{width}x{height}\n{text}");
+        }
+        app.confirm_new_playthrough();
+        for (width, height) in [
+            (80_u16, 24_u16),
+            (48, 14),
+            (44, 14),
+            (38, 5),
+            (32, 4),
+            (24, 3),
+            (23, 12),
+            (20, 8),
+        ] {
+            let text = screen(&app, width, height, options);
+            if session_confirmation_visible(&app, width, height, true) {
+                assert!(
+                    text.contains("REPLACE") || text.contains("replaced"),
+                    "{width}x{height} lost the consequence\n{text}"
+                );
+                assert!(text.contains("ENTER"), "{width}x{height}\n{text}");
+                assert!(text.contains("ESC"), "{width}x{height}\n{text}");
+            } else {
+                assert!(text.contains("ENLARGE"), "{width}x{height}\n{text}");
+                assert!(text.contains("ESC"), "{width}x{height}\n{text}");
+            }
+        }
+        // The bordered dialog stays complete at the minimum full size.
+        assert!(session_confirmation_visible(&app, 44, 14, true));
+        let minimum = screen(&app, 44, 14, options);
+        assert!(minimum.contains("NEW PLAYTHROUGH"), "{minimum}");
+        assert!(minimum.contains("permanently"), "{minimum}");
+        assert!(minimum.contains("ESC back"), "{minimum}");
+    }
+
+    #[test]
+    fn strip_return_summary_shows_every_event_or_stays_pending() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        for (id, summary) in [
+            (1, "Next survey waypoint queued for R-082."),
+            (2, "Extractor returned 3 conductive units from R-118."),
+        ] {
+            planet
+                .unreviewed_activity
+                .push(mind_core::protocol::ActivityRecord {
+                    activity_id: id,
+                    kind: mind_core::protocol::ActivityKind::Survey,
+                    region_id: None,
+                    archive_record_id: None,
+                    summary: summary.into(),
+                });
+        }
+        app.apply_planet(planet, Instant::now());
+        app.clear_active_transmission_locally();
+        app.show_return_summary = true;
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for (width, height) in [(38_u16, 5_u16), (38, 8), (60, 9), (32, 4), (24, 3)] {
+            let text = screen(&app, width, height, options);
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if return_summary_visible(&app, width, height) {
+                assert!(flat.contains("R-082"), "{width}x{height}\n{text}");
+                assert!(flat.contains("R-118"), "{width}x{height}\n{text}");
+                assert!(flat.contains("Enter/Esc"), "{width}x{height}\n{text}");
+            } else {
+                assert!(!flat.contains("Enter/Esc"), "{width}x{height}\n{text}");
+            }
+        }
+        assert!(return_summary_visible(&app, 60, 9));
+        assert!(!return_summary_visible(&app, 38, 5));
+    }
+
+    #[test]
+    fn system_events_page_without_reaching_a_blank_pane() {
+        let mut app = local_field_test_app();
+        app.workspace = Workspace::System;
+        let mut snapshot = app.snapshot.clone().unwrap();
+        snapshot.recent_events = (1..=60)
+            .map(|id| mind_core::protocol::EngineEvent {
+                event_id: 10_000 + id,
+                occurred_at: chrono::Utc::now(),
+                tick: id,
+                kind: if id % 2 == 0 {
+                    EngineEventKind::ActivityReviewed
+                } else {
+                    EngineEventKind::DiagnosticPulse
+                },
+                message: format!("diagnostic pulse {id} completed"),
+            })
+            .collect();
+        app.apply_snapshot(snapshot, Instant::now());
+        let options = RenderOptions {
+            ascii: true,
+            no_color: true,
+        };
+        for _ in 0..12 {
+            let text = screen(&app, 44, 14, options);
+            assert!(
+                text.contains("diagnostic pulse"),
+                "event pane went blank at scroll {}\n{text}",
+                app.event_scroll
+            );
+            app.scroll_up(app.event_page());
+        }
+        assert!(app.event_scroll > 0, "paging never moved");
+        // Home reaches the oldest shown event and still fills the pane.
+        app.scroll_home();
+        let text = screen(&app, 44, 14, options);
+        assert!(text.contains("diagnostic pulse 1 "), "{text}");
     }
 }

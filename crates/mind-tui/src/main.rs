@@ -979,8 +979,10 @@ async fn handle_key(
         KeyCode::Down | KeyCode::Char('j') if app.workspace == Workspace::System => {
             app.scroll_down(1);
         }
-        KeyCode::PageUp if app.workspace == Workspace::System => app.scroll_up(10),
-        KeyCode::PageDown if app.workspace == Workspace::System => app.scroll_down(10),
+        KeyCode::PageUp if app.workspace == Workspace::System => app.scroll_up(app.event_page()),
+        KeyCode::PageDown if app.workspace == Workspace::System => {
+            app.scroll_down(app.event_page());
+        }
         KeyCode::Home if app.workspace == Workspace::System => app.scroll_home(),
         KeyCode::End if app.workspace == Workspace::System => app.scroll_end(),
         KeyCode::Char('f') if app.workspace == Workspace::System => app.toggle_follow(),
@@ -1025,6 +1027,11 @@ async fn handle_session_menu(
         },
         Some(SessionMenuState::ConfirmingNewPlaythrough) => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.return_to_session_menu(),
+            // Never replace progress unseen: the screen asks for room instead.
+            KeyCode::Enter
+                if crossterm::terminal::size().is_ok_and(|(width, height)| {
+                    !ui::session_confirmation_visible(app, width, height, false)
+                }) => {}
             KeyCode::Enter => {
                 app.begin_new_playthrough();
                 commands

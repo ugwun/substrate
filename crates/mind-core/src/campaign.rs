@@ -927,9 +927,12 @@ fn observation_array_lead(
             );
         }
         let deposit = first_deposit_for(input.regions, short);
+        let source = deposit.as_deref().map_or_else(String::new, |id| {
+            format!(" at {}", region_label(input.regions, id))
+        });
         return (
             format!(
-                "Extract {} (X) for the next {noun}, then press O at {label}.",
+                "Extract {}{source} (X) for the next {noun}, then press O at {label}.",
                 parts.join(" / ")
             ),
             "X",
