@@ -1,8 +1,23 @@
 # Substrate
 
-Substrate is an atmospheric terminal game about an awakening machine intelligence exploring an unknown planet, growing its physical reach, and searching for evidence of its origin. Its simulation runs in a headless daemon and exposes local, versioned IPC and MCP interfaces to terminal and AI clients.
+**A story-driven planetary exploration and strategy game for the terminal, written in Rust.**
 
-![Animated Substrate terminal gameplay showing the 200-region globe, a live scout mission, Overview, Research, and System workspaces](docs/assets/substrate-terminal-demo.gif)
+Substrate is an atmospheric terminal game about an awakening machine intelligence exploring an unknown planet, growing its physical reach, and searching for evidence of its origin. It runs in any standard terminal (TrueColor, xterm-256, ANSI-16, ASCII and monochrome, with no image protocols), and its simulation keeps advancing in a headless daemon while you are away (for as long as the daemon runs). The daemon exposes local, versioned IPC and MCP interfaces to terminal and AI clients.
+
+![Substrate's boot sequence and the Coherence opening, where three harmonic bands lock into phase](docs/assets/substrate-opening.gif)
+
+> The story and narrative of Substrate were written completely by a human, Cyril Sadovsky, with no AI.
+
+## Highlights
+
+- **Cinematic terminal visuals:** a late-1980s, EGA-inspired pixel-art TUI with a lit, rotating 200-region globe, terrain vistas, polygon discovery plates and animated probe schematics, rendered from half-block characters so it works in ordinary terminals.
+- **Planet-scale exploration:** survey regions with a failure-free scout, open a 4-by-4 local field in every surveyed region, and choose paths toward resources, power or safer ground.
+- **Real tradeoffs:** risky extraction with three rigs, geology, refining, energy and load shedding, communications chains, footholds, modules, maintenance and research specializations.
+- **Idle-friendly companion play:** a 38x5 Pilot Strip for a corner of your screen, `mind-cli daemon status --line` for status bars, and a Return Summary that shows every event that happened while you were away.
+- **A human-written story:** a five-chapter campaign and five permanent discoveries, ending in a read-only Solar Horizon cliffhanger.
+- **Built for tinkerers:** a Rust workspace with a daemon that owns all state, a JSON-RPC IPC contract and an MCP server for AI clients.
+
+![The rotating globe with a live scout mission, then a region's 4-by-4 local field](docs/assets/substrate-planet.gif)
 
 The repository currently implements a complete multi-hour story-driven planetary campaign: a skippable late-1980s boot / power-on sequence; graphical Coherence onboarding with a live signal oscilloscope; a five-chapter narrative arc with foreground questions, chapter briefings (`c`), and full-screen Discovery Transmissions with signal-acquire lock; a lit, smoothly rotating 200-region globe with O(1) surface caching, knowledge-change radar flashes, and campaign lead beacons (`n`); pixel-art regional terrain horizon dioramas; fog and surveys with direct scout redeployment; variable geological deposits; concurrent survey and extraction probes; a dedicated **Probe Bay** schematic workspace with live rig-morphing blueprints (`g`) and assembly-gantry rebuild progress; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a pixel-art 4-by-4 explorable local field in every surveyed region with grounded outpost cutaways; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment with live waveform telemetry; and an animated Solar Horizon cliffhanger map. All progression remains daemon-owned and is presented through the event-driven Substrate Dark EGA TUI. The system map is the end of this planetary chapter and provides no system-scale actions.
 
@@ -262,3 +277,7 @@ The stdio bridge never starts its own engine. It exits with a stderr diagnostic 
 - `mind-tui`: event-driven daemon-attached session menu, skippable boot sequence, graphical onboarding, and Planet, Overview, Probes, Research, Archive, concluding System Map, and System workspaces
 
 See [`GAME_PLAN.md`](GAME_PLAN.md) for the public game vision and future roadmap. [`AGENTS.md`](AGENTS.md) defines repository conventions.
+
+## Story and credits
+
+The story and narrative of Substrate were written completely by a human, Cyril Sadovsky, with no AI.
