@@ -2474,8 +2474,18 @@ fn render_workspace_header(
                 spans.push(Span::styled(format!(" {key} "), theme.key_style()));
                 spans.push(Span::raw(" "));
             }
-            let badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
+            let mut badge = format!(" MAP {surveyed}/{} ", planet.regions.len());
             let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            // The action (and its target) matters more than the map count: drop the badge
+            // before truncating the instruction.
+            let full_action_len = if override_text.is_empty() {
+                planet.campaign.next_action.chars().count()
+            } else {
+                override_text.chars().count()
+            };
+            if used + full_action_len + badge.len() + 1 > total_width {
+                badge.clear();
+            }
             let max_action = total_width.saturating_sub(used + badge.len() + 1);
             let action = terminal_text(
                 if override_text.is_empty() {
@@ -3084,6 +3094,52 @@ fn render_compact_local_grid(
     frame.render_widget(Paragraph::new(lines).style(theme.canvas_style()), inner);
 }
 
+/// Shrink a sprite row to `width` cells. Multi-span rows (terrain plus a glint or ping) trim
+/// the terrain so the marker survives; single-span sprites trim evenly from both edges so they
+/// stay centered.
+fn fit_art_line(line: &mut Line<'static>, width: usize) {
+    let total = |line: &Line<'_>| -> usize {
+        line.spans
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum()
+    };
+    if width == 0 {
+        line.spans.clear();
+        return;
+    }
+    let mut guard = 0;
+    while total(line) > width && guard < 64 {
+        guard += 1;
+        let marker_last = line.spans.len() > 1
+            && line
+                .spans
+                .last()
+                .is_some_and(|span| span.content.trim().chars().count() <= 2);
+        let target = if marker_last {
+            // Trim the longest non-marker span from its right edge.
+            (0..line.spans.len() - 1)
+                .max_by_key(|&i| line.spans[i].content.chars().count())
+                .unwrap_or(0)
+        } else {
+            (0..line.spans.len())
+                .max_by_key(|&i| line.spans[i].content.chars().count())
+                .unwrap_or(0)
+        };
+        let content: Vec<char> = line.spans[target].content.chars().collect();
+        if content.is_empty() {
+            line.spans.remove(target);
+            continue;
+        }
+        let trimmed: String = if marker_last || guard % 2 == 0 {
+            content[..content.len() - 1].iter().collect()
+        } else {
+            content[1..].iter().collect()
+        };
+        line.spans[target].content = trimmed.into();
+    }
+}
+
 fn render_local_sites(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3204,6 +3260,11 @@ fn render_local_sites(
             // A single text row shows the sector ID rather than decoration.
             if min_tile_inner_rows < 2 {
                 art_lines.clear();
+            }
+            // Fit sprites to narrow tiles without losing markers such as the deposit glint.
+            let art_width = usize::from(cell.width.saturating_sub(2));
+            for line in &mut art_lines {
+                fit_art_line(line, art_width);
             }
             let mut lines = art_lines;
             let sep = if options.ascii { "-" } else { "·" };
@@ -4379,7 +4440,15 @@ fn region_title_line(
     }
     spans.push(Span::styled(sep, Style::default().fg(theme.faint)));
     spans.push(Span::styled(
-        format!("{} HOP", region.hop_distance_from_core),
+        format!(
+            "{} {}",
+            region.hop_distance_from_core,
+            if region.hop_distance_from_core == 1 {
+                "HOP"
+            } else {
+                "HOPS"
+            }
+        ),
         Style::default().fg(if region.within_scout_range || region.core {
             theme.text
         } else {
@@ -5414,6 +5483,20 @@ fn render_workspace_footer(
     };
     let keep_badge =
         app.notice.is_none() || base_width + notice_width + badge_width <= status_budget;
+    // Fit the badge to the room left, keeping its trailing countdown when the title shortens.
+    let badge_room = status_budget.saturating_sub(base_width + sep_width);
+    let badge = badge.and_then(|(text, highlight)| {
+        if text.chars().count() <= badge_room {
+            return Some((text, highlight));
+        }
+        let (head, tail) = text.rsplit_once(' ').unwrap_or((text.as_str(), ""));
+        let tail_width = tail.chars().count();
+        if badge_room < tail_width + 8 {
+            return None;
+        }
+        let head = truncate_chars(head, badge_room - tail_width - 1, true);
+        Some((format!("{head} {tail}"), highlight))
+    });
     if let (true, Some((badge, highlight))) = (keep_badge, badge) {
         spans.extend([
             separator(theme),
@@ -5429,12 +5512,16 @@ fn render_workspace_footer(
             ),
         ]);
     }
-    if let Some(notice) = &app.notice {
+    if let Some(notice) = app
+        .notice
+        .as_ref()
+        .filter(|_| status_budget.saturating_sub(spans_width(&spans) + sep_width) >= 8)
+    {
         let room = status_budget.saturating_sub(spans_width(&spans) + sep_width);
         spans.extend([
             separator(theme),
             Span::styled(
-                truncate_chars(notice, room.max(12), true),
+                truncate_chars(notice, room, true),
                 Style::default().fg(theme.text),
             ),
         ]);
@@ -6264,7 +6351,7 @@ fn render_pilot_strip(
                 .active_transmission_record()
                 .map_or("record", |(_, record)| record.title.as_str());
             (
-                format!("NEW RECORD // {title} // waiting for you"),
+                format!("NEW RECORD // {title}"),
                 " enlarge terminal to read",
             )
         };
@@ -6272,6 +6359,14 @@ fn render_pilot_strip(
             truncate_chars(&format!(" {text}"), width, options.ascii),
             Style::default().fg(theme.gold).bold(),
         ));
+        if rows_left >= 3 && app.show_return_summary {
+            if let Some(first) = planet.unreviewed_activity.last() {
+                lines.push(Line::styled(
+                    truncate_chars(&format!(" {}", first.summary), width, options.ascii),
+                    Style::default().fg(theme.text),
+                ));
+            }
+        }
         if rows_left >= 2 {
             lines.push(Line::styled(
                 truncate_chars(hint, width, options.ascii),
@@ -6303,7 +6398,10 @@ fn render_pilot_strip(
         } else {
             " C or Esc close"
         };
-        if overlay.len() > rows_left && rows_left > 0 {
+        // Help always shows its close key; other overlays show it when shortened.
+        if (overlay.len() > rows_left || (app.show_help && overlay.len() == rows_left))
+            && rows_left > 0
+        {
             overlay.truncate(rows_left - 1);
             // Mark the shortened text so truncation is never silent.
             if let Some(last) = overlay.last_mut() {
@@ -6324,41 +6422,60 @@ fn render_pilot_strip(
                 truncate_chars(close_hint, width, options.ascii),
                 Style::default().fg(theme.muted),
             ));
+        } else if overlay.len() < rows_left {
+            overlay.push(Line::styled(
+                truncate_chars(close_hint, width, options.ascii),
+                Style::default().fg(theme.muted),
+            ));
         }
         lines.extend(overlay);
     } else if let Some(confirm) = pilot_confirmation(app, planet) {
-        // Never accept Enter blind: show what is being confirmed, its target and risk.
-        let text = terminal_text(&confirm, options.ascii);
-        let mut confirm_lines = wrap_indented_lines(
-            vec![Span::styled(
-                " CONFIRM ",
-                Style::default().fg(theme.warning).bold(),
-            )],
-            9,
-            &text,
-            9,
-            width.max(20),
-            Style::default().fg(theme.text_strong),
-        );
+        // Never accept Enter blind. The confirmation outranks the header and countdown: drop
+        // the status row, then the header; if it still cannot fit, ask for a larger terminal
+        // (Enter is refused in that case, see `pilot_confirmation_fits`).
+        let height = usize::from(area.height);
+        let mut confirm_lines = pilot_confirmation_rows(&confirm, width, options.ascii, theme);
         let keys = Line::from(vec![
             Span::styled(" ENTER ", theme.key_style()),
             Span::styled(" ok ", Style::default().fg(theme.muted)),
             Span::styled(" ESC ", theme.key_style()),
             Span::styled(" cancel", Style::default().fg(theme.muted)),
         ]);
-        if rows_left >= 2 {
-            confirm_lines.truncate(rows_left - 1);
+        let fits_width = confirm_lines
+            .iter()
+            .map(crate::textwrap::line_width)
+            .max()
+            .unwrap_or(0)
+            <= width;
+        let needed = if fits_width {
+            confirm_lines.len() + 1
+        } else {
+            usize::MAX
+        };
+        if needed <= rows_left {
+            lines.extend(confirm_lines);
+            lines.push(keys);
+        } else if needed < height {
+            lines.truncate(1);
+            lines.extend(confirm_lines);
+            lines.push(keys);
+        } else if needed == height {
+            lines.clear();
             lines.extend(confirm_lines);
             lines.push(keys);
         } else {
-            lines.push(Line::from(vec![
-                Span::styled(" CONFIRM ", Style::default().fg(theme.warning).bold()),
-                Span::styled(
-                    truncate_chars(&text, width.saturating_sub(24), options.ascii),
-                    Style::default().fg(theme.text_strong),
-                ),
-                Span::styled(" ENTER/ESC", Style::default().fg(theme.muted)),
-            ]));
+            lines.clear();
+            confirm_lines.truncate(height.saturating_sub(1));
+            lines.push(Line::styled(
+                truncate_chars(" ENLARGE TO READ THIS CONFIRMATION", width, options.ascii),
+                Style::default().fg(theme.warning).bold(),
+            ));
+            if height >= 2 {
+                lines.push(Line::styled(
+                    truncate_chars(" ESC cancel", width, options.ascii),
+                    Style::default().fg(theme.muted),
+                ));
+            }
         }
     } else if area.height >= 4 {
         let mut next_lines = wrap_indented_lines(
@@ -6505,6 +6622,45 @@ fn pilot_confirmation(app: &App, planet: &PlanetSnapshot) -> Option<String> {
         ),
         _ => "selected operation".to_owned(),
     })
+}
+
+/// Wrapped "CONFIRM <action, target, risk or cost>" rows for the Pilot Strip.
+fn pilot_confirmation_rows(
+    confirm: &str,
+    width: usize,
+    ascii: bool,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    wrap_indented_lines(
+        vec![Span::styled(
+            " CONFIRM ",
+            Style::default().fg(theme.warning).bold(),
+        )],
+        9,
+        &terminal_text(confirm, ascii),
+        9,
+        width.max(20),
+        Style::default().fg(theme.text_strong),
+    )
+}
+
+/// Whether a pending confirmation can be shown in full (summary plus keys) in a strip of this
+/// size. Input handling refuses Enter when it cannot, so nothing is ever confirmed unseen.
+#[must_use]
+pub fn pilot_confirmation_fits(app: &App, width: u16, height: u16, ascii: bool) -> bool {
+    let Some(planet) = app.planet.as_ref() else {
+        return true;
+    };
+    let Some(confirm) = pilot_confirmation(app, planet) else {
+        return true;
+    };
+    let rows = pilot_confirmation_rows(&confirm, usize::from(width), ascii, Theme::new(true));
+    let widest = rows
+        .iter()
+        .map(crate::textwrap::line_width)
+        .max()
+        .unwrap_or(0);
+    rows.len() < usize::from(height) && widest <= usize::from(width)
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, options: RenderOptions, theme: Theme) {
@@ -7274,6 +7430,43 @@ mod tests {
             assert!(text.contains("S-1"), "{width}x{height} lost target\n{text}");
             assert!(text.contains("Si12"), "{width}x{height} lost cost\n{text}");
             assert!(text.contains("ENTER"), "{width}x{height} lost keys\n{text}");
+        }
+    }
+
+    #[test]
+    fn strip_confirmation_shows_everything_or_refuses() {
+        let mut app = local_field_test_app();
+        let mut planet = app.planet.clone().unwrap();
+        let site_id = planet.network.subregions[0].id.clone();
+        planet.network.subregions[0].deposit = Some(DepositSnapshot {
+            resource: ResourceKind::Conductive,
+            remaining: 12,
+            risk: RiskLevel::Moderate,
+        });
+        let region_id = planet.network.subregions[0].region_id.clone();
+        app.apply_planet(planet, Instant::now());
+        app.show_return_summary = false;
+        app.clear_active_transmission_locally();
+        app.workspace = Workspace::Planet;
+        app.local_view = true;
+        app.pending_action = Some(ContextAction::ExtractSubregion {
+            region_id,
+            subregion_id: site_id,
+        });
+        for (width, height) in [(38_u16, 5_u16), (32, 4), (24, 3), (30, 8)] {
+            let options = RenderOptions {
+                ascii: true,
+                no_color: true,
+            };
+            let text = screen(&app, width, height, options);
+            if pilot_confirmation_fits(&app, width, height, true) {
+                assert!(text.contains("S-1"), "{width}x{height}\n{text}");
+                assert!(text.contains("15%"), "{width}x{height}\n{text}");
+                assert!(text.contains("ENTER"), "{width}x{height}\n{text}");
+            } else {
+                assert!(text.contains("ENLARGE"), "{width}x{height}\n{text}");
+                assert!(!text.contains("ENTER"), "{width}x{height}\n{text}");
+            }
         }
     }
 

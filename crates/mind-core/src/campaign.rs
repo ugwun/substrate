@@ -744,10 +744,26 @@ pub(crate) fn resolve_plurals(text: &str) -> String {
 /// suggested key actually restores service.
 fn node_recovery(input: &CampaignInput<'_>, region_id: &str) -> (String, &'static str) {
     let label = region_label(input.regions, region_id);
+    // Match the node the daemon selected, including one still running on reserve after its
+    // power or communications module was suspended, so the precise restore key shows at once.
+    let suspended_link = |base: &BaseSnapshot| {
+        base.modules.iter().any(|module| {
+            !module.enabled
+                && matches!(
+                    module.kind,
+                    BaseModuleKind::PowerArray | BaseModuleKind::Communications
+                )
+        })
+    };
     let Some(base) = input
-        .bases
-        .iter()
-        .find(|base| base.region_id == region_id && (!base.connected || base.integrity <= 20))
+        .offline_base_subregion_id
+        .and_then(|site| input.bases.iter().find(|base| base.subregion_id == site))
+        .or_else(|| {
+            input.bases.iter().find(|base| {
+                base.region_id == region_id
+                    && (suspended_link(base) || !base.connected || base.integrity <= 20)
+            })
+        })
     else {
         return (
             format!("Stabilize node at {label}: open its local field (V) and restore its modules."),

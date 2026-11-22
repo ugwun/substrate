@@ -414,10 +414,10 @@ fn format_status_line(status: &StatusSnapshot, planet: Option<&PlanetSnapshot>) 
     active_ops.sort_by_key(|(ms, _)| *ms);
 
     let activity = if !planet.archive.unpresented_record_ids.is_empty() {
-        format!(
-            "{} DISCOVERY READY",
-            planet.archive.unpresented_record_ids.len()
-        )
+        match planet.archive.unpresented_record_ids.len() {
+            1 => "1 DISCOVERY READY".to_owned(),
+            count => format!("{count} DISCOVERIES READY"),
+        }
     } else if let Some((_, first)) = active_ops.first() {
         if active_ops.len() > 1 {
             format!("{first} (+{})", active_ops.len() - 1)

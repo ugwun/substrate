@@ -519,6 +519,16 @@ async fn handle_key(
             }
         }
         KeyCode::Esc if app.pending_action.is_some() => app.cancel_confirmation_action(),
+        KeyCode::Enter
+            if app.pending_action.is_some()
+                && crossterm::terminal::size().is_ok_and(|(width, height)| {
+                    (width < 44 || height < 14)
+                        && !ui::pilot_confirmation_fits(app, width, height, false)
+                }) =>
+        {
+            // The strip cannot show the full confirmation: refuse rather than confirm unseen.
+            app.notice = Some("ENLARGE THE TERMINAL TO CONFIRM".into());
+        }
         KeyCode::Enter if app.pending_action.is_some() => match app.pending_action.clone() {
             Some(ContextAction::Extract(region_id)) => {
                 commands

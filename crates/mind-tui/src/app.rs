@@ -1596,10 +1596,10 @@ impl App {
         let planet = self.planet.as_ref()?;
         if !planet.archive.unpresented_record_ids.is_empty() {
             return Some((
-                format!(
-                    "{} DISCOVERY READY",
-                    planet.archive.unpresented_record_ids.len()
-                ),
+                match planet.archive.unpresented_record_ids.len() {
+                    1 => "1 DISCOVERY READY".to_owned(),
+                    count => format!("{count} DISCOVERIES READY"),
+                },
                 true,
             ));
         }
