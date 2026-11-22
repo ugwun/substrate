@@ -522,11 +522,10 @@ async fn handle_key(
         KeyCode::Enter
             if app.pending_action.is_some()
                 && crossterm::terminal::size().is_ok_and(|(width, height)| {
-                    (width < 44 || height < 14)
-                        && !ui::pilot_confirmation_fits(app, width, height, false)
+                    !ui::confirmation_visible(app, width, height, false)
                 }) =>
         {
-            // The strip cannot show the full confirmation: refuse rather than confirm unseen.
+            // The confirmation is not fully on screen: refuse rather than confirm unseen.
             app.notice = Some("ENLARGE THE TERMINAL TO CONFIRM".into());
         }
         KeyCode::Enter if app.pending_action.is_some() => match app.pending_action.clone() {

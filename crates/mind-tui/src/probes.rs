@@ -119,6 +119,40 @@ fn render_blueprint_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width < 12 || inner.height < 6 {
+        // Too short for the schematic: name the probe, its state and assignment instead.
+        let (name, state, place) = if selected_extractor {
+            (
+                planet.extractor.designation.clone(),
+                format!("{:?}", planet.extractor.state).to_uppercase(),
+                planet.active_extraction.as_ref().map_or_else(
+                    || region_name(planet, &planet.core_region_id),
+                    |mission| region_name(planet, &mission.target_region_id),
+                ),
+            )
+        } else {
+            (
+                planet.scout.designation.clone(),
+                planet.active_mission.as_ref().map_or_else(
+                    || "READY".to_owned(),
+                    |mission| format!("{:?}", mission.phase).to_uppercase(),
+                ),
+                planet.active_mission.as_ref().map_or_else(
+                    || region_name(planet, &planet.scout.region_id),
+                    |mission| region_name(planet, &mission.target_region_id),
+                ),
+            )
+        };
+        let width = usize::from(inner.width);
+        let fit = |text: String| -> String { text.chars().take(width).collect() };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(fit(name), Style::default().fg(theme.cyan_bright).bold()),
+                Line::styled(fit(state), Style::default().fg(theme.amber)),
+                Line::styled(fit(place), Style::default().fg(theme.text)),
+            ])
+            .style(theme.panel_style()),
+            inner,
+        );
         return;
     }
 

@@ -1925,16 +1925,43 @@ fn render_archive(
             }
         }
         let detail = Text::from(detail_lines);
+        // Pre-wrap the record list and scroll it so the selected record is always visible,
+        // even when only one or two list rows fit.
+        let list_rows =
+            crate::textwrap::hang_wrap(list.lines, usize::from(panels[0].width.saturating_sub(2)));
+        let selected_row = list_rows
+            .iter()
+            .position(|line| {
+                line.spans
+                    .first()
+                    .is_some_and(|span| span.content.starts_with('>'))
+            })
+            .unwrap_or(0);
+        let list_height = usize::from(panels[0].height.saturating_sub(2));
+        let list_scroll = selection_scroll(
+            list_rows.len(),
+            list_height,
+            Some((selected_row, selected_row + 1)),
+        );
+        let more_records = list_rows.len() > list_height;
+        let list_title = match (more_records, options.ascii) {
+            (false, _) => " PERMANENT ARCHIVE ".to_owned(),
+            (true, true) => format!(
+                " ARCHIVE {}/{} ",
+                selected + 1,
+                planet.archive.records.len()
+            ),
+            (true, false) => format!(
+                " ARCHIVE {}/{} ↕ ",
+                selected + 1,
+                planet.archive.records.len()
+            ),
+        };
         frame.render_widget(
-            Paragraph::new(list)
-                .wrap(Wrap { trim: false })
+            Paragraph::new(list_rows)
+                .scroll((u16::try_from(list_scroll).unwrap_or(u16::MAX), 0))
                 .style(theme.panel_style())
-                .block(panel(
-                    " PERMANENT ARCHIVE ",
-                    options,
-                    theme,
-                    PanelTone::Focused,
-                )),
+                .block(panel(&list_title, options, theme, PanelTone::Focused)),
             panels[0],
         );
         render_inspector_text(
@@ -6644,6 +6671,21 @@ fn pilot_confirmation_rows(
     )
 }
 
+/// Whether a pending confirmation is fully visible at this terminal size, using the same
+/// thresholds as `render`: the full interface always shows its compact card, the Pilot Strip
+/// shows it only when it fits, and the resize screen never shows it. Input refuses Enter
+/// whenever this is false, so rendering and input can never disagree.
+#[must_use]
+pub fn confirmation_visible(app: &App, width: u16, height: u16, ascii: bool) -> bool {
+    if width >= 44 && height >= 14 {
+        return true;
+    }
+    if width >= 24 && height >= 3 && app.planet.is_some() && !app.onboarding_pending() {
+        return pilot_confirmation_fits(app, width, height, ascii);
+    }
+    false
+}
+
 /// Whether a pending confirmation can be shown in full (summary plus keys) in a strip of this
 /// size. Input handling refuses Enter when it cannot, so nothing is ever confirmed unseen.
 #[must_use]
@@ -7467,7 +7509,30 @@ mod tests {
                 assert!(text.contains("ENLARGE"), "{width}x{height}\n{text}");
                 assert!(!text.contains("ENTER"), "{width}x{height}\n{text}");
             }
+            assert_eq!(
+                confirmation_visible(&app, width, height, true),
+                pilot_confirmation_fits(&app, width, height, true),
+                "{width}x{height}"
+            );
         }
+        // Below the strip threshold only the resize screen renders: never confirmable.
+        for (width, height) in [(23_u16, 12_u16), (20, 3), (12, 2)] {
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            assert!(
+                !confirmation_visible(&app, width, height, true),
+                "{width}x{height}"
+            );
+            assert!(!text.contains("ENTER"), "{width}x{height}\n{text}");
+        }
+        assert!(confirmation_visible(&app, 80, 24, true));
     }
 
     #[test]

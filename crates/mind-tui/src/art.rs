@@ -1093,8 +1093,28 @@ pub fn render_system_cliffhanger_panel(
             ),
         ]
     };
-    // Pre-wrap so indented lines keep their indent on continuation rows.
-    let lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
+    // Pre-wrap so indented lines keep their indent on continuation rows, then fit by wrapped
+    // row count: drop spacer rows first, then keep the opening rows and mark the rest.
+    let mut lines = crate::textwrap::hang_wrap(lines, usize::from(area.width.saturating_sub(2)));
+    let inner_h = usize::from(area.height.saturating_sub(2));
+    if lines.len() > inner_h {
+        lines.retain(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        });
+    }
+    if lines.len() > inner_h && inner_h >= 2 {
+        lines.truncate(inner_h - 1);
+        lines.push(Line::styled(
+            if options.ascii {
+                "... larger terminal shows more"
+            } else {
+                "… larger terminal shows more"
+            },
+            Style::default().fg(theme.muted),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.raised_style())

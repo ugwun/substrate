@@ -1476,6 +1476,9 @@ impl App {
         if self.pending_action.as_ref() == Some(&action) {
             true
         } else {
+            // A stale notice (for example an earlier "unavailable" message) must not linger
+            // beside a fresh confirmation.
+            self.notice = None;
             self.pending_action = Some(action);
             false
         }
@@ -1858,13 +1861,14 @@ impl App {
         // connected node needing an Observatory/Lab, or a Detected frontier sector needing [S]).
         // When the campaign lead points at another region, or at a regional deposit (X acts
         // from the globe), leave the local field and focus the lead region.
-        let lead_is_here = self.planet.as_ref().is_none_or(|planet| {
+        // With no published lead, do not invent one from local frontiers.
+        let lead_is_here = self.planet.as_ref().is_some_and(|planet| {
             planet.campaign.next_action_key.as_deref() != Some("X")
                 && planet
                     .campaign
                     .lead_region_id
                     .as_deref()
-                    .is_none_or(|lead| Some(lead) == self.selected_region_id.as_deref())
+                    .is_some_and(|lead| Some(lead) == self.selected_region_id.as_deref())
         });
         if self.workspace == Workspace::Planet && self.local_view && lead_is_here {
             if let Some((slot, label)) = self.best_local_lead_slot() {
