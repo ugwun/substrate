@@ -654,28 +654,6 @@ fn draw_region_markers(
         );
     }
 
-    for flash_id in flash_region_ids {
-        if let Some(region) = find_region(planet, flash_id) {
-            place_marker(
-                cells,
-                planet,
-                region,
-                if (options.phase * 8.0).floor() as i64 % 2 == 0 {
-                    "◈"
-                } else {
-                    "◎"
-                },
-                "*",
-                options.theme.gold,
-                true,
-                options,
-                center_x,
-                center_y,
-                radius,
-            );
-        }
-    }
-
     if let Some(core) = planet.regions.iter().find(|region| region.core) {
         place_marker(
             cells,
@@ -778,6 +756,31 @@ fn draw_region_markers(
             radius,
         );
     }
+    // Knowledge-change flashes sit above core/relay/target/scout markers.
+    for flash_id in flash_region_ids {
+        if let Some(region) = find_region(planet, flash_id) {
+            place_marker(
+                cells,
+                planet,
+                region,
+                if (options.phase * 8.0).floor() as i64 % 2 == 0 {
+                    "◈"
+                } else {
+                    "◎"
+                },
+                "*",
+                options.theme.gold,
+                // Draw after the other markers so none overwrites its label; when another
+                // region is selected, show the glyph only so the two labels never collide.
+                selected.is_none_or(|selected| selected.id == region.id),
+                options,
+                center_x,
+                center_y,
+                radius,
+            );
+        }
+    }
+
     if let Some(selected) = selected {
         place_marker(
             cells,

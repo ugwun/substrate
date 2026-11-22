@@ -123,7 +123,8 @@ fn chapter_one(input: &CampaignInput<'_>) -> CampaignSnapshot {
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
             format!("Focused survey resolving ({local_progress}). Monitor or let it finish in background."),
-            Some("V".into()),
+            // A waiting step has no key that helps; show none rather than an inert one.
+            None,
             Some(input.scout_region_id.to_owned()),
         )
     } else if input.scout_state == ScoutState::Holding {
@@ -525,7 +526,7 @@ fn chapter_three(input: &CampaignInput<'_>) -> CampaignSnapshot {
     let (next_action, next_action_key, lead_region_id) = if input.active_site_survey {
         (
             "Focused comparative survey is resolving. You can manage nodes or research concurrently.".into(),
-            Some("V".into()),
+            None,
             Some(input.scout_region_id.to_owned()),
         )
     } else if input.scout_state == ScoutState::Holding
@@ -658,7 +659,7 @@ fn chapter_four(input: &CampaignInput<'_>) -> CampaignSnapshot {
             lead_kind = Some(CampaignLeadKind::Node);
             lead_subregion_id = site;
         }
-        (text, Some(key.into()), region)
+        (text, (!key.is_empty()).then(|| key.into()), region)
     } else {
         (
             "Keep the laboratory and both observation arrays powered and connected simultaneously."
@@ -904,7 +905,7 @@ fn observation_array_lead(
                     "Need {} more for the next {noun}; extract (X) once the extractor is ready.",
                     parts.join(" / ")
                 ),
-                "TAB",
+                "",
                 None,
                 None,
             );

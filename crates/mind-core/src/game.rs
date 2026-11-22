@@ -737,10 +737,30 @@ impl GameState {
                         && site.knowledge == SubregionKnowledge::Observed
                 })
             });
+            // Point recovery at the cause: a node whose own power or communications module is
+            // suspended can take other nodes offline, so it outranks merely disconnected ones.
+            let has_suspended_link = |base: &crate::protocol::BaseSnapshot| {
+                base.modules.iter().any(|module| {
+                    !module.enabled
+                        && matches!(
+                            module.kind,
+                            BaseModuleKind::PowerArray | BaseModuleKind::Communications
+                        )
+                })
+            };
             let offline_base = network
                 .bases
                 .iter()
-                .find(|base| !base.connected || base.integrity <= 20);
+                .find(|base| {
+                    has_suspended_link(base)
+                        && (!base.connected
+                            || !base
+                                .modules
+                                .iter()
+                                .any(|m| m.kind == BaseModuleKind::PowerArray && m.active))
+                })
+                .or_else(|| network.bases.iter().find(|base| base.integrity <= 20))
+                .or_else(|| network.bases.iter().find(|base| !base.connected));
             let offline_base_region_id = offline_base.map(|base| base.region_id.as_str());
             let offline_base_subregion_id = offline_base.map(|base| base.subregion_id.as_str());
             let campaign = crate::campaign::derive_campaign(&crate::campaign::CampaignInput {

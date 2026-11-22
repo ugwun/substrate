@@ -750,10 +750,11 @@ fn draw_discovery_004_stable_weighting(buf: &mut PixelBuffer, t: f32, r: f32) {
         ],
         true,
     );
+    // Stars stay above the tallest device so none reads as part of one.
     buf.draw_starfield(
         47,
         (buf.width / 3).max(12),
-        buf.height / 2,
+        (buf.height * 26 / 100).max(2),
         t,
         Rgb(42, 78, 96),
         Rgb(150, 212, 222),

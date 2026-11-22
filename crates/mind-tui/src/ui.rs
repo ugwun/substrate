@@ -102,9 +102,7 @@ fn dim_color_toward_canvas(
 
 /// Dim every cell in `area` behind a centered modal smoothly (no stripes, no competing text fragments).
 fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme, ascii: bool) {
-    if theme.no_color() {
-        return;
-    }
+    let mono = theme.no_color();
     let buf = frame.buffer_mut();
     let footer_start = area.y.saturating_add(area.height.saturating_sub(2));
     let x_end = area.x.saturating_add(area.width);
@@ -131,10 +129,22 @@ fn dim_backdrop(frame: &mut Frame<'_>, area: Rect, theme: Theme, ascii: bool) {
                 && (matches!(sym, "|" | "+")
                     || (matches!(sym, "-" | "=") && (left_rule || right_rule))));
             let cell = &mut buf[(x, y)];
-            if is_pixel_block {
+            let rgb_tier = matches!(theme.canvas, ratatui::style::Color::Rgb(..));
+            if mono {
+                // Monochrome: keep borders and footer, blank everything else so no half-words
+                // flank the modal.
+                if !(is_border || in_footer) {
+                    cell.set_symbol(" ");
+                    cell.set_style(Style::default());
+                }
+            } else if is_pixel_block && rgb_tier {
                 let fg = dim_color_toward_canvas(cell.fg, theme.canvas, 0.70);
                 let bg = dim_color_toward_canvas(cell.bg, theme.canvas, 0.70);
                 cell.set_style(Style::default().fg(fg).bg(bg));
+            } else if is_pixel_block {
+                // Indexed tiers cannot blend; a flat canvas avoids a two-tone mosaic.
+                cell.set_symbol(" ");
+                cell.set_style(Style::default().fg(theme.canvas).bg(theme.canvas));
             } else if is_border || in_footer {
                 let fg = dim_color_toward_canvas(cell.fg, theme.canvas, 0.55);
                 cell.set_style(Style::default().fg(fg).bg(theme.canvas));
@@ -1357,37 +1367,50 @@ fn render_research(
                 "LOCKED"
             };
             let entry_start = lines.len();
-            lines.extend(crate::textwrap::hang_wrap(
-                vec![Line::from(vec![
-                    Span::styled(
-                        format!("{marker} {:<22}", option.title),
-                        Style::default().fg(theme.text_strong),
-                    ),
-                    Span::styled(
-                        format!(" {state:<9}"),
-                        Style::default()
-                            .fg(if is_active {
-                                theme.cyan_bright
-                            } else if option.completed {
-                                theme.success
-                            } else if option.available {
-                                theme.amber
-                            } else {
-                                theme.muted
-                            })
-                            .add_modifier(if is_active {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ),
-                    Span::styled(
-                        format!(" {} analysis", option.analysis_cost),
-                        Style::default().fg(theme.muted),
-                    ),
-                ])],
-                wrap_width,
-            ));
+            let mut direction_spans = vec![
+                Span::styled(
+                    format!("{marker} {:<22}", option.title),
+                    Style::default().fg(theme.text_strong),
+                ),
+                Span::styled(
+                    format!(" {state:<9}"),
+                    Style::default()
+                        .fg(if is_active {
+                            theme.cyan_bright
+                        } else if option.completed {
+                            theme.success
+                        } else if option.available {
+                            theme.amber
+                        } else {
+                            theme.muted
+                        })
+                        .add_modifier(if is_active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ];
+            let cost = Span::styled(
+                format!(" {} analysis", option.analysis_cost),
+                Style::default().fg(theme.muted),
+            );
+            let row_width: usize = direction_spans
+                .iter()
+                .chain(std::iter::once(&cost))
+                .map(|span| span.content.chars().count())
+                .sum();
+            if row_width <= wrap_width {
+                direction_spans.push(cost);
+                lines.push(Line::from(direction_spans));
+            } else {
+                // Narrow panes: keep the cost together on its own indented row.
+                lines.extend(crate::textwrap::hang_wrap(
+                    vec![Line::from(direction_spans)],
+                    wrap_width,
+                ));
+                lines.push(Line::from(vec![Span::raw("   "), cost]));
+            }
             lines.extend(wrap_indented_lines(
                 vec![Span::raw("    ")],
                 4,
@@ -1421,29 +1444,43 @@ fn render_research(
                 "LOCKED"
             };
             let entry_start = lines.len();
-            lines.extend(wrap_indented_lines(
-                vec![
-                    Span::styled(
-                        format!("{marker} {:<16}", profile.title),
-                        Style::default().fg(theme.text),
-                    ),
-                    Span::styled(
-                        format!(" {state:<9} "),
-                        Style::default().fg(if profile.active {
-                            theme.success
-                        } else if profile.unlocked {
-                            theme.cyan
-                        } else {
-                            theme.muted
-                        }),
-                    ),
-                ],
-                29,
-                &profile.summary,
-                29,
-                wrap_width,
-                Style::default().fg(theme.muted),
-            ));
+            let profile_prefix = vec![
+                Span::styled(
+                    format!("{marker} {:<16}", profile.title),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    format!(" {state:<9} "),
+                    Style::default().fg(if profile.active {
+                        theme.success
+                    } else if profile.unlocked {
+                        theme.cyan
+                    } else {
+                        theme.muted
+                    }),
+                ),
+            ];
+            if wrap_width < 60 {
+                // Narrow panes: title and state on one row, the summary on its own rows below.
+                lines.push(Line::from(profile_prefix));
+                lines.extend(wrap_indented_lines(
+                    vec![Span::raw("    ")],
+                    4,
+                    &profile.summary,
+                    4,
+                    wrap_width,
+                    Style::default().fg(theme.muted),
+                ));
+            } else {
+                lines.extend(wrap_indented_lines(
+                    profile_prefix,
+                    29,
+                    &profile.summary,
+                    29,
+                    wrap_width,
+                    Style::default().fg(theme.muted),
+                ));
+            }
             if offset + index == app.research_selection {
                 selected_rows = Some((entry_start, lines.len()));
             }
@@ -1471,7 +1508,14 @@ fn render_research(
     } else {
         inner.height
     });
-    let scroll = selection_scroll(lines.len(), body_height, selected_rows);
+    let last_selected =
+        app.research_selection + 1 >= research.options.len() + research.profiles.len();
+    // The last entry scrolls to the very end so its trailing explanation is always reachable.
+    let scroll = if last_selected && selected_rows.is_some() {
+        lines.len().saturating_sub(body_height)
+    } else {
+        selection_scroll(lines.len(), body_height, selected_rows)
+    };
     let more_below = scroll + body_height < lines.len();
     let block = if scroll > 0 || more_below {
         panel(
@@ -2124,16 +2168,6 @@ fn render_return_summary(
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("CURRENT  ", Style::default().fg(theme.amber).bold()),
-        Span::styled(
-            format!(
-                "{} // {}",
-                planet.objective.title, planet.objective.guidance
-            ),
-            Style::default().fg(theme.text),
-        ),
-    ]));
-    lines.push(Line::from(vec![
         Span::styled("NEXT  ", Style::default().fg(theme.amber).bold()),
         Span::styled(
             terminal_text(&planet.campaign.next_action, options.ascii),
@@ -2201,7 +2235,7 @@ fn render_return_summary(
                 .into_iter()
                 .take(quote_rows.saturating_sub(1)),
         );
-        if quote_rows > 0 {
+        if quote_rows > 0 || !archived_evidence.is_empty() {
             body.push(Line::styled(
                 if options.ascii {
                     "  ... full record in the queued transmission"
@@ -3610,8 +3644,23 @@ fn render_inspector_text(
                 inner_width,
             ));
             compact.push(keys.clone());
+            if compact.len() > inner_height && inner_height >= 2 {
+                // Drop the heading and wrap "CONFIRM summary" across every row above the keys,
+                // so the target and the amount at stake stay readable.
+                let mut wrapped = crate::textwrap::hang_wrap(
+                    vec![Line::from(vec![
+                        Span::styled("CONFIRM ", Style::default().fg(theme.warning).bold()),
+                        Span::styled(summary.clone(), Style::default().fg(theme.text_strong)),
+                    ])],
+                    inner_width,
+                );
+                if wrapped.len() < inner_height {
+                    wrapped.push(keys.clone());
+                    compact = wrapped;
+                }
+            }
             if compact.len() > inner_height {
-                // Drop the heading; keep the summary (shortened if needed) and the keys.
+                // Last resort: one shortened summary row plus the keys.
                 compact = vec![
                     Line::from(vec![
                         Span::styled("CONFIRM ", Style::default().fg(theme.warning).bold()),
@@ -3708,18 +3757,18 @@ fn local_confirmation(
         ),
         ContextAction::EstablishBase(_) => (
             "CONFIRM FOOTHOLD",
-            "Consume S 10 / C 6 / Si 4. Site energy and hazard shape every later module.".into(),
+            "Consume S10 C6 Si4. Site energy and hazard shape every later module.".into(),
         ),
         ContextAction::MaintainBase(_) => (
             "CONFIRM MAINTENANCE",
-            "Consume S 4 / C 2. A 60-second cycle restores 35% node integrity.".into(),
+            "Consume S4 C2. A 60-second cycle restores 35% node integrity.".into(),
         ),
         ContextAction::ConstructBaseModule { module, .. } => {
             let cost = module.cost();
             (
                 "CONFIRM MODULE",
                 format!(
-                    "Build {} for S {} / C {} / Si {}.",
+                    "Build {} for S{} C{} Si{}.",
                     module_title(*module),
                     cost.structural,
                     cost.conductive,
@@ -3727,6 +3776,13 @@ fn local_confirmation(
                 ),
             )
         }
+        ContextAction::SetBaseModuleEnabled { module, .. } => (
+            "CONFIRM SUSPEND",
+            format!(
+                "Suspend {}. Without it this node may lose power or its link, and nodes beyond it can go offline.",
+                module_title(*module)
+            ),
+        ),
         _ => (
             "CONFIRM ACTION",
             "Confirm the selected local operation.".into(),
@@ -5921,11 +5977,28 @@ fn render_dashboard(
             ])
         })
         .collect::<Vec<_>>();
-    // Wrap by display rows (hanging under the message) and keep the newest rows visible.
-    let mut lines =
-        crate::textwrap::hang_wrap(lines, usize::from(events_area.width.saturating_sub(2)));
-    let overflow = lines.len().saturating_sub(visible_height);
-    lines.drain(..overflow);
+    // Wrap each event by display rows and keep only whole events, newest last, so the list
+    // never opens on the tail of a wrapped message.
+    let event_width = usize::from(events_area.width.saturating_sub(2));
+    let wrapped: Vec<Vec<Line<'static>>> = lines
+        .into_iter()
+        .map(|line| crate::textwrap::hang_wrap(vec![line], event_width))
+        .collect();
+    let mut kept: Vec<Vec<Line<'static>>> = Vec::new();
+    let mut used = 0usize;
+    for event in wrapped.into_iter().rev() {
+        if used + event.len() > visible_height && !kept.is_empty() {
+            break;
+        }
+        used += event.len();
+        kept.push(event);
+    }
+    let lines: Vec<Line<'static>> = kept
+        .into_iter()
+        .rev()
+        .flatten()
+        .take(visible_height)
+        .collect();
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.panel_style())
@@ -6176,14 +6249,42 @@ fn render_pilot_strip(
     let mut lines = vec![line1, status_line];
     let width = usize::from(area.width);
     let rows_left = usize::from(area.height).saturating_sub(2);
-    if app.show_help || app.show_chapter_card {
+    if app.show_return_summary || app.active_transmission_record().is_some() {
+        // Modals that capture input get their own strip view and prompt.
+        let (text, hint) = if app.show_return_summary {
+            (
+                format!(
+                    "RETURN // {} while away",
+                    crate::textwrap::plural_count(planet.unreviewed_activity.len(), "event")
+                ),
+                " Enter/Esc continue",
+            )
+        } else {
+            let title = app
+                .active_transmission_record()
+                .map_or("record", |(_, record)| record.title.as_str());
+            (
+                format!("NEW RECORD // {title} // waiting for you"),
+                " enlarge terminal to read",
+            )
+        };
+        lines.push(Line::styled(
+            truncate_chars(&format!(" {text}"), width, options.ascii),
+            Style::default().fg(theme.gold).bold(),
+        ));
+        if rows_left >= 2 {
+            lines.push(Line::styled(
+                truncate_chars(hint, width, options.ascii),
+                Style::default().fg(theme.muted),
+            ));
+        }
+    } else if app.show_help || app.show_chapter_card {
         // Overlays that capture input must be visible here too, in strip form.
         let text = if app.show_help {
-            "HELP // N lead · S scout · X extract · V field · A waypoint · Q menu · ? or Esc close"
-                .to_owned()
+            "HELP // N lead · S scout · X extract · V field · A waypoint · Q menu".to_owned()
         } else {
             format!(
-                "CH {} {} // {} // Esc close",
+                "CH {} {} // {}",
                 transmission::roman_chapter(planet.campaign.chapter_number),
                 planet.campaign.title,
                 planet.campaign.question
@@ -6197,10 +6298,30 @@ fn render_pilot_strip(
             width.max(20),
             Style::default().fg(theme.cyan_bright),
         );
+        let close_hint = if app.show_help {
+            " ? or Esc close"
+        } else {
+            " C or Esc close"
+        };
         if overlay.len() > rows_left && rows_left > 0 {
             overlay.truncate(rows_left - 1);
+            // Mark the shortened text so truncation is never silent.
+            if let Some(last) = overlay.last_mut() {
+                let plain: String = last
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                let ellipsis = if options.ascii { "..." } else { "…" };
+                let kept = truncate_chars(plain.trim_end(), width.saturating_sub(3), options.ascii);
+                let kept = kept.trim_end_matches(ellipsis).trim_end().to_owned();
+                *last = Line::styled(
+                    format!("{kept}{ellipsis}"),
+                    Style::default().fg(theme.cyan_bright),
+                );
+            }
             overlay.push(Line::styled(
-                truncate_chars(" ? or Esc close", width, options.ascii),
+                truncate_chars(close_hint, width, options.ascii),
                 Style::default().fg(theme.muted),
             ));
         }
@@ -6373,6 +6494,15 @@ fn pilot_confirmation(app: &App, planet: &PlanetSnapshot) -> Option<String> {
                 cost.silicate
             )
         }
+        ContextAction::SetBaseModuleEnabled {
+            module,
+            subregion_id,
+            ..
+        } => format!(
+            "suspend {} at {} // may isolate nodes",
+            module_title(*module),
+            site_designation(planet, subregion_id)
+        ),
         _ => "selected operation".to_owned(),
     })
 }
@@ -6488,10 +6618,23 @@ fn render_help(
     };
     let title = if two_col {
         " HELP // ? OR ESC TO CLOSE ".to_owned()
-    } else if options.ascii {
-        format!(" HELP // UP/DN SCROLL // ESC CLOSE{cue} ")
     } else {
-        format!(" HELP // ↑↓ SCROLL // ESC CLOSE{cue} ")
+        // Fit the title to the border: drop the scroll hint first, then shorten.
+        let scroll_hint = if options.ascii {
+            " // UP/DN SCROLL"
+        } else {
+            " // ↑↓ SCROLL"
+        };
+        let room = usize::from(width.saturating_sub(4));
+        let full = format!(" HELP{scroll_hint} // ESC CLOSE{cue} ");
+        let short = format!(" HELP // ESC CLOSE{cue} ");
+        if full.chars().count() <= room {
+            full
+        } else if short.chars().count() <= room {
+            short
+        } else {
+            " HELP // ESC ".to_owned()
+        }
     };
     let block = panel(&title, options, theme, PanelTone::Modal);
     let inner = block.inner(help_area);
@@ -6630,7 +6773,9 @@ fn render_compact_session_menu(
     };
     let status_line = match state {
         SessionMenuState::Selecting => format!("MENU > {active_label}"),
-        SessionMenuState::ConfirmingNewPlaythrough => "CONFIRM NEW WORLD? ENTER/ESC".to_owned(),
+        SessionMenuState::ConfirmingNewPlaythrough => {
+            "REPLACE ALL PROGRESS WITH A NEW WORLD? ENTER/ESC".to_owned()
+        }
         SessionMenuState::StartingNewPlaythrough => "CREATING WORLD...".to_owned(),
         SessionMenuState::StoppingDaemon => "STOPPING DAEMON...".to_owned(),
     };
@@ -6793,11 +6938,7 @@ fn render_session_menu(
             ),
             Line::from(""),
             Line::styled(
-                "Current material progress, research, infrastructure, and archived",
-                Style::default().fg(theme.text),
-            ),
-            Line::styled(
-                "observations in this playthrough will be permanently replaced.",
+                "Current material progress, research, infrastructure, and archived observations in this playthrough will be permanently replaced.",
                 Style::default().fg(theme.text),
             ),
             Line::from(""),
@@ -6837,7 +6978,8 @@ fn render_session_menu(
     // Size from wrapped rows. If descriptions do not fit, drop them; if even the labels do not
     // fit, use the compact strip menu so every entry and the key hints stay reachable.
     let inner_w = usize::from(menu_area.width.saturating_sub(2));
-    let max_rows = usize::from(area.height.saturating_sub(2)).saturating_sub(2);
+    // Keep the workspace header and two-row footer clear, like the other modals.
+    let max_rows = usize::from(area.height.saturating_sub(4)).saturating_sub(2);
     let mut rows = crate::textwrap::hang_wrap(body.lines, inner_w);
     if rows.len() > max_rows && state == SessionMenuState::Selecting {
         rows.retain(|line| {
@@ -7108,6 +7250,29 @@ mod tests {
                 text.contains("MODERATE"),
                 "{width}x{height} lost risk\n{text}"
             );
+            assert!(text.contains("15%"), "{width}x{height} lost odds\n{text}");
+            assert!(text.contains("ENTER"), "{width}x{height} lost keys\n{text}");
+        }
+        // A module build must keep its full cost visible too.
+        let site_id = app.planet.as_ref().unwrap().network.subregions[0]
+            .id
+            .clone();
+        app.pending_action = Some(ContextAction::ConstructBaseModule {
+            subregion_id: site_id,
+            module: BaseModuleKind::Observatory,
+        });
+        for (width, height) in [(80_u16, 24_u16), (60, 16), (48, 14), (44, 14)] {
+            let text = screen(
+                &app,
+                width,
+                height,
+                RenderOptions {
+                    ascii: true,
+                    no_color: true,
+                },
+            );
+            assert!(text.contains("S-1"), "{width}x{height} lost target\n{text}");
+            assert!(text.contains("Si12"), "{width}x{height} lost cost\n{text}");
             assert!(text.contains("ENTER"), "{width}x{height} lost keys\n{text}");
         }
     }
@@ -7999,7 +8164,8 @@ mod tests {
         assert!(output.contains("RETURN SUMMARY"));
         assert!(output.contains("Survey completed at R-082"));
         assert!(output.contains("STORES NOW"));
-        assert!(output.contains("CURRENT"));
+        // One instruction only: NEXT, without a competing CURRENT objective line.
+        assert!(!output.contains("CURRENT "));
         assert!(output.contains("NEXT"));
         assert!(output.contains("acknowledge and continue"));
     }

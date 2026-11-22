@@ -389,6 +389,13 @@ async fn handle_key(
             KeyCode::PageDown => {
                 app.scroll_transmission(5);
             }
+            KeyCode::Enter | KeyCode::Esc
+                if crossterm::terminal::size()
+                    .is_ok_and(|(width, height)| width < 44 || height < 14) =>
+            {
+                // Too small to read the record: keep it pending rather than filing it unseen.
+                app.notice = Some("ENLARGE THE TERMINAL TO READ THIS RECORD".into());
+            }
             KeyCode::Enter | KeyCode::Esc => {
                 if let Some(record_id) =
                     app.reveal_or_dismiss_transmission(std::time::Instant::now())
@@ -770,7 +777,17 @@ async fn handle_key(
                 'o' => BaseModuleKind::Observatory,
                 _ => unreachable!(),
             };
-            if let Some(ContextAction::SetBaseModuleEnabled {
+            if let Some(
+                action @ ContextAction::SetBaseModuleEnabled {
+                    enabled: false,
+                    module: BaseModuleKind::PowerArray | BaseModuleKind::Communications,
+                    ..
+                },
+            ) = app.base_module_mode_action(module)
+            {
+                // Suspending power or communications can isolate nodes: confirm first.
+                app.request_confirmation(action);
+            } else if let Some(ContextAction::SetBaseModuleEnabled {
                 subregion_id,
                 module,
                 enabled,
