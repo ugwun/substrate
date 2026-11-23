@@ -21,7 +21,53 @@ Substrate is an atmospheric terminal game about an awakening machine intelligenc
 
 The repository currently implements a complete multi-hour story-driven planetary campaign: a skippable late-1980s boot / power-on sequence; graphical Coherence onboarding with a live signal oscilloscope; a five-chapter narrative arc with foreground questions, chapter briefings (`c`), and full-screen Discovery Transmissions with signal-acquire lock; a lit, smoothly rotating 200-region globe with O(1) surface caching, knowledge-change radar flashes, and campaign lead beacons (`n`); pixel-art regional terrain horizon dioramas; fog and surveys with direct scout redeployment; variable geological deposits; concurrent survey and extraction probes; a dedicated **Probe Bay** schematic workspace with live rig-morphing blueprints (`g`) and assembly-gantry rebuild progress; balanced, cargo, and shielded extraction rigs; permanent extraction loss with guaranteed rebuilding; automatic refining; a range-extending relay; three research specializations; earned automation; a pixel-art 4-by-4 explorable local field in every surveyed region with grounded outpost cutaways; energy, module load shedding, hazards, footholds, environmental wear and maintenance; geographic communications chains; depot-backed construction logistics; five ordered permanent story observations; a powered-laboratory archive experiment with live waveform telemetry; and an animated Solar Horizon cliffhanger map. All progression remains daemon-owned and is presented through the event-driven Substrate Dark EGA TUI. The system map is the end of this planetary chapter and provides no system-scale actions.
 
-## Prerequisites
+## Download and install
+
+Prebuilt binaries for every tagged version are on the [Releases page](https://github.com/ugwun/substrate/releases/latest). Each archive contains the four Substrate programs (`mind-cli`, `mind-daemon`, `mind-tui` and `mind-mcp`), which must stay together in one folder or on your `PATH`.
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 (static, any distribution) | `substrate-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 (static, any distribution) | `substrate-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple silicon | `substrate-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `substrate-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `substrate-x86_64-pc-windows-msvc.zip` |
+
+### Linux and macOS
+
+Set `target` to the name of your platform's archive (without `.tar.gz`), then download, check, install and play:
+
+```sh
+target=x86_64-unknown-linux-musl
+base=https://github.com/ugwun/substrate/releases/latest/download
+curl -fsSLO "$base/substrate-$target.tar.gz"
+curl -fsSLO "$base/substrate-$target.tar.gz.sha256"
+sha256sum -c "substrate-$target.tar.gz.sha256"   # macOS: shasum -a 256 -c ...
+tar -xzf "substrate-$target.tar.gz"
+mkdir -p ~/.local/bin
+cp "substrate-$target"/mind-* ~/.local/bin/
+mind-cli play
+```
+
+If your shell cannot find `mind-cli`, add `~/.local/bin` to your `PATH`, or run `./mind-cli play` from the extracted folder. The macOS binaries are not notarized. Downloading them with `curl` as shown avoids Gatekeeper's quarantine; if you downloaded the archive in a browser, run `xattr -dr com.apple.quarantine substrate-$target` before installing.
+
+### Windows
+
+Download `substrate-x86_64-pc-windows-msvc.zip`, extract it, and run the game from Windows Terminal inside the extracted folder:
+
+```powershell
+.\mind-cli.exe play
+```
+
+Windows Defender SmartScreen may warn about the unsigned executables. Windows builds are compiled and tested in CI, but Linux and macOS are the runtime-verified platforms.
+
+### Upgrading and uninstalling
+
+Before replacing the binaries with a newer release, run `mind-cli daemon stop` so the old daemon saves and exits. Your progress is kept in the platform data directory (for example `~/.local/share/substrate/` on Linux and `~/Library/Application Support/substrate/` on macOS), so deleting the binaries removes the game but not your saves.
+
+## Build from source
+
+### Prerequisites
 
 - Stable Rust with Cargo, rustfmt, and Clippy
 - Linux, macOS, and Windows (CI-verified; Linux and macOS are runtime-verified)
@@ -30,7 +76,7 @@ On macOS, configuration and saves live in `~/Library/Application Support/substra
 
 The checked-in toolchain file installs the required Rust components when using rustup.
 
-## Build and test
+### Build and test
 
 ```sh
 cargo build --workspace
@@ -48,7 +94,13 @@ cargo build --release --workspace
 
 Build the complete workspace before using managed startup so that `mind-cli` can find the adjacent `mind-daemon` executable.
 
+### Publishing a release
+
+Bump `version` in the root `Cargo.toml`, commit, then push a matching tag (for example `git tag v0.1.0 && git push origin v0.1.0`). The `Release` workflow builds every archive listed above and publishes them with a `SHA256SUMS` file as a GitHub Release. Running the workflow manually from the Actions tab builds the same archives as workflow artifacts without publishing.
+
 ## Run
+
+With a release download, run `mind-cli play`. From a source checkout:
 
 ```sh
 cargo build --workspace

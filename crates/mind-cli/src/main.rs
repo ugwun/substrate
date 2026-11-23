@@ -535,11 +535,7 @@ fn reject_incompatible_daemon(error: &anyhow::Error, address: SocketAddr) -> Res
     if let Some(IpcError::IncompatibleProtocol { client, daemon }) =
         error.downcast_ref::<IpcError>()
     {
-        let cli_command = if cfg!(windows) {
-            r".\target\debug\mind-cli.exe"
-        } else {
-            "./target/debug/mind-cli"
-        };
+        let cli_command = cli_invocation();
         bail!(
             "an older mind daemon is running at {address} (daemon protocol {daemon}, client protocol {client}); run `{cli_command} daemon stop`, then retry"
         );
@@ -561,6 +557,21 @@ fn resolve_sibling_binary(environment_key: &str, binary_name: &str) -> Result<Pa
         return Ok(sibling);
     }
     Ok(PathBuf::from(executable_name(binary_name)))
+}
+
+/// Names `mind-cli` the way the player invoked it (for example `./mind-cli`,
+/// `mind-cli` from `PATH`, or `./target/release/mind-cli`), so recovery hints work
+/// for release downloads and source builds alike.
+fn cli_invocation() -> String {
+    env::args_os()
+        .next()
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.file_stem()
+                .is_some_and(|stem| stem == std::ffi::OsStr::new("mind-cli"))
+        })
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| executable_name("mind-cli"))
 }
 
 fn executable_name(name: &str) -> String {

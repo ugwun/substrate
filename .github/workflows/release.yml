@@ -1,0 +1,116 @@
+name: Release
+
+# Pushing a `v*` tag that matches the workspace version builds every platform
+# archive and publishes them, with checksums, as a GitHub Release.
+# Running the workflow manually builds the same archives as downloadable
+# workflow artifacts without publishing a release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Check tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version v${version}"
+            exit 1
+          fi
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          # Unversioned names keep releases/latest/download/<archive> URLs stable.
+          name="substrate-${{ matrix.target }}"
+          exe=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then exe=".exe"; fi
+          mkdir -p "dist/${name}"
+          for bin in mind-cli mind-daemon mind-tui mind-mcp; do
+            cp "target/${{ matrix.target }}/release/${bin}${exe}" "dist/${name}/"
+          done
+          cp README.md LICENSE "dist/${name}/"
+          # The native-architecture binary must start and report its version.
+          if [[ "${{ matrix.target }}" != x86_64-apple-darwin ]]; then
+            "dist/${name}/mind-cli${exe}" --version
+          fi
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            archive="${name}.zip"
+            7z a -tzip "${archive}" "${name}" > /dev/null
+          else
+            archive="${name}.tar.gz"
+            tar -czf "${archive}" "${name}"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
+          echo "ARCHIVE=${archive}" >> "${GITHUB_ENV}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: |
+            dist/${{ env.ARCHIVE }}
+            dist/${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: cd dist && cat *.sha256 > SHA256SUMS && cat SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Substrate ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

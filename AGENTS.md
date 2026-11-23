@@ -70,6 +70,8 @@ Follow the maintenance rules above and each matching repository skill. Use `plan
 ./target/debug/mind-mcp
 ```
 
+Pushing a `v*` tag that matches the workspace `version` runs `.github/workflows/release.yml`, which publishes static Linux (musl x86_64/ARM64), macOS (Apple silicon/Intel) and Windows archives with checksums as a GitHub Release; tag only when the maintainer asks. Each archive must keep all four binaries together because `mind-cli` resolves `mind-daemon` and `mind-tui` beside itself before falling back to `PATH`, so user-facing hints must not assume a `target/` path.
+
 Use `RUST_LOG=debug` for verbose diagnostics. Background logs and `daemon.json` are written beneath the platform-local Substrate data directory. A client may remove runtime metadata only after both the recorded endpoint and configured endpoint fail a valid protocol handshake. Never kill a PID solely because it appears in metadata.
 
 Keep the MCP server current-only until product policy changes: advertise only `2026-07-28`, require stateless request metadata, validate Host and Origin, and keep stdout clean in stdio mode. Every tool must adapt the same engine operation used by IPC clients and be tested through both direct-engine and IPC backends.
