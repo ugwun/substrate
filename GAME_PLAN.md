@@ -322,8 +322,8 @@ without penalty.
 - The attach-only TUI reconnects automatically, marks retained snapshots as stale, and
   never stops the daemon when it detaches. It may request daemon-owned graceful shutdown
   or atomic new-playthrough creation only through explicit session-menu actions.
-- Linux is the current acceptance target while paths and process behavior remain
-  portable enough for later platform validation.
+- Linux and macOS are the current acceptance targets, with Windows checked in CI;
+  paths and process behavior remain portable across all three.
 
 Exact protocol, schema, configuration, and operational details are current
 implementation facts and therefore live in `AGENTS.md`, `README.md`, and the owning

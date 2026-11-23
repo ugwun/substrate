@@ -17,6 +17,8 @@ jobs:
         include:
           - label: Linux
             os: ubuntu-latest
+          - label: macOS
+            os: macos-latest
           - label: Windows
             os: windows-latest
     steps:

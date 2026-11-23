@@ -74,6 +74,6 @@ Use `RUST_LOG=debug` for verbose diagnostics. Background logs and `daemon.json` 
 
 Keep the MCP server current-only until product policy changes: advertise only `2026-07-28`, require stateless request metadata, validate Host and Origin, and keep stdout clean in stdio mode. Every tool must adapt the same engine operation used by IPC clients and be tested through both direct-engine and IPC backends.
 
-Linux is the current acceptance target. Preserve portable paths and `cfg`-gated process behavior so macOS and Windows validation can be added without changing public interfaces.
+Linux and macOS are the current runtime acceptance targets; CI runs the required checks on Linux, macOS, and Windows. Preserve portable paths and `cfg`-gated process behavior (the Unix branch covers macOS) so every platform keeps the same public interfaces.
 
 For TUI changes, exercise pure state transitions and Ratatui `TestBackend` frames before live PTY inspection. Preserve automatic reconnect, stale-state visibility, ASCII/monochrome fallbacks, and terminal restoration on every exit path.

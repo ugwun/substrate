@@ -24,7 +24,9 @@ The repository currently implements a complete multi-hour story-driven planetary
 ## Prerequisites
 
 - Stable Rust with Cargo, rustfmt, and Clippy
-- Linux and Windows (CI-verified; Linux is the primary runtime acceptance target)
+- Linux, macOS, and Windows (CI-verified; Linux and macOS are runtime-verified)
+
+On macOS, configuration and saves live in `~/Library/Application Support/substrate/`. Terminal.app renders the xterm-256 colour tier; terminals that set `COLORTERM=truecolor` (for example iTerm2, Ghostty, WezTerm, or Kitty) get 24-bit colour. Laptop keyboards reach Page Up/Page Down with Fn+↑/↓, and Terminal.app may keep those keys for its own scrollback unless its keyboard settings forward them.
 
 The checked-in toolchain file installs the required Rust components when using rustup.
 

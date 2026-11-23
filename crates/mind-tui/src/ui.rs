@@ -7517,7 +7517,7 @@ fn render_help(
     ];
     let right_col = vec![
         section_line("PLANET GLOBE", theme),
-        key_line("ARROWS / SHIFT", "move / jump 5 sectors", theme),
+        key_line("ARROWS / SHIFT", "move / jump 2 bands or 5 sectors", theme),
         key_line("ENTER", "run primary region action", theme),
         key_line("S / R", "deploy / recall scout", theme),
         key_line("X / B", "extract / build relay", theme),
